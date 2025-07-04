@@ -23,7 +23,7 @@ else ()
 endif ()
 
 # CUDA flags - all on one line for Windows compatibility
-set(CMAKE_CUDA_FLAGS "--use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt --extra-device-vectorization --optimize 3 --allow-unsupported-compiler -maxrregcount=72")
+set(CMAKE_CUDA_FLAGS "--use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt --extra-device-vectorization --optimize 3 --allow-unsupported-compiler -maxrregcount=96")
 set(CMAKE_CUDA_FLAGS_RELEASE "-lineinfo")
 set(CMAKE_CUDA_FLAGS_DEBUG "-G -g")
 
