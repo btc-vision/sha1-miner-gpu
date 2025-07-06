@@ -5,7 +5,6 @@
 #include <cassert>
 #include <chrono>
 #include <sstream>
-#include "sha1_miner_functions.h"
 #include "cxxsha1.hpp"
 #include "sha1_miner.cuh"
 #include <cuda_runtime.h>

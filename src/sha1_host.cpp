@@ -169,7 +169,7 @@ MiningJob create_mining_job(const uint8_t *message, const uint8_t *target_hash, 
 }
 
 // Process results from GPU
-int process_results(const ResultPool &pool, MiningResult *host_results, size_t max_results) {
+size_t process_results(ResultPool &pool, MiningResult *host_results, size_t max_results) {
     if (!g_system) return 0;
 
     // Get result count
@@ -190,7 +190,7 @@ int process_results(const ResultPool &pool, MiningResult *host_results, size_t m
     // Update statistics
     g_system->total_candidates += count;
 
-    return count;
+    return static_cast<size_t>(count);
 }
 
 // Performance monitoring thread
@@ -306,7 +306,9 @@ void run_mining_loop(MiningJob job, uint32_t duration_seconds) {
         launch_mining_kernel(job, pool, config);
 
         // Update counters
-        uint64_t hashes_this_launch = config.blocks * config.threads_per_block * NONCES_PER_THREAD;
+        uint64_t hashes_this_launch = static_cast<uint64_t>(config.blocks) *
+                                      static_cast<uint64_t>(config.threads_per_block) *
+                                      static_cast<uint64_t>(NONCES_PER_THREAD);
         nonce_offset += hashes_this_launch;
         g_system->total_hashes += hashes_this_launch;
 
