@@ -1,10 +1,9 @@
 #!/bin/bash
 
-# Build script for SHA-1 Near-Collision Miner on Linux
+# SHA-1 Near-Collision Miner Build Script
+# Supports both NVIDIA (CUDA) and AMD (HIP/ROCm) GPUs
 
-echo "SHA-1 Near-Collision Miner - Linux Build Script"
-echo "==============================================="
-echo
+set -e  # Exit on error
 
 # Colors for output
 RED='\033[0;31m'
@@ -12,143 +11,270 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Check if CUDA is installed
-if ! command -v nvcc &> /dev/null; then
-    echo -e "${RED}ERROR: nvcc not found. Please install CUDA or add it to PATH${NC}"
-    echo "You can install CUDA from: https://developer.nvidia.com/cuda-downloads"
-    exit 1
-fi
+# Default values
+BUILD_TYPE="Release"
+GPU_BACKEND=""
+CLEAN_BUILD=0
+VERBOSE=0
+JOBS=$(nproc)
 
-# Get CUDA version
-CUDA_VERSION=$(nvcc --version | grep release | awk '{print $6}' | cut -d',' -f1)
-echo -e "Found CUDA version: ${GREEN}${CUDA_VERSION}${NC}"
+# Function to print colored output
+print_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
 
-# Detect GPU architecture
-echo
-echo "Detecting GPU architecture..."
-if command -v nvidia-smi &> /dev/null; then
-    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n1)
-    echo -e "Found GPU: ${GREEN}${GPU_NAME}${NC}"
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
 
-    # Set architectures based on GPU
-    if [[ $GPU_NAME == *"RTX 40"* ]] || [[ $GPU_NAME == *"RTX 4090"* ]] || [[ $GPU_NAME == *"RTX 4080"* ]] || [[ $GPU_NAME == *"RTX 4070"* ]]; then
-        CUDA_ARCHS="86;89"
-        echo "Using Ada Lovelace architecture (sm_89)"
-    elif [[ $GPU_NAME == *"RTX 30"* ]] || [[ $GPU_NAME == *"RTX 3090"* ]] || [[ $GPU_NAME == *"RTX 3080"* ]] || [[ $GPU_NAME == *"RTX 3070"* ]]; then
-        CUDA_ARCHS="86"
-        echo "Using Ampere architecture (sm_86)"
-    elif [[ $GPU_NAME == *"H100"* ]] || [[ $GPU_NAME == *"H200"* ]]; then
-        CUDA_ARCHS="90"
-        echo "Using Hopper architecture (sm_90)"
-    elif [[ $GPU_NAME == *"RTX 50"* ]] || [[ $GPU_NAME == *"RTX 5090"* ]] || [[ $GPU_NAME == *"RTX 5080"* ]]; then
-        CUDA_ARCHS="90;120"
-        echo "Using Blackwell architecture (sm_120)"
-    else
-        CUDA_ARCHS="70;75;80;86;89;90"
-        echo -e "${YELLOW}Using default architectures${NC}"
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+# Function to detect GPU
+detect_gpu() {
+    print_info "Detecting GPU..."
+
+    # Check for NVIDIA GPUs
+    if command -v nvidia-smi &> /dev/null; then
+        if nvidia-smi &> /dev/null; then
+            print_info "NVIDIA GPU detected"
+            GPU_BACKEND="CUDA"
+            return
+        fi
     fi
+
+    # Check for AMD GPUs
+    if command -v rocm-smi &> /dev/null; then
+        if rocm-smi &> /dev/null; then
+            print_info "AMD GPU detected"
+            GPU_BACKEND="HIP"
+            return
+        fi
+    fi
+
+    # Check for Intel GPUs
+    if command -v sycl-ls &> /dev/null; then
+        if sycl-ls | grep -q "GPU"; then
+            print_info "Intel GPU detected"
+            GPU_BACKEND="SYCL"
+            return
+        fi
+    fi
+
+    print_error "No supported GPU detected!"
+    exit 1
+}
+
+# Function to check dependencies
+check_dependencies() {
+    print_info "Checking dependencies..."
+
+    if [ "$GPU_BACKEND" == "CUDA" ]; then
+        if ! command -v nvcc &> /dev/null; then
+            print_error "CUDA toolkit not found. Please install CUDA."
+            exit 1
+        fi
+        print_info "CUDA version: $(nvcc --version | grep release | awk '{print $6}')"
+
+    elif [ "$GPU_BACKEND" == "HIP" ]; then
+        if ! command -v hipcc &> /dev/null; then
+            print_error "HIP/ROCm not found. Please install ROCm."
+            exit 1
+        fi
+        print_info "HIP version: $(hipcc --version | grep HIP | head -1)"
+
+        # Check ROCm environment
+        if [ -z "$ROCM_PATH" ]; then
+            export ROCM_PATH=/opt/rocm
+            print_warning "ROCM_PATH not set, using default: $ROCM_PATH"
+        fi
+    fi
+
+    # Check CMake
+    if ! command -v cmake &> /dev/null; then
+        print_error "CMake not found. Please install CMake >= 3.21"
+        exit 1
+    fi
+
+    cmake_version=$(cmake --version | head -1 | awk '{print $3}')
+    print_info "CMake version: $cmake_version"
+
+    # Check compiler
+    if ! command -v g++ &> /dev/null; then
+        print_error "g++ not found. Please install a C++ compiler."
+        exit 1
+    fi
+
+    print_info "g++ version: $(g++ --version | head -1)"
+}
+
+# Function to print usage
+usage() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+OPTIONS:
+    -h, --help              Show this help message
+    -c, --cuda              Build for NVIDIA GPUs (CUDA)
+    -a, --amd               Build for AMD GPUs (HIP/ROCm)
+    -d, --debug             Build in debug mode
+    -r, --release           Build in release mode (default)
+    --clean                 Clean build directory before building
+    -j, --jobs <N>          Number of parallel build jobs (default: $(nproc))
+    -v, --verbose           Verbose build output
+    --auto                  Auto-detect GPU and build accordingly
+
+EXAMPLES:
+    $0 --auto               # Auto-detect GPU and build
+    $0 --cuda               # Build for NVIDIA GPUs
+    $0 --amd                # Build for AMD GPUs
+    $0 --cuda --debug       # Debug build for NVIDIA
+    $0 --clean --auto       # Clean build with auto-detection
+
+EOF
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -c|--cuda)
+            GPU_BACKEND="CUDA"
+            shift
+            ;;
+        -a|--amd)
+            GPU_BACKEND="HIP"
+            shift
+            ;;
+        -d|--debug)
+            BUILD_TYPE="Debug"
+            shift
+            ;;
+        -r|--release)
+            BUILD_TYPE="Release"
+            shift
+            ;;
+        --clean)
+            CLEAN_BUILD=1
+            shift
+            ;;
+        -j|--jobs)
+            JOBS="$2"
+            shift 2
+            ;;
+        -v|--verbose)
+            VERBOSE=1
+            shift
+            ;;
+        --auto)
+            detect_gpu
+            shift
+            ;;
+        *)
+            print_error "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+# If no GPU backend specified, try to auto-detect
+if [ -z "$GPU_BACKEND" ]; then
+    detect_gpu
+fi
+
+# Check dependencies
+check_dependencies
+
+# Set build directory based on backend
+if [ "$GPU_BACKEND" == "CUDA" ]; then
+    BUILD_DIR="build_cuda"
+    CMAKE_ARGS="-DUSE_HIP=OFF"
+elif [ "$GPU_BACKEND" == "HIP" ]; then
+    BUILD_DIR="build_hip"
+    CMAKE_ARGS="-DUSE_HIP=ON"
 else
-    echo -e "${YELLOW}WARNING: nvidia-smi not found. Using default architectures.${NC}"
-    CUDA_ARCHS="70;75;80;86;89;90"
-fi
-
-# Check for required tools
-echo
-echo "Checking build tools..."
-MISSING_TOOLS=()
-
-if ! command -v cmake &> /dev/null; then
-    MISSING_TOOLS+=("cmake")
-fi
-
-if ! command -v make &> /dev/null && ! command -v ninja &> /dev/null; then
-    MISSING_TOOLS+=("make or ninja")
-fi
-
-if ! command -v g++ &> /dev/null && ! command -v clang++ &> /dev/null; then
-    MISSING_TOOLS+=("g++ or clang++")
-fi
-
-if [ ${#MISSING_TOOLS[@]} -ne 0 ]; then
-    echo -e "${RED}ERROR: Missing required tools: ${MISSING_TOOLS[*]}${NC}"
-    echo
-    echo "Install on Ubuntu/Debian:"
-    echo "  sudo apt-get update"
-    echo "  sudo apt-get install cmake build-essential ninja-build"
-    echo
-    echo "Install on RHEL/CentOS/Fedora:"
-    echo "  sudo dnf install cmake gcc-c++ ninja-build"
-    echo
-    echo "Install on Arch:"
-    echo "  sudo pacman -S cmake base-devel ninja"
+    print_error "Unknown GPU backend: $GPU_BACKEND"
     exit 1
 fi
 
-echo -e "${GREEN}All required tools found${NC}"
+# Add build type
+CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_BUILD_TYPE=$BUILD_TYPE"
+
+# Add verbose flag if requested
+if [ $VERBOSE -eq 1 ]; then
+    CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_VERBOSE_MAKEFILE=ON"
+fi
+
+# Print build configuration
+print_info "Build configuration:"
+print_info "  GPU Backend: $GPU_BACKEND"
+print_info "  Build Type: $BUILD_TYPE"
+print_info "  Build Directory: $BUILD_DIR"
+print_info "  Parallel Jobs: $JOBS"
+
+# Clean build directory if requested
+if [ $CLEAN_BUILD -eq 1 ]; then
+    print_info "Cleaning build directory..."
+    rm -rf "$BUILD_DIR"
+fi
 
 # Create build directory
-BUILD_DIR="build/release"
-mkdir -p $BUILD_DIR
-
-# Determine build system
-if command -v ninja &> /dev/null; then
-    GENERATOR="Ninja"
-    BUILD_COMMAND="ninja"
-    echo -e "Using ${GREEN}Ninja${NC} build system"
-else
-    GENERATOR="Unix Makefiles"
-    BUILD_COMMAND="make -j$(nproc)"
-    echo -e "Using ${GREEN}Make${NC} build system"
-fi
+mkdir -p "$BUILD_DIR"
+cd "$BUILD_DIR"
 
 # Configure with CMake
-echo
-echo "Configuring with CMake..."
-cmake -S . -B $BUILD_DIR \
-    -G "$GENERATOR" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCHS" \
-    -DCMAKE_CXX_STANDARD=20 \
-    -DCMAKE_CUDA_STANDARD=20
-
-if [ $? -ne 0 ]; then
-    echo -e "${RED}ERROR: CMake configuration failed${NC}"
-    exit 1
+print_info "Configuring with CMake..."
+if [ $VERBOSE -eq 1 ]; then
+    if [ "$GPU_BACKEND" == "HIP" ]; then
+        # For HIP, explicitly set the GPU architecture if detection fails
+        cmake $CMAKE_ARGS -DHIP_ARCH="gfx1030;gfx1100" ..
+    else
+        cmake $CMAKE_ARGS ..
+    fi
+else
+    if [ "$GPU_BACKEND" == "HIP" ]; then
+        cmake $CMAKE_ARGS -DHIP_ARCH="gfx1030;gfx1100" .. > /dev/null
+    else
+        cmake $CMAKE_ARGS .. > /dev/null
+    fi
 fi
 
 # Build
-echo
-echo "Building..."
-cd $BUILD_DIR
-$BUILD_COMMAND
+print_info "Building SHA-1 miner..."
+if [ $VERBOSE -eq 1 ]; then
+    make -j"$JOBS"
+else
+    make -j"$JOBS" | grep -E "(Built target|\\[.*%\\]|Linking)"
+fi
 
-if [ $? -ne 0 ]; then
-    echo -e "${RED}ERROR: Build failed${NC}"
+# Check if build succeeded
+if [ -f "sha1_miner" ]; then
+    print_info "Build successful!"
+    print_info "Executable: $BUILD_DIR/sha1_miner"
+
+    # Print basic info about the executable
+    file sha1_miner
+
+    # Suggest next steps
+    echo ""
+    print_info "To run the miner:"
+    print_info "  cd $BUILD_DIR"
+    print_info "  ./sha1_miner --help"
+    print_info ""
+    print_info "To run verification tests:"
+    print_info "  cd $BUILD_DIR"
+    print_info "  ./verify_sha1"
+else
+    print_error "Build failed!"
     exit 1
 fi
 
-cd ../..
+# Return to original directory
+cd ..
 
-echo
-echo -e "${GREEN}Build completed successfully!${NC}"
-echo
-echo "Executables are in: $BUILD_DIR/"
-echo "  - sha1_miner      : Main mining application"
-echo "  - verify_sha1     : SHA-1 verification tool"
-echo
-echo "To run tests:"
-echo "  cd $BUILD_DIR"
-echo "  ./verify_sha1"
-echo
-echo "To start mining:"
-echo "  cd $BUILD_DIR"
-echo "  ./sha1_miner --gpu 0 --difficulty 100 --duration 60"
-echo
-echo "To profile (requires Nsight tools):"
-echo "  make -C $BUILD_DIR profile      # Profile with Nsight Systems"
-echo "  make -C $BUILD_DIR ncu-profile   # Profile with Nsight Compute"
-
-# Make the script executable
-chmod +x build_linux.sh 2>/dev/null || true
-
-exit 0
+print_info "Done!"

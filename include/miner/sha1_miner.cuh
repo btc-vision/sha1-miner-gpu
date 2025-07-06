@@ -1,6 +1,6 @@
 #pragma once
+#include "gpu_platform.hpp"
 #include <cstdint>
-#include <cuda_runtime.h>
 #include <sstream>
 #include <iomanip>
 #include <vector>
@@ -13,10 +13,21 @@
 #define SHA1_DIGEST_SIZE 20
 #define SHA1_ROUNDS 80
 
-// Mining configuration
+// Mining configuration - platform specific
 #define MAX_CANDIDATES_PER_BATCH 1024
-#define NONCES_PER_THREAD 8
-#define WARP_SIZE 32
+
+#ifdef USE_HIP
+    // AMD GPUs benefit from different tuning
+    #define NONCES_PER_THREAD 4096  // AMD prefers fewer nonces per thread
+    #define DEFAULT_THREADS_PER_BLOCK 256
+#else
+// NVIDIA GPUs can handle more work per thread
+#define NONCES_PER_THREAD 8192
+#define DEFAULT_THREADS_PER_BLOCK 256
+#endif
+
+// Debug mode flag
+#define SHA1_MINER_DEBUG 0
 
 // Difficulty is defined as the minimum number of matching bits required
 struct MiningJob {
@@ -51,10 +62,49 @@ struct MiningStats {
 
 // Kernel launch parameters
 struct KernelConfig {
-    int blocks;
-    int threads_per_block;
+    mutable int blocks;
+    mutable int threads_per_block;
     int shared_memory_size;
-    cudaStream_t stream;
+    gpuStream_t stream;
+};
+
+// Device memory holder for mining job
+struct DeviceMiningJob {
+    uint8_t *base_message;
+    uint32_t *target_hash;
+
+    void allocate() {
+        gpuError_t err = gpuMalloc(&base_message, 32);
+        if (err != gpuSuccess) {
+            fprintf(stderr, "Failed to allocate device memory for base_message: %s\n",
+                    gpuGetErrorString(err));
+            base_message = nullptr;
+            return;
+        }
+
+        err = gpuMalloc(&target_hash, 5 * sizeof(uint32_t));
+        if (err != gpuSuccess) {
+            fprintf(stderr, "Failed to allocate device memory for target_hash: %s\n",
+                    gpuGetErrorString(err));
+            gpuFree(base_message);
+            base_message = nullptr;
+            target_hash = nullptr;
+        }
+    }
+
+    void free() {
+        if (base_message)
+            gpuFree(base_message);
+        if (target_hash)
+            gpuFree(target_hash);
+        base_message = nullptr;
+        target_hash = nullptr;
+    }
+
+    void copyFromHost(const MiningJob &job) {
+        gpuMemcpy(base_message, job.base_message, 32, gpuMemcpyHostToDevice);
+        gpuMemcpy(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice);
+    }
 };
 
 // API functions - Host side
@@ -68,9 +118,6 @@ bool init_mining_system(int device_id);
 // Create a new mining job
 MiningJob create_mining_job(const uint8_t *message, const uint8_t *target_hash, uint32_t difficulty);
 
-// Launch mining kernel
-void launch_mining_kernel(const MiningJob &job, ResultPool &pool, const KernelConfig &config);
-
 // Cleanup
 void cleanup_mining_system();
 
@@ -81,73 +128,96 @@ void run_mining_loop(MiningJob job, uint32_t duration_seconds);
 }
 #endif
 
+// C++ only functions (not extern "C")
+#ifdef __cplusplus
+
+// Launch mining kernel - uses C++ references
+void launch_mining_kernel(
+    const DeviceMiningJob &device_job,
+    uint32_t difficulty,
+    uint64_t nonce_offset,
+    const ResultPool &pool,
+    const KernelConfig &config
+);
+
+#endif
+
 // Device functions for SHA-1 computation
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIPCC__)
 
-// min() is already provided by CUDA math_functions.hpp
-
-// Rotation function with architecture-specific optimization
-__device__ __forceinline__ uint32_t rotl32(uint32_t x, uint32_t n) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 350
-    return __funnelshift_l(x, x, n);
+// Debug macros for device code
+#if SHA1_MINER_DEBUG && (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
+#define DEVICE_DEBUG_PRINT(...) \
+    if (threadIdx.x == 0 && blockIdx.x == 0) { \
+        printf("[DEVICE] " __VA_ARGS__); \
+    }
 #else
-    return (x << n) | (x >> (32 - n));
+#define DEVICE_DEBUG_PRINT(...)
+#endif
+
+// Platform-optimized rotation function
+__gpu_device__ __gpu_forceinline__ uint32_t rotl32(uint32_t x, uint32_t n) {
+#ifdef USE_HIP
+    // AMD GPUs - use rotate intrinsic if available
+    return __builtin_rotateleft32(x, n);
+#else
+// NVIDIA GPUs - use funnel shift on newer architectures
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 350
+        return __funnelshift_l(x, x, n);
+#else
+        return (x << n) | (x >> (32 - n));
+#endif
 #endif
 }
 
-// Endian swap with architecture-specific optimization
-__device__ __forceinline__ uint32_t swap_endian(uint32_t x) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 200
-    return __byte_perm(x, 0, 0x0123);
+// Platform-optimized endian swap
+__gpu_device__ __gpu_forceinline__ uint32_t swap_endian(uint32_t x) {
+#ifdef USE_HIP
+    // AMD GPUs - use bswap intrinsic
+    return __builtin_bswap32(x);
 #else
-    return ((x & 0xFF000000) >> 24) |
-           ((x & 0x00FF0000) >> 8)  |
-           ((x & 0x0000FF00) << 8)  |
-           ((x & 0x000000FF) << 24);
+// NVIDIA GPUs - use byte_perm on newer architectures
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 200
+        return __byte_perm(x, 0, 0x0123);
+#else
+        return ((x & 0xFF000000) >> 24) |
+               ((x & 0x00FF0000) >> 8)  |
+               ((x & 0x0000FF00) << 8)  |
+               ((x & 0x000000FF) << 24);
+#endif
 #endif
 }
 
 // Optimized bit counting for near-collision detection
-__device__ __forceinline__ uint32_t count_matching_bits(uint32_t a, uint32_t b) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 200
-    return 32 - __popc(a ^ b);
+__gpu_device__ __gpu_forceinline__ uint32_t count_matching_bits(uint32_t a, uint32_t b) {
+    return 32 - __gpu_popc(a ^ b);
+}
+
+// Count leading zeros - platform optimized
+__gpu_device__ __gpu_forceinline__ uint32_t count_leading_zeros(uint32_t x) {
+    return __gpu_clz(x);
+}
+
+// Platform-specific memory prefetch
+__gpu_device__ __gpu_forceinline__ void prefetch_data(const void* ptr) {
+#ifdef USE_HIP
+// AMD doesn't have explicit prefetch in the same way
+// The compiler handles this automatically
 #else
-    // Fallback implementation
-    uint32_t x = a ^ b;
-    x = x - ((x >> 1) & 0x55555555);
-    x = (x & 0x33333333) + ((x >> 2) & 0x33333333);
-    x = (x + (x >> 4)) & 0x0f0f0f0f;
-    x = x + (x >> 8);
-    x = x + (x >> 16);
-    return 32 - (x & 0x3f);
+// CUDA doesn't have a direct prefetch instruction in device code
+// The L1/L2 cache hierarchy handles this automatically
+// We can use volatile loads to hint at cache usage
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 350
+// Prefetch is handled by the cache hierarchy
+// No explicit prefetch needed in CUDA device code
+#endif
 #endif
 }
 
-// Early exit check - can we already determine this won't meet difficulty?
-__device__ __forceinline__ bool early_exit_check(
-    const uint32_t* current_state,
-    const uint32_t* target,
-    uint32_t round,
-    uint32_t required_bits
-) {
-    // Implement progressive checking based on rounds completed
-    if (round >= 60) {
-        // Check partial state matching
-        uint32_t bits = 0;
-        #pragma unroll
-        for (int i = 0; i < 5; i++) {
-            bits += count_matching_bits(current_state[i], target[i]);
-        }
-        // If we're too far off with only 20 rounds left, exit early
-        return bits < (required_bits - 40);
-    }
-    return false;
-}
-
-#endif // __CUDACC__
+#endif // __CUDACC__ || __HIPCC__
 
 // Helper functions for SHA-1 computation (host side)
-#ifndef __CUDACC__
+#if !defined(__CUDACC__) && !defined(__HIPCC__)
 
 // Helper function to compute SHA-1 of binary data and return binary result
 inline std::vector<uint8_t> sha1_binary(const uint8_t *data, size_t len) {
@@ -187,4 +257,23 @@ inline std::vector<uint8_t> hex_to_binary(const std::string &hex) {
     return result;
 }
 
-#endif // !__CUDACC__
+// Calculate SHA-1 (wrapper for consistency)
+inline std::vector<uint8_t> calculate_sha1(const std::vector<uint8_t> &data) {
+    return sha1_binary(data);
+}
+
+// Convert bytes to hex string
+inline std::string bytes_to_hex(const std::vector<uint8_t> &bytes) {
+    std::ostringstream oss;
+    for (uint8_t b: bytes) {
+        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+    }
+    return oss.str();
+}
+
+// Convert hex string to bytes
+inline std::vector<uint8_t> hex_to_bytes(const std::string &hex) {
+    return hex_to_binary(hex);
+}
+
+#endif // !__CUDACC__ && !__HIPCC__
