@@ -136,6 +136,7 @@ endif ()
 add_executable(sha1_miner
         ${SRC_DIR}/main.cpp
         ${SRC_DIR}/mining_system.cpp
+        ${SRC_DIR}/multi_gpu_manager.cpp
         ${SRC_DIR}/globals.cpp
         ${MINER_DIR}/kernel_launcher.cpp
 )

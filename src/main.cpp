@@ -1,5 +1,6 @@
 #include "sha1_miner.cuh"
 #include "mining_system.hpp"
+#include "multi_gpu_manager.hpp"
 #include <iostream>
 #include <iomanip>
 #include <vector>
@@ -7,6 +8,7 @@
 #include <csignal>
 #include <chrono>
 #include <thread>
+#include <sstream>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -24,9 +26,9 @@ struct MiningConfig {
     uint32_t duration = 300; // 5 minutes default
     bool benchmark = false;
     bool use_pool = false;
-    bool test_sha1 = false; // Add this
-    bool test_bits = false; // Add this
-    bool debug_mode = false; // Add this
+    bool test_sha1 = false;
+    bool test_bits = false;
+    bool debug_mode = false;
     std::string pool_url;
     std::string worker_name;
     std::string target_hex;
@@ -34,6 +36,8 @@ struct MiningConfig {
     int num_streams = 4;
     int threads_per_block = 256;
     bool auto_tune = true;
+    bool use_all_gpus = false; // Add this
+    std::vector<int> gpu_ids; // Add this
 };
 
 // Signal handler for graceful shutdown
@@ -73,6 +77,8 @@ void print_usage(const char *program_name) {
     std::cout << "Usage: " << program_name << " [options]\n\n";
     std::cout << "Options:\n";
     std::cout << "  --gpu <id>          GPU device ID (default: 0)\n";
+    std::cout << "  --all-gpus          Use all available GPUs\n"; // Add this
+    std::cout << "  --gpus <list>       Use specific GPUs (e.g., --gpus 0,1)\n"; // Add this
     std::cout << "  --difficulty <bits> Number of bits that must match (default: 50)\n";
     std::cout << "  --duration <sec>    Mining duration in seconds (default: 300)\n";
     std::cout << "  --target <hex>      Target hash in hex (40 chars)\n";
@@ -86,6 +92,7 @@ void print_usage(const char *program_name) {
     std::cout << "  --help              Show this help\n\n";
     std::cout << "Example:\n";
     std::cout << "  " << program_name << " --gpu 0 --difficulty 45 --duration 600\n";
+    std::cout << "  " << program_name << " --all-gpus --difficulty 50\n"; // Add this
     std::cout << "  " << program_name << " --benchmark --auto-tune\n";
 }
 
@@ -97,6 +104,18 @@ MiningConfig parse_args(int argc, char *argv[]) {
 
         if (arg == "--gpu" && i + 1 < argc) {
             config.gpu_id = std::stoi(argv[++i]);
+        } else if (arg == "--all-gpus") {
+            // Add this
+            config.use_all_gpus = true;
+        } else if (arg == "--gpus" && i + 1 < argc) {
+            // Add this
+            // Parse comma-separated GPU IDs like --gpus 0,1,2
+            std::string gpu_list = argv[++i];
+            std::stringstream ss(gpu_list);
+            std::string token;
+            while (std::getline(ss, token, ',')) {
+                config.gpu_ids.push_back(std::stoi(token));
+            }
         } else if (arg == "--difficulty" && i + 1 < argc) {
             config.difficulty = std::stoi(argv[++i]);
         } else if (arg == "--duration" && i + 1 < argc) {
@@ -422,48 +441,68 @@ int main(int argc, char *argv[]) {
     }
     std::cout << "SHA-1 implementation verified.\n\n";
 
-    // Check CUDA availability
+    // Check GPU availability
     int device_count;
     gpuGetDeviceCount(&device_count);
     if (device_count == 0) {
+#ifdef USE_HIP
+        std::cerr << "No AMD/HIP devices found!\n";
+#else
         std::cerr << "No CUDA devices found!\n";
+#endif
         return 1;
     }
 
-    if (config.gpu_id >= device_count) {
-        std::cerr << "Invalid GPU ID. Available GPUs: 0-" << (device_count - 1) << "\n";
-        return 1;
+    // Determine which GPUs to use
+    std::vector<int> gpu_ids_to_use;
+    if (config.use_all_gpus) {
+        for (int i = 0; i < device_count; i++) {
+            gpu_ids_to_use.push_back(i);
+        }
+        std::cout << "Using all " << device_count << " available GPUs\n";
+    } else if (!config.gpu_ids.empty()) {
+        gpu_ids_to_use = config.gpu_ids;
+        // Validate GPU IDs
+        for (int id: gpu_ids_to_use) {
+            if (id >= device_count || id < 0) {
+                std::cerr << "Invalid GPU ID: " << id << ". Available GPUs: 0-"
+                        << (device_count - 1) << "\n";
+                return 1;
+            }
+        }
+        std::cout << "Using " << gpu_ids_to_use.size() << " specified GPU(s)\n";
+    } else {
+        // Default to single GPU
+        gpu_ids_to_use.push_back(config.gpu_id);
+        if (config.gpu_id >= device_count) {
+            std::cerr << "Invalid GPU ID. Available GPUs: 0-" << (device_count - 1) << "\n";
+            return 1;
+        }
     }
 
     // Print GPU information
-    gpuDeviceProp props;
-    gpuGetDeviceProperties(&props, config.gpu_id);
-    std::cout << "Using GPU " << config.gpu_id << ": " << props.name << "\n";
-    std::cout << "  Compute capability: " << props.major << "." << props.minor << "\n";
-    std::cout << "  Memory: " << (props.totalGlobalMem / (1024.0 * 1024.0 * 1024.0))
-            << " GB\n";
-    std::cout << "  SMs: " << props.multiProcessorCount << "\n\n";
+    std::cout << "\nGPU Information:\n";
+    std::cout << "=====================================\n";
+    for (int id: gpu_ids_to_use) {
+        gpuDeviceProp props;
+        gpuGetDeviceProperties(&props, id);
+        std::cout << "  GPU " << id << ": " << props.name << "\n";
+        std::cout << "    Compute capability: " << props.major << "." << props.minor << "\n";
+        std::cout << "    Memory: " << (props.totalGlobalMem / (1024.0 * 1024.0 * 1024.0))
+                << " GB\n";
+        std::cout << "    SMs/CUs: " << props.multiProcessorCount << "\n";
+    }
+    std::cout << "\n";
 
     // Run benchmark if requested
     if (config.benchmark) {
-        run_benchmark(config.gpu_id, config.auto_tune);
+        if (gpu_ids_to_use.size() > 1) {
+            std::cout << "Multi-GPU benchmark not yet implemented. Using GPU 0 only.\n";
+            run_benchmark(gpu_ids_to_use[0], config.auto_tune);
+        } else {
+            run_benchmark(gpu_ids_to_use[0], config.auto_tune);
+        }
         return 0;
-    }
-
-    // Initialize mining system
-    MiningSystem::Config sys_config;
-    sys_config.device_id = config.gpu_id;
-    sys_config.num_streams = config.num_streams;
-    sys_config.threads_per_block = config.threads_per_block;
-
-    if (config.auto_tune) {
-        auto_tune_parameters(sys_config, config.gpu_id);
-    }
-
-    g_mining_system = std::make_unique<MiningSystem>(sys_config);
-    if (!g_mining_system->initialize()) {
-        std::cerr << "Failed to initialize mining system\n";
-        return 1;
     }
 
     // Prepare message and target
@@ -473,7 +512,6 @@ int main(int argc, char *argv[]) {
     if (!config.message_hex.empty()) {
         if (config.message_hex.length() != 64) {
             std::cerr << "Message must be 64 hex characters (32 bytes)\n";
-            cleanup_mining_system();
             return 1;
         }
         message = hex_to_bytes(config.message_hex);
@@ -485,7 +523,6 @@ int main(int argc, char *argv[]) {
     if (!config.target_hex.empty()) {
         if (config.target_hex.length() != 40) {
             std::cerr << "Target must be 40 hex characters (20 bytes)\n";
-            cleanup_mining_system();
             return 1;
         }
         target = hex_to_bytes(config.target_hex);
@@ -500,24 +537,53 @@ int main(int argc, char *argv[]) {
     std::cout << "\nMining Configuration:\n";
     std::cout << "  Difficulty: " << config.difficulty << " bits must match\n";
     std::cout << "  Duration: " << config.duration << " seconds\n";
-    std::cout << "  Success probability per hash: 2^-" << config.difficulty << "\n";
-    std::cout << "  Expected time to find: " << std::scientific
-            << (std::pow(2.0, config.difficulty) / (sys_config.blocks_per_stream *
-                                                    sys_config.threads_per_block * NONCES_PER_THREAD * 1e9))
-            << " seconds @ 1 GH/s\n\n";
+    std::cout << "  Success probability per hash: 2^-" << config.difficulty << "\n\n";
 
     // Start mining
     auto start_time = std::chrono::steady_clock::now();
-    g_mining_system->runMiningLoop(job, config.duration);
+
+    // Use multi-GPU manager if multiple GPUs selected
+    if (gpu_ids_to_use.size() > 1) {
+        MultiGPUManager multi_gpu_manager;
+        if (!multi_gpu_manager.initialize(gpu_ids_to_use)) {
+            std::cerr << "Failed to initialize multi-GPU manager\n";
+            return 1;
+        }
+
+        // Run multi-GPU mining
+        multi_gpu_manager.runMining(job, config.duration);
+    } else {
+        // Single GPU path (existing code)
+        MiningSystem::Config sys_config;
+        sys_config.device_id = gpu_ids_to_use[0];
+        sys_config.num_streams = config.num_streams;
+        sys_config.threads_per_block = config.threads_per_block;
+
+        if (config.auto_tune) {
+            auto_tune_parameters(sys_config, gpu_ids_to_use[0]);
+        }
+
+        g_mining_system = std::make_unique<MiningSystem>(sys_config);
+        if (!g_mining_system->initialize()) {
+            std::cerr << "Failed to initialize mining system\n";
+            return 1;
+        }
+
+        std::cout << "  Expected time to find: " << std::scientific
+                << (std::pow(2.0, config.difficulty) / (sys_config.blocks_per_stream *
+                                                        sys_config.threads_per_block * NONCES_PER_THREAD * 1e9))
+                << " seconds @ 1 GH/s\n\n";
+
+        g_mining_system->runMiningLoop(job, config.duration);
+        cleanup_mining_system();
+    }
+
     auto end_time = std::chrono::steady_clock::now();
 
     // Print final statistics
     auto duration = std::chrono::duration<double>(end_time - start_time).count();
     std::cout << "\nTotal runtime: " << std::fixed << std::setprecision(2)
             << duration << " seconds\n";
-
-    // Cleanup
-    cleanup_mining_system();
 
     return 0;
 }

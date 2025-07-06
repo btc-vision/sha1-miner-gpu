@@ -94,8 +94,20 @@ public:
         void print() const;
     };
 
+    /**
+     * Reset internal state for a new mining run
+     * Used by multi-GPU manager between rounds
+     */
+    void resetState() {
+        total_hashes_ = 0;
+        total_candidates_ = 0;
+        best_tracker_.reset();
+        start_time_ = std::chrono::steady_clock::now();
+        timing_stats_.reset();
+    }
+
     // Constructor with default config
-    MiningSystem(const Config &config = Config());
+    explicit MiningSystem(const Config &config = Config());
 
     ~MiningSystem();
 
@@ -158,22 +170,5 @@ private:
 
 // Declare the global mining system pointer
 extern std::unique_ptr<MiningSystem> g_mining_system;
-
-// C-style interface functions
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-bool init_mining_system(int device_id);
-
-void cleanup_mining_system();
-
-MiningJob create_mining_job(const uint8_t *message, const uint8_t *target_hash, uint32_t difficulty);
-
-void run_mining_loop(MiningJob job, uint32_t duration_seconds);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // MINING_SYSTEM_HPP
