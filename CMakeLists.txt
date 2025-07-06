@@ -16,16 +16,31 @@ set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
 # Find CUDA
 find_package(CUDAToolkit REQUIRED)
 
-# Set CUDA architectures (adjust based on your GPU)
-# Common architectures:
-# - 70: Volta (V100)
-# - 75: Turing (RTX 20xx, GTX 16xx)
-# - 80: Ampere (A100)
-# - 86: Ampere (RTX 30xx consumer)
-# - 89: Ada Lovelace (RTX 40xx)
-# - 90: Hopper (H100)
-# - 120: Blackwell (RTX 50xx)
-set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90;120")
+# Handle CUDA architectures
+# Check if architectures are already set (e.g., from preset)
+if (NOT CMAKE_CUDA_ARCHITECTURES)
+    # Default architectures
+    set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90")
+
+    # Add Blackwell (120) if CUDA version supports it
+    if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.5")
+        list(APPEND CMAKE_CUDA_ARCHITECTURES "120")
+    endif ()
+endif ()
+
+# For Windows with Ninja, we need special handling
+if (WIN32 AND CMAKE_GENERATOR MATCHES "Ninja")
+    # Ninja on Windows has issues with CUDA response files
+    set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_OBJECTS OFF)
+    set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES OFF)
+
+    # Simplify CUDA flags for Windows Ninja
+    set(CMAKE_CUDA_FLAGS "--use_fast_math -O3")
+else ()
+    # Full optimization flags for other configurations
+    set(CMAKE_CUDA_FLAGS "--use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --extra-device-vectorization --optimize 3")
+endif ()
 
 # Platform-specific optimization flags
 if (MSVC)
@@ -33,9 +48,6 @@ if (MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /Oi /Ot /Oy /GT /GL /Gw /arch:AVX2 /fp:fast /MD")
     set(CMAKE_CXX_FLAGS_DEBUG "/Od /RTC1 /MDd")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /OPT:REF /OPT:ICF")
-
-    # Suppress MSVC warnings
-    add_compile_options(/wd4996)  # Suppress deprecated warnings
 else ()
     # Linux/Unix optimization flags
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native -ffast-math -funroll-loops -finline-functions")
@@ -44,10 +56,6 @@ else ()
     # Enable all warnings except some specific ones
     add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 endif ()
-
-# CUDA compilation flags - optimized for mining workload
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt")
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --extra-device-vectorization --optimize 3")
 
 # Allow unsupported compiler combinations if needed
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER "11")
