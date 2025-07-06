@@ -7,6 +7,9 @@ set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
+# Export compile commands for IDEs
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Use static runtime for better performance
 set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
 
@@ -47,12 +50,20 @@ set(CMAKE_CUDA_FLAGS_DEBUG "-G -g")
 # Enable separate compilation
 set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 
+# Set include directories
+set(PROJECT_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
+set(PROJECT_MINER_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include/miner)
+
+# Add CUDA include directories for better IDE support
+include_directories(${CUDAToolkit_INCLUDE_DIRS})
+
 # Helper function for GPU targets
 function(add_gpu_library target_name)
     add_library(${target_name} STATIC ${ARGN})
 
     target_include_directories(${target_name} PUBLIC
-            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${PROJECT_INCLUDE_DIR}
+            ${PROJECT_MINER_INCLUDE_DIR}
             ${CUDAToolkit_INCLUDE_DIRS}
     )
 
@@ -77,37 +88,63 @@ endfunction()
 
 # Source files
 set(HOST_SOURCES
-        main.cpp
-        sha1_host.cpp
-        cxxsha1.cpp
-        job_upload.cpp
+        src/main.cpp
+        src/sha1_host.cpp
+        src/job_upload.cpp
+        src/globals.cpp
+        # src/cxxsha1.cpp is no longer needed as SHA-1 is header-only
 )
 
 set(CUDA_SOURCES
-        sha1_kernel.cu
+        include/miner/sha1_kernel.cu
+)
+
+set(TEST_SOURCES
+        src/verify_sha1.cpp
+        # src/cxxsha1.cpp is no longer needed
 )
 
 # Build libraries
 add_gpu_library(sha1_kernel ${CUDA_SOURCES})
-add_library(sha1_host STATIC ${HOST_SOURCES})
 
-# Configure host library
+# Build host library
+add_library(sha1_host STATIC ${HOST_SOURCES})
 target_include_directories(sha1_host PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${PROJECT_INCLUDE_DIR}
+        ${PROJECT_MINER_INCLUDE_DIR}
         ${CUDAToolkit_INCLUDE_DIRS}
 )
-
 target_link_libraries(sha1_host PUBLIC
         CUDA::cudart
 )
 
+# Platform-specific options for host library
+if (MSVC)
+    target_compile_options(sha1_host PRIVATE
+            $<$<CONFIG:Release>:/O2;/Ob3;/Oi;/Ot;/GL;/arch:AVX2;/fp:fast>
+            $<$<CONFIG:Debug>:/Od;/RTC1>
+    )
+else()
+    target_compile_options(sha1_host PRIVATE
+            $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>
+            $<$<CONFIG:Debug>:-O0;-g>
+    )
+endif()
+
 # Create main executable
-add_executable(sha1_miner main.cpp)
+add_executable(sha1_miner src/main.cpp)
 
 # Set executable properties
 set_target_properties(sha1_miner PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
+)
+
+# Configure includes for executable
+target_include_directories(sha1_miner PRIVATE
+        ${PROJECT_INCLUDE_DIR}
+        ${PROJECT_MINER_INCLUDE_DIR}
+        ${CUDAToolkit_INCLUDE_DIRS}
 )
 
 # Link everything together
@@ -119,8 +156,11 @@ target_link_libraries(sha1_miner PRIVATE
 )
 
 # Build verification tool
-add_executable(verify_sha1 verify_sha1.cpp cxxsha1.cpp)
-target_include_directories(verify_sha1 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_executable(verify_sha1 ${TEST_SOURCES})
+target_include_directories(verify_sha1 PRIVATE
+        ${PROJECT_INCLUDE_DIR}
+        ${PROJECT_MINER_INCLUDE_DIR}
+)
 
 # Platform-specific optimizations for executables
 if (MSVC)
@@ -169,6 +209,9 @@ install(TARGETS sha1_miner verify_sha1
         RUNTIME DESTINATION bin
 )
 
+# Install headers (optional)
+install(DIRECTORY include/ DESTINATION include)
+
 # Print configuration
 message(STATUS "")
 message(STATUS "SHA-1 Near-Collision Miner Build Configuration:")
@@ -178,6 +221,9 @@ message(STATUS "  CUDA Standard: ${CMAKE_CUDA_STANDARD}")
 message(STATUS "  CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 message(STATUS "  CUDA flags: ${CMAKE_CUDA_FLAGS}")
 message(STATUS "  CUDA runtime: ${CMAKE_CUDA_RUNTIME_LIBRARY}")
+message(STATUS "  Include directories:")
+message(STATUS "    - ${PROJECT_INCLUDE_DIR}")
+message(STATUS "    - ${PROJECT_MINER_INCLUDE_DIR}")
 if(MSVC)
     message(STATUS "  Platform: Windows/MSVC")
     message(STATUS "  CXX Release flags: ${CMAKE_CXX_FLAGS_RELEASE}")
@@ -192,6 +238,7 @@ add_custom_target(profile
         COMMAND nsys profile --stats=true --output=sha1_profile ./sha1_miner --benchmark
         DEPENDS sha1_miner
         COMMENT "Profiling SHA-1 miner with Nsight Systems"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 add_custom_target(ncu-profile
@@ -201,6 +248,7 @@ add_custom_target(ncu-profile
         ./sha1_miner --benchmark
         DEPENDS sha1_miner
         COMMENT "Profiling kernel with Nsight Compute"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 # Test build target to verify compilation

@@ -3,6 +3,9 @@
 #include <vector>
 #include <cstring>
 #include <cassert>
+#include <chrono>
+#include <sstream>
+#include <ctime>
 #include "cxxsha1.hpp"
 
 // Test vectors from NIST
@@ -50,7 +53,8 @@ int count_matching_bits(const uint8_t* hash1, const uint8_t* hash2) {
 
     for (int i = 0; i < 20; i++) {
         uint8_t xor_byte = hash1[i] ^ hash2[i];
-        matching_bits += 8 - __builtin_popcount(xor_byte);
+        // Use popcount to count set bits in XOR result
+        matching_bits += 8 - __builtin_popcount(static_cast<unsigned int>(xor_byte));
     }
 
     return matching_bits;
@@ -66,7 +70,8 @@ int count_consecutive_bits(const uint8_t* hash1, const uint8_t* hash2) {
         if (xor_byte == 0) {
             consecutive_bits += 8;
         } else {
-            consecutive_bits += __builtin_clz(xor_byte) - 24; // Adjust for byte
+            // Count leading zeros in the byte
+            consecutive_bits += __builtin_clz(static_cast<unsigned int>(xor_byte)) - 24; // Adjust for byte
             break;
         }
     }
@@ -81,14 +86,10 @@ bool test_sha1_basic() {
     bool all_passed = true;
 
     for (const auto& tv : test_vectors) {
-        sha1_ctx ctx;
-        sha1_init(ctx);
-        sha1_update(ctx, tv.message, strlen(tv.message));
+        SHA1 sha1;
+        sha1.update(std::string(tv.message));
+        std::string hash_hex = sha1.final();
 
-        uint8_t hash[20];
-        sha1_final(ctx, hash);
-
-        std::string hash_hex = bytes_to_hex(hash, 20);
         bool passed = (hash_hex == tv.expected_hash);
 
         std::cout << "Message: \"" << tv.message << "\"\n";
@@ -113,17 +114,20 @@ void test_near_collision() {
     // Make them slightly different
     msg2[31] = 1;  // Change last byte
 
-    // Compute hashes
-    sha1_ctx ctx1, ctx2;
+    // Compute hashes using SHA1 class
+    SHA1 sha1_1, sha1_2;
+    sha1_1.update(std::string(reinterpret_cast<char*>(msg1), 32));
+    sha1_2.update(std::string(reinterpret_cast<char*>(msg2), 32));
+
+    std::string hex1 = sha1_1.final();
+    std::string hex2 = sha1_2.final();
+
+    // Convert hex to binary
     uint8_t hash1[20], hash2[20];
-
-    sha1_init(ctx1);
-    sha1_update(ctx1, msg1, 32);
-    sha1_final(ctx1, hash1);
-
-    sha1_init(ctx2);
-    sha1_update(ctx2, msg2, 32);
-    sha1_final(ctx2, hash2);
+    for (int i = 0; i < 20; i++) {
+        hash1[i] = static_cast<uint8_t>(std::stoi(hex1.substr(i * 2, 2), nullptr, 16));
+        hash2[i] = static_cast<uint8_t>(std::stoi(hex2.substr(i * 2, 2), nullptr, 16));
+    }
 
     // Analyze similarity
     int matching_bits = count_matching_bits(hash1, hash2);
@@ -143,10 +147,10 @@ void test_near_collision() {
     std::cout << "Bit-by-bit XOR:\n";
     for (int i = 0; i < 20; i++) {
         uint8_t xor_byte = hash1[i] ^ hash2[i];
-        std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)xor_byte << " ";
+        std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(xor_byte) << " ";
         if ((i + 1) % 8 == 0) std::cout << "\n";
     }
-    std::cout << "\n";
+    std::cout << std::dec << "\n";
 }
 
 // Simulate mining attempts
@@ -156,15 +160,18 @@ void simulate_mining() {
     // Fixed base message
     uint8_t base_msg[32];
     for (int i = 0; i < 32; i++) {
-        base_msg[i] = i;
+        base_msg[i] = static_cast<uint8_t>(i);
     }
 
     // Compute target hash
-    sha1_ctx ctx;
-    sha1_init(ctx);
-    sha1_update(ctx, base_msg, 32);
+    SHA1 sha1_target;
+    sha1_target.update(std::string(reinterpret_cast<char*>(base_msg), 32));
+    std::string target_hex = sha1_target.final();
+
     uint8_t target_hash[20];
-    sha1_final(ctx, target_hash);
+    for (int i = 0; i < 20; i++) {
+        target_hash[i] = static_cast<uint8_t>(std::stoi(target_hex.substr(i * 2, 2), nullptr, 16));
+    }
 
     std::cout << "Target: " << bytes_to_hex(target_hash, 20) << "\n\n";
 
@@ -177,16 +184,20 @@ void simulate_mining() {
     for (uint64_t nonce = 0; nonce < num_attempts; nonce++) {
         // Apply nonce to message
         uint8_t msg[32];
-        memcpy(msg, base_msg, 32);
+        std::memcpy(msg, base_msg, 32);
 
         // XOR nonce into last 8 bytes
-        *((uint64_t*)&msg[24]) ^= nonce;
+        *reinterpret_cast<uint64_t*>(&msg[24]) ^= nonce;
 
         // Compute hash
-        sha1_init(ctx);
-        sha1_update(ctx, msg, 32);
+        SHA1 sha1;
+        sha1.update(std::string(reinterpret_cast<char*>(msg), 32));
+        std::string hex = sha1.final();
+
         uint8_t hash[20];
-        sha1_final(ctx, hash);
+        for (int i = 0; i < 20; i++) {
+            hash[i] = static_cast<uint8_t>(std::stoi(hex.substr(i * 2, 2), nullptr, 16));
+        }
 
         // Check similarity
         int matching_bits = count_matching_bits(hash, target_hash);
@@ -224,14 +235,13 @@ void performance_test() {
     auto start = std::chrono::high_resolution_clock::now();
 
     for (int i = 0; i < num_hashes; i++) {
-        sha1_ctx ctx;
-        sha1_init(ctx);
-
         // Vary the message
-        *((uint32_t*)msg) = i;
+        *reinterpret_cast<uint32_t*>(msg) = static_cast<uint32_t>(i);
 
-        sha1_update(ctx, msg, 32);
-        sha1_final(ctx, hash);
+        SHA1 sha1;
+        sha1.update(std::string(reinterpret_cast<char*>(msg), 32));
+        std::string result = sha1.final();
+        // Just computing, not storing
     }
 
     auto end = std::chrono::high_resolution_clock::now();

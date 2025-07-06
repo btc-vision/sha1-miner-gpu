@@ -74,6 +74,22 @@ echo -e "${GREEN}SHA-1 Near-Collision Miner Build Script${NC}"
 echo "========================================"
 echo ""
 
+# Check directory structure
+if [ ! -d "src" ] || [ ! -d "include/miner" ]; then
+    echo -e "${YELLOW}Directory structure not found. Setting up...${NC}"
+    if [ -f "setup_directories.sh" ]; then
+        chmod +x setup_directories.sh
+        ./setup_directories.sh
+    else
+        echo -e "${RED}Error: setup_directories.sh not found${NC}"
+        echo "Please ensure the project files are organized correctly:"
+        echo "  - Headers in include/"
+        echo "  - CUDA files in include/miner/"
+        echo "  - Source files in src/"
+        exit 1
+    fi
+fi
+
 # Check for CUDA
 if ! command -v nvcc &> /dev/null; then
     echo -e "${RED}Error: nvcc not found. Please install CUDA toolkit.${NC}"

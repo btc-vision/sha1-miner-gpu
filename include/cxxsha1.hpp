@@ -332,3 +332,58 @@ inline std::string SHA1::from_file(const std::string &filename)
 
 
 #endif /* SHA1_HPP */
+
+// Compatibility layer for existing code
+// This allows the new header-only SHA1 class to work with our existing interface
+
+#ifndef CXXSHA1_HPP
+#define CXXSHA1_HPP
+
+#include <cstdint>
+#include <cstddef>
+#include <cstring>
+
+// SHA-1 context structure for C-style interface
+struct sha1_ctx {
+    SHA1 sha1;
+    bool finalized;
+};
+
+// C-style interface functions for compatibility
+inline void sha1_init(sha1_ctx &ctx) {
+    ctx.sha1 = SHA1();
+    ctx.finalized = false;
+}
+
+inline void sha1_update(sha1_ctx &ctx, const void *data, size_t len) {
+    if (ctx.finalized) return;
+
+    const char* char_data = static_cast<const char*>(data);
+    std::string str_data(char_data, len);
+    ctx.sha1.update(str_data);
+}
+
+inline void sha1_final(sha1_ctx &ctx, uint8_t digest[20]) {
+    if (ctx.finalized) return;
+
+    std::string hex = ctx.sha1.final();
+
+    // Convert hex string to binary
+    for (int i = 0; i < 20; i++) {
+        std::string byte = hex.substr(i * 2, 2);
+        digest[i] = static_cast<uint8_t>(std::stoi(byte, nullptr, 16));
+    }
+
+    ctx.finalized = true;
+}
+
+// Convenience overloads
+inline void sha1_update(sha1_ctx &ctx, const uint8_t *data, size_t len) {
+    sha1_update(ctx, static_cast<const void *>(data), len);
+}
+
+inline void sha1_update(sha1_ctx &ctx, const uint32_t *data, size_t len) {
+    sha1_update(ctx, static_cast<const void *>(data), len * sizeof(uint32_t));
+}
+
+#endif

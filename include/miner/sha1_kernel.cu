@@ -1,4 +1,6 @@
 #include "sha1_miner.cuh"
+#include <cuda_runtime.h>
+#include <device_functions.h>
 
 // SHA-1 round constants
 __device__ __constant__ uint32_t K[4] = {

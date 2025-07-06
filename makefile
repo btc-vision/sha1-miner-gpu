@@ -12,7 +12,6 @@ CUDA_PATH ?= /usr/local/cuda
 # - sm_86: Ampere (RTX 30xx consumer)
 # - sm_89: Ada Lovelace (RTX 40xx)
 # - sm_90: Hopper (H100)
-# - sm_120: Blackwell (RTX 50xx, H200)
 GPU_ARCH = -gencode arch=compute_75,code=sm_75 \
            -gencode arch=compute_80,code=sm_80 \
            -gencode arch=compute_86,code=sm_86 \
@@ -37,18 +36,30 @@ CXX_FLAGS += -Wall -Wextra
 # CXX_FLAGS += -g -O0
 
 # Include and library paths
-INCLUDES = -I$(CUDA_PATH)/include -I.
+INCLUDES = -I$(CUDA_PATH)/include -I./include -I./include/miner
 LDFLAGS = -L$(CUDA_PATH)/lib64 -lcudart -lpthread
 
+# Source directories
+SRCDIR = src
+INCLUDEDIR = include
+MINERDIR = include/miner
+
 # Source files
-CXX_SOURCES = main.cpp sha1_host.cpp cxxsha1.cpp
-CUDA_SOURCES = sha1_kernel.cu
-TEST_SOURCES = verify_sha1.cpp cxxsha1.cpp
+CXX_SOURCES = $(SRCDIR)/main.cpp \
+              $(SRCDIR)/sha1_host.cpp \
+              $(SRCDIR)/job_upload.cpp \
+              $(SRCDIR)/globals.cpp
+              # cxxsha1.cpp is no longer needed (header-only)
+
+CUDA_SOURCES = $(MINERDIR)/sha1_kernel.cu
+
+TEST_SOURCES = $(SRCDIR)/verify_sha1.cpp
+               # cxxsha1.cpp is no longer needed
 
 # Object files
-CXX_OBJECTS = $(CXX_SOURCES:.cpp=.o)
-CUDA_OBJECTS = $(CUDA_SOURCES:.cu=.o)
-TEST_OBJECTS = $(TEST_SOURCES:.cpp=.test.o)
+CXX_OBJECTS = $(CXX_SOURCES:$(SRCDIR)/%.cpp=%.o)
+CUDA_OBJECTS = $(CUDA_SOURCES:$(MINERDIR)/%.cu=%.o)
+TEST_OBJECTS = $(TEST_SOURCES:$(SRCDIR)/%.cpp=%.test.o)
 
 # Targets
 TARGET = sha1_miner
@@ -66,16 +77,19 @@ $(TEST_TARGET): $(TEST_OBJECTS)
 	$(CXX) $(CXX_FLAGS) -o $@ $^ -lpthread
 
 # Compile C++ files
-%.o: %.cpp
+%.o: $(SRCDIR)/%.cpp
 	$(CXX) $(CXX_FLAGS) $(INCLUDES) -c $< -o $@
 
 # Compile C++ test files
-%.test.o: %.cpp
+%.test.o: $(SRCDIR)/%.cpp
 	$(CXX) $(CXX_FLAGS) $(INCLUDES) -c $< -o $@
 
 # Compile CUDA files
-%.o: %.cu
+%.o: $(MINERDIR)/%.cu
 	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) -c $< -o $@
+
+# Create build directories if needed
+$(shell mkdir -p obj)
 
 # Run tests
 test: $(TEST_TARGET)
@@ -131,6 +145,12 @@ help:
 	@echo "  make clean        - Remove build files"
 	@echo "  make distclean    - Remove all generated files"
 	@echo "  make install      - Install to system"
+	@echo ""
+	@echo "Directory Structure:"
+	@echo "  Headers:      include/*.hpp, include/*.h"
+	@echo "  CUDA Headers: include/miner/*.cuh"
+	@echo "  CUDA Kernels: include/miner/*.cu"
+	@echo "  Source:       src/*.cpp"
 	@echo ""
 	@echo "GPU Architecture Selection:"
 	@echo "  Edit GPU_ARCH in Makefile to match your GPU"

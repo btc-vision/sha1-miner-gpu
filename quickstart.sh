@@ -31,6 +31,18 @@ echo "CUDA Version:"
 nvcc --version | grep "release"
 echo
 
+# Check directory structure
+if [ ! -d "src" ] || [ ! -d "include/miner" ]; then
+    echo "Setting up directory structure..."
+    if [ -f "setup_directories.sh" ]; then
+        chmod +x setup_directories.sh
+        ./setup_directories.sh
+    else
+        echo "Error: Directory structure not set up. Please run setup_directories.sh"
+        exit 1
+    fi
+fi
+
 # Check for build tools
 if ! command -v cmake &> /dev/null; then
     echo "Warning: cmake not found. Will use Makefile."

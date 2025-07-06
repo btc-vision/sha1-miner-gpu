@@ -1,21 +1,29 @@
 #include "sha1_miner.cuh"
 #include "cxxsha1.hpp"
+#include "globals.hpp"
 #include <iostream>
 #include <iomanip>
 #include <vector>
 #include <cstring>
 #include <random>
-#include <signal.h>
-
-// Global flag for graceful shutdown
-volatile bool g_shutdown = false;
+#include <csignal>
+#include <atomic>
 
 // Forward declarations
 void run_mining_loop(MiningJob job, uint32_t duration_seconds);
 
 void signal_handler(int sig) {
     std::cout << "\nReceived signal " << sig << ", shutting down...\n";
-    g_shutdown = true;
+    g_shutdown.store(true);
+}
+
+// Set up signal handlers
+void setup_signal_handlers() {
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+#ifdef _WIN32
+    std::signal(SIGBREAK, signal_handler);
+#endif
 }
 
 // Parse command line arguments
@@ -98,12 +106,17 @@ std::vector<uint8_t> generate_random_message() {
 
 // Calculate SHA-1 hash
 std::vector<uint8_t> calculate_sha1(const std::vector<uint8_t>& message) {
-    sha1_ctx ctx;
-    sha1_init(ctx);
-    sha1_update(ctx, message.data(), message.size());
+    SHA1 sha1;
+    std::string msg_str(message.begin(), message.end());
+    sha1.update(msg_str);
+    std::string hex_result = sha1.final();
 
+    // Convert hex string to binary
     std::vector<uint8_t> hash(20);
-    sha1_final(ctx, hash.data());
+    for (int i = 0; i < 20; i++) {
+        std::string byte = hex_result.substr(i * 2, 2);
+        hash[i] = static_cast<uint8_t>(std::stoi(byte, nullptr, 16));
+    }
 
     return hash;
 }
@@ -139,8 +152,7 @@ void run_benchmark(int gpu_id) {
 // Main program
 int main(int argc, char* argv[]) {
     // Set up signal handlers
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    setup_signal_handlers();
 
     // Parse command line
     Config config = parse_args(argc, argv);

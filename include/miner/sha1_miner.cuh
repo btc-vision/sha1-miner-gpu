@@ -2,6 +2,13 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 
+// Include CUDA device functions
+#ifdef __CUDACC__
+#include <cuda_runtime_api.h>
+#include <device_functions.h>
+#include <sm_32_intrinsics.h>
+#endif
+
 // SHA-1 constants
 #define SHA1_BLOCK_SIZE 64
 #define SHA1_DIGEST_SIZE 20
@@ -70,16 +77,21 @@ extern "C" {
 }
 
 // Device functions for SHA-1 computation
+#ifdef __CUDACC__
+
 __device__ __forceinline__ uint32_t rotl32(uint32_t x, uint32_t n) {
+    // Use the CUDA intrinsic for funnel shift
     return __funnelshift_l(x, x, n);
 }
 
 __device__ __forceinline__ uint32_t swap_endian(uint32_t x) {
+    // Use CUDA byte permutation intrinsic
     return __byte_perm(x, 0, 0x0123);
 }
 
 // Optimized bit counting for near-collision detection
 __device__ __forceinline__ uint32_t count_matching_bits(uint32_t a, uint32_t b) {
+    // Use CUDA population count intrinsic
     return 32 - __popc(a ^ b);
 }
 
@@ -103,3 +115,5 @@ __device__ __forceinline__ bool early_exit_check(
     }
     return false;
 }
+
+#endif // __CUDACC__

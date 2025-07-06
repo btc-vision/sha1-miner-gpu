@@ -8,11 +8,15 @@
 #include <atomic>
 #include <algorithm>
 #include <cstring>
+#include <memory>
+#include <mutex>
+
+extern std::atomic<bool> g_shutdown;
 
 // Global state
 struct MiningSystem {
-    int device_id;
-    cudaDeviceProp device_props;
+    int device_id{};
+    cudaDeviceProp device_props{};
     std::vector<cudaStream_t> streams;
     std::vector<ResultPool> gpu_pools;
 
@@ -23,10 +27,21 @@ struct MiningSystem {
 
     // Configuration
     int num_streams;
-    int blocks_per_stream;
-    int threads_per_block;
+    int blocks_per_stream{};
+    int threads_per_block{};
+
+    // Thread management
+    std::unique_ptr<std::thread> monitor_thread;
+    std::mutex system_mutex;
 
     MiningSystem() : total_hashes(0), total_candidates(0), num_streams(4) {}
+
+    ~MiningSystem() {
+        // Ensure monitor thread is joined
+        if (monitor_thread && monitor_thread->joinable()) {
+            monitor_thread->join();
+        }
+    }
 };
 
 static MiningSystem* g_system = nullptr;
@@ -113,7 +128,7 @@ bool init_mining_system(int device_id) {
 
     // Set up persistent L2 cache if available (Ampere+)
     if (g_system->device_props.major >= 8) {
-        size_t l2_cache_size = g_system->device_props.l2CacheSize;
+        const size_t l2_cache_size = g_system->device_props.l2CacheSize;
         cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, l2_cache_size);
     }
 
@@ -133,17 +148,17 @@ bool init_mining_system(int device_id) {
 
 // Create a mining job
 MiningJob create_mining_job(const uint8_t* message, const uint8_t* target_hash, uint32_t difficulty) {
-    MiningJob job;
+    MiningJob job{};
 
     // Copy message
     std::memcpy(job.base_message, message, 32);
 
     // Convert target hash to uint32_t array
     for (int i = 0; i < 5; i++) {
-        job.target_hash[i] = (uint32_t(target_hash[i*4]) << 24) |
-                            (uint32_t(target_hash[i*4 + 1]) << 16) |
-                            (uint32_t(target_hash[i*4 + 2]) << 8) |
-                            uint32_t(target_hash[i*4 + 3]);
+        job.target_hash[i] = (static_cast<uint32_t>(target_hash[i*4]) << 24) |
+                            (static_cast<uint32_t>(target_hash[i*4 + 1]) << 16) |
+                            (static_cast<uint32_t>(target_hash[i*4 + 2]) << 8) |
+                            static_cast<uint32_t>(target_hash[i*4 + 3]);
     }
 
     job.difficulty = difficulty;
@@ -178,29 +193,31 @@ int process_results(ResultPool& pool, MiningResult* host_results, int max_result
 }
 
 // Performance monitoring thread
-void performance_monitor_thread() {
+void performance_monitor_thread(MiningSystem* system) {
     auto last_update = std::chrono::steady_clock::now();
     uint64_t last_hashes = 0;
 
-    while (g_system) {
+    while (system && !g_shutdown) {
         std::this_thread::sleep_for(std::chrono::seconds(5));
 
-        if (!g_system) break;
+        if (!system || g_shutdown) break;
+
+        std::lock_guard<std::mutex> lock(system->system_mutex);
 
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_update);
-        auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - g_system->start_time);
+        auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - system->start_time);
 
-        uint64_t current_hashes = g_system->total_hashes.load();
+        uint64_t current_hashes = system->total_hashes.load();
         uint64_t hash_diff = current_hashes - last_hashes;
 
-        double instant_rate = hash_diff / (double)elapsed.count() / 1e9;
-        double average_rate = current_hashes / (double)total_elapsed.count() / 1e9;
+        double instant_rate = hash_diff / static_cast<double>(elapsed.count()) / 1e9;
+        double average_rate = current_hashes / static_cast<double>(total_elapsed.count()) / 1e9;
 
         std::cout << "\r[" << total_elapsed.count() << "s] "
                   << "Rate: " << std::fixed << std::setprecision(2) << instant_rate << " GH/s"
                   << " (avg: " << average_rate << " GH/s) | "
-                  << "Candidates: " << g_system->total_candidates.load()
+                  << "Candidates: " << system->total_candidates.load()
                   << " | Total: " << current_hashes / 1e12 << " TH"
                   << std::flush;
 
@@ -215,8 +232,16 @@ void cleanup_mining_system() {
 
     std::cout << "\nCleaning up mining system...\n";
 
+    // Signal shutdown
+    g_shutdown = true;
+
+    // Wait for monitor thread
+    if (g_system->monitor_thread && g_system->monitor_thread->joinable()) {
+        g_system->monitor_thread->join();
+    }
+
     // Synchronize all streams
-    for (auto& stream : g_system->streams) {
+    for (const auto& stream : g_system->streams) {
         cudaStreamSynchronize(stream);
         cudaStreamDestroy(stream);
     }
@@ -234,7 +259,7 @@ void cleanup_mining_system() {
     std::cout << "\nFinal Statistics:\n";
     std::cout << "Total Time: " << elapsed.count() << " seconds\n";
     std::cout << "Total Hashes: " << g_system->total_hashes.load() / 1e12 << " trillion\n";
-    std::cout << "Average Rate: " << g_system->total_hashes.load() / elapsed.count() / 1e9 << " GH/s\n";
+    std::cout << "Average Rate: " << g_system->total_hashes.load() / static_cast<double>(elapsed.count()) / 1e9 << " GH/s\n";
     std::cout << "Total Candidates: " << g_system->total_candidates.load() << "\n";
 
     delete g_system;
@@ -252,7 +277,7 @@ void run_mining_loop(MiningJob job, uint32_t duration_seconds) {
     std::cout << "Target difficulty: " << job.difficulty << " bits\n\n";
 
     // Start performance monitor
-    std::thread monitor(performance_monitor_thread);
+    g_system->monitor_thread = std::make_unique<std::thread>(performance_monitor_thread, g_system);
 
     auto start_time = std::chrono::steady_clock::now();
     auto end_time = start_time + std::chrono::seconds(duration_seconds);
@@ -262,7 +287,7 @@ void run_mining_loop(MiningJob job, uint32_t duration_seconds) {
 
     int stream_idx = 0;
 
-    while (std::chrono::steady_clock::now() < end_time) {
+    while (std::chrono::steady_clock::now() < end_time && !g_shutdown) {
         // Round-robin through streams
         auto& stream = g_system->streams[stream_idx];
         auto& pool = g_system->gpu_pools[stream_idx];
@@ -271,7 +296,7 @@ void run_mining_loop(MiningJob job, uint32_t duration_seconds) {
         job.nonce_offset = nonce_offset;
 
         // Configure kernel launch
-        KernelConfig config;
+        KernelConfig config{};
         config.blocks = g_system->blocks_per_stream;
         config.threads_per_block = g_system->threads_per_block;
         config.shared_memory_size = 0;
@@ -309,7 +334,7 @@ void run_mining_loop(MiningJob job, uint32_t duration_seconds) {
 
     // Process final results
     for (int i = 0; i < g_system->num_streams; i++) {
-        int count = process_results(g_system->gpu_pools[i], results.data(), results.size());
+        const int count = process_results(g_system->gpu_pools[i], results.data(), results.size());
         for (int j = 0; j < count; j++) {
             std::cout << "\n[CANDIDATE] Nonce: 0x" << std::hex << results[j].nonce
                       << " | Matching bits: " << std::dec << results[j].matching_bits
@@ -317,5 +342,5 @@ void run_mining_loop(MiningJob job, uint32_t duration_seconds) {
         }
     }
 
-    monitor.join();
+    g_system->monitor_thread->join();
 }
