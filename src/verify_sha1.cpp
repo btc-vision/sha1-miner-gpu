@@ -10,18 +10,22 @@
 
 // Test vectors from NIST
 struct TestVector {
-    const char* message;
-    const char* expected_hash;
+    const char *message;
+    const char *expected_hash;
 };
 
 const TestVector test_vectors[] = {
     // Standard test vectors
     {"", "da39a3ee5e6b4b0d3255bfef95601890afd80709"},
     {"abc", "a9993e364706816aba3e25717850c26c9cd0d89d"},
-    {"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
-     "84983e441c3bd26ebaae4aa1f95129e5e54670f1"},
-    {"The quick brown fox jumps over the lazy dog",
-     "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12"},
+    {
+        "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+        "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
+    },
+    {
+        "The quick brown fox jumps over the lazy dog",
+        "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12"
+    },
 
     // 32-byte messages (our use case)
     {"0123456789abcdef0123456789abcdef", "8c0ae11688016515c088b8419513ae7fb0b8ee88"},
@@ -29,7 +33,7 @@ const TestVector test_vectors[] = {
 };
 
 // Convert hex string to bytes
-std::vector<uint8_t> hex_to_bytes(const std::string& hex) {
+std::vector<uint8_t> hex_to_bytes(const std::string &hex) {
     std::vector<uint8_t> bytes;
     for (size_t i = 0; i < hex.length(); i += 2) {
         std::string byte_str = hex.substr(i, 2);
@@ -39,16 +43,16 @@ std::vector<uint8_t> hex_to_bytes(const std::string& hex) {
 }
 
 // Convert bytes to hex string
-std::string bytes_to_hex(const uint8_t* bytes, size_t len) {
+std::string bytes_to_hex(const uint8_t *bytes, size_t len) {
     std::stringstream ss;
     for (size_t i = 0; i < len; i++) {
-        ss << std::hex << std::setw(2) << std::setfill('0') << (int)bytes[i];
+        ss << std::hex << std::setw(2) << std::setfill('0') << (int) bytes[i];
     }
     return ss.str();
 }
 
 // Count matching bits between two hashes
-int count_matching_bits(const uint8_t* hash1, const uint8_t* hash2) {
+int count_matching_bits(const uint8_t *hash1, const uint8_t *hash2) {
     int matching_bits = 0;
 
     for (int i = 0; i < 20; i++) {
@@ -61,7 +65,7 @@ int count_matching_bits(const uint8_t* hash1, const uint8_t* hash2) {
 }
 
 // Count consecutive matching bits from MSB
-int count_consecutive_bits(const uint8_t* hash1, const uint8_t* hash2) {
+int count_consecutive_bits(const uint8_t *hash1, const uint8_t *hash2) {
     int consecutive_bits = 0;
 
     for (int i = 0; i < 20; i++) {
@@ -85,7 +89,7 @@ bool test_sha1_basic() {
 
     bool all_passed = true;
 
-    for (const auto& tv : test_vectors) {
+    for (const auto &tv: test_vectors) {
         SHA1 sha1;
         sha1.update(std::string(tv.message));
         std::string hash_hex = sha1.final();
@@ -112,12 +116,12 @@ void test_near_collision() {
     uint8_t msg2[32] = {0};
 
     // Make them slightly different
-    msg2[31] = 1;  // Change last byte
+    msg2[31] = 1; // Change last byte
 
     // Compute hashes using SHA1 class
     SHA1 sha1_1, sha1_2;
-    sha1_1.update(std::string(reinterpret_cast<char*>(msg1), 32));
-    sha1_2.update(std::string(reinterpret_cast<char*>(msg2), 32));
+    sha1_1.update(std::string(reinterpret_cast<char *>(msg1), 32));
+    sha1_2.update(std::string(reinterpret_cast<char *>(msg2), 32));
 
     std::string hex1 = sha1_1.final();
     std::string hex2 = sha1_2.final();
@@ -165,7 +169,7 @@ void simulate_mining() {
 
     // Compute target hash
     SHA1 sha1_target;
-    sha1_target.update(std::string(reinterpret_cast<char*>(base_msg), 32));
+    sha1_target.update(std::string(reinterpret_cast<char *>(base_msg), 32));
     std::string target_hex = sha1_target.final();
 
     uint8_t target_hash[20];
@@ -187,11 +191,11 @@ void simulate_mining() {
         std::memcpy(msg, base_msg, 32);
 
         // XOR nonce into last 8 bytes
-        *reinterpret_cast<uint64_t*>(&msg[24]) ^= nonce;
+        *reinterpret_cast<uint64_t *>(&msg[24]) ^= nonce;
 
         // Compute hash
         SHA1 sha1;
-        sha1.update(std::string(reinterpret_cast<char*>(msg), 32));
+        sha1.update(std::string(reinterpret_cast<char *>(msg), 32));
         std::string hex = sha1.final();
 
         uint8_t hash[20];
@@ -206,16 +210,17 @@ void simulate_mining() {
             best_match = matching_bits;
             best_nonce = nonce;
 
-            if (matching_bits >= 20) {  // Found something interesting
+            if (matching_bits >= 20) {
+                // Found something interesting
                 std::cout << "Nonce: " << std::hex << nonce << std::dec
-                          << " | Matching bits: " << matching_bits
-                          << " | Hash: " << bytes_to_hex(hash, 20) << "\n";
+                        << " | Matching bits: " << matching_bits
+                        << " | Hash: " << bytes_to_hex(hash, 20) << "\n";
             }
         }
 
         if (nonce % 100000 == 0) {
             std::cout << "\rProgress: " << (nonce * 100 / num_attempts) << "%"
-                      << " | Best: " << best_match << " bits" << std::flush;
+                    << " | Best: " << best_match << " bits" << std::flush;
         }
     }
 
@@ -236,10 +241,10 @@ void performance_test() {
 
     for (int i = 0; i < num_hashes; i++) {
         // Vary the message
-        *reinterpret_cast<uint32_t*>(msg) = static_cast<uint32_t>(i);
+        *reinterpret_cast<uint32_t *>(msg) = static_cast<uint32_t>(i);
 
         SHA1 sha1;
-        sha1.update(std::string(reinterpret_cast<char*>(msg), 32));
+        sha1.update(std::string(reinterpret_cast<char *>(msg), 32));
         std::string result = sha1.final();
         // Just computing, not storing
     }
@@ -251,9 +256,9 @@ void performance_test() {
     double hashes_per_second = num_hashes / seconds;
 
     std::cout << "Computed " << num_hashes << " hashes in "
-              << std::fixed << std::setprecision(3) << seconds << " seconds\n";
+            << std::fixed << std::setprecision(3) << seconds << " seconds\n";
     std::cout << "Rate: " << std::fixed << std::setprecision(2)
-              << hashes_per_second / 1000000.0 << " MH/s (CPU)\n";
+            << hashes_per_second / 1000000.0 << " MH/s (CPU)\n";
 }
 
 int main() {

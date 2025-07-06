@@ -29,14 +29,14 @@ void setup_signal_handlers() {
 // Parse command line arguments
 struct Config {
     int gpu_id = 0;
-    uint32_t difficulty = 120;  // Default: 120 bits must match
-    uint32_t duration = 60;     // Default: 60 seconds
+    uint32_t difficulty = 120; // Default: 120 bits must match
+    uint32_t duration = 60; // Default: 60 seconds
     bool benchmark = false;
     std::string target_hex;
     std::string message_hex;
 };
 
-Config parse_args(int argc, char* argv[]) {
+Config parse_args(int argc, char *argv[]) {
     Config config;
 
     for (int i = 1; i < argc; i++) {
@@ -79,7 +79,7 @@ Config parse_args(int argc, char* argv[]) {
 }
 
 // Convert hex string to bytes
-std::vector<uint8_t> hex_to_bytes(const std::string& hex) {
+std::vector<uint8_t> hex_to_bytes(const std::string &hex) {
     std::vector<uint8_t> bytes;
 
     for (size_t i = 0; i < hex.length(); i += 2) {
@@ -97,7 +97,7 @@ std::vector<uint8_t> generate_random_message() {
     std::uniform_int_distribution<> dis(0, 255);
 
     std::vector<uint8_t> message(32);
-    for (auto& byte : message) {
+    for (auto &byte: message) {
         byte = dis(gen);
     }
 
@@ -105,7 +105,7 @@ std::vector<uint8_t> generate_random_message() {
 }
 
 // Calculate SHA-1 hash
-std::vector<uint8_t> calculate_sha1(const std::vector<uint8_t>& message) {
+std::vector<uint8_t> calculate_sha1(const std::vector<uint8_t> &message) {
     SHA1 sha1;
     std::string msg_str(message.begin(), message.end());
     sha1.update(msg_str);
@@ -133,7 +133,7 @@ void run_benchmark(int gpu_id) {
     // Test different difficulty levels
     std::vector<uint32_t> difficulties = {80, 90, 100, 110, 120, 130};
 
-    for (uint32_t diff : difficulties) {
+    for (uint32_t diff: difficulties) {
         std::cout << "\nTesting difficulty " << diff << " bits:\n";
 
         // Create test job
@@ -150,7 +150,7 @@ void run_benchmark(int gpu_id) {
 }
 
 // Main program
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
     // Set up signal handlers
     setup_signal_handlers();
 
@@ -187,8 +187,8 @@ int main(int argc, char* argv[]) {
     } else {
         message = generate_random_message();
         std::cout << "Generated random message: ";
-        for (uint8_t b : message) {
-            std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)b;
+        for (uint8_t b: message) {
+            std::cout << std::hex << std::setw(2) << std::setfill('0') << (int) b;
         }
         std::cout << "\n";
     }
@@ -203,8 +203,8 @@ int main(int argc, char* argv[]) {
     } else {
         target = calculate_sha1(message);
         std::cout << "Target SHA-1: ";
-        for (uint8_t b : target) {
-            std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)b;
+        for (uint8_t b: target) {
+            std::cout << std::hex << std::setw(2) << std::setfill('0') << (int) b;
         }
         std::cout << "\n";
     }

@@ -26,5 +26,5 @@
 
 // Ensure we're using at least C++11 for std::atomic
 #if __cplusplus < 201103L
-    #error "This project requires C++11 or later for std::atomic support"
+#error "This project requires C++11 or later for std::atomic support"
 #endif

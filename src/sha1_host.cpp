@@ -34,7 +34,8 @@ struct MiningSystem {
     std::unique_ptr<std::thread> monitor_thread;
     std::mutex system_mutex;
 
-    MiningSystem() : total_hashes(0), total_candidates(0), num_streams(4) {}
+    MiningSystem() : total_hashes(0), total_candidates(0), num_streams(4) {
+    }
 
     ~MiningSystem() {
         // Ensure monitor thread is joined
@@ -44,7 +45,7 @@ struct MiningSystem {
     }
 };
 
-static MiningSystem* g_system = nullptr;
+static MiningSystem *g_system = nullptr;
 
 // Initialize the mining system
 bool init_mining_system(int device_id) {
@@ -78,7 +79,7 @@ bool init_mining_system(int device_id) {
     std::cout << "Initializing SHA-1 Near-Collision Miner\n";
     std::cout << "Device: " << g_system->device_props.name << "\n";
     std::cout << "Compute Capability: " << g_system->device_props.major << "."
-              << g_system->device_props.minor << "\n";
+            << g_system->device_props.minor << "\n";
     std::cout << "SMs: " << g_system->device_props.multiProcessorCount << "\n";
     std::cout << "Max Threads per Block: " << g_system->device_props.maxThreadsPerBlock << "\n";
 
@@ -93,23 +94,23 @@ bool init_mining_system(int device_id) {
     for (int i = 0; i < g_system->num_streams; i++) {
         // Create stream
         err = cudaStreamCreateWithPriority(&g_system->streams[i],
-                                          cudaStreamNonBlocking,
-                                          i % 2); // Alternate priorities
+                                           cudaStreamNonBlocking,
+                                           i % 2); // Alternate priorities
         if (err != cudaSuccess) {
             std::cerr << "Failed to create stream " << i << ": "
-                      << cudaGetErrorString(err) << "\n";
+                    << cudaGetErrorString(err) << "\n";
             cleanup_mining_system();
             return false;
         }
 
         // Allocate result pool
-        ResultPool& pool = g_system->gpu_pools[i];
+        ResultPool &pool = g_system->gpu_pools[i];
         pool.capacity = MAX_CANDIDATES_PER_BATCH;
 
         err = cudaMalloc(&pool.results, sizeof(MiningResult) * pool.capacity);
         if (err != cudaSuccess) {
             std::cerr << "Failed to allocate results buffer: "
-                      << cudaGetErrorString(err) << "\n";
+                    << cudaGetErrorString(err) << "\n";
             cleanup_mining_system();
             return false;
         }
@@ -117,7 +118,7 @@ bool init_mining_system(int device_id) {
         err = cudaMalloc(&pool.count, sizeof(uint32_t));
         if (err != cudaSuccess) {
             std::cerr << "Failed to allocate count: "
-                      << cudaGetErrorString(err) << "\n";
+                    << cudaGetErrorString(err) << "\n";
             cleanup_mining_system();
             return false;
         }
@@ -139,15 +140,15 @@ bool init_mining_system(int device_id) {
     std::cout << "Blocks per Stream: " << g_system->blocks_per_stream << "\n";
     std::cout << "Threads per Block: " << g_system->threads_per_block << "\n";
     std::cout << "Total Threads: " << g_system->num_streams * g_system->blocks_per_stream *
-                 g_system->threads_per_block << "\n";
+            g_system->threads_per_block << "\n";
     std::cout << "Hashes per Kernel: " << g_system->blocks_per_stream *
-                 g_system->threads_per_block * NONCES_PER_THREAD << "\n\n";
+            g_system->threads_per_block * NONCES_PER_THREAD << "\n\n";
 
     return true;
 }
 
 // Create a mining job
-MiningJob create_mining_job(const uint8_t* message, const uint8_t* target_hash, uint32_t difficulty) {
+MiningJob create_mining_job(const uint8_t *message, const uint8_t *target_hash, uint32_t difficulty) {
     MiningJob job{};
 
     // Copy message
@@ -155,10 +156,10 @@ MiningJob create_mining_job(const uint8_t* message, const uint8_t* target_hash, 
 
     // Convert target hash to uint32_t array
     for (int i = 0; i < 5; i++) {
-        job.target_hash[i] = (static_cast<uint32_t>(target_hash[i*4]) << 24) |
-                            (static_cast<uint32_t>(target_hash[i*4 + 1]) << 16) |
-                            (static_cast<uint32_t>(target_hash[i*4 + 2]) << 8) |
-                            static_cast<uint32_t>(target_hash[i*4 + 3]);
+        job.target_hash[i] = (static_cast<uint32_t>(target_hash[i * 4]) << 24) |
+                             (static_cast<uint32_t>(target_hash[i * 4 + 1]) << 16) |
+                             (static_cast<uint32_t>(target_hash[i * 4 + 2]) << 8) |
+                             static_cast<uint32_t>(target_hash[i * 4 + 3]);
     }
 
     job.difficulty = difficulty;
@@ -168,7 +169,7 @@ MiningJob create_mining_job(const uint8_t* message, const uint8_t* target_hash, 
 }
 
 // Process results from GPU
-int process_results(ResultPool& pool, MiningResult* host_results, int max_results) {
+size_t process_results(ResultPool &pool, MiningResult *host_results, size_t max_results) {
     if (!g_system) return 0;
 
     // Get result count
@@ -178,7 +179,7 @@ int process_results(ResultPool& pool, MiningResult* host_results, int max_result
     if (count == 0) return 0;
 
     // Limit to max_results
-    count = std::min(count, (uint32_t)max_results);
+    count = std::min(count, static_cast<uint32_t>(max_results));
 
     // Copy results
     cudaMemcpy(host_results, pool.results, sizeof(MiningResult) * count, cudaMemcpyDeviceToHost);
@@ -193,14 +194,12 @@ int process_results(ResultPool& pool, MiningResult* host_results, int max_result
 }
 
 // Performance monitoring thread
-void performance_monitor_thread(MiningSystem* system) {
+void performance_monitor_thread(MiningSystem *system) {
     auto last_update = std::chrono::steady_clock::now();
     uint64_t last_hashes = 0;
 
     while (system && !g_shutdown) {
         std::this_thread::sleep_for(std::chrono::seconds(5));
-
-        if (!system || g_shutdown) break;
 
         std::lock_guard<std::mutex> lock(system->system_mutex);
 
@@ -211,15 +210,15 @@ void performance_monitor_thread(MiningSystem* system) {
         uint64_t current_hashes = system->total_hashes.load();
         uint64_t hash_diff = current_hashes - last_hashes;
 
-        double instant_rate = hash_diff / static_cast<double>(elapsed.count()) / 1e9;
-        double average_rate = current_hashes / static_cast<double>(total_elapsed.count()) / 1e9;
+        double instant_rate = static_cast<double>(hash_diff) / static_cast<double>(elapsed.count()) / 1e9;
+        double average_rate = static_cast<double>(current_hashes) / static_cast<double>(total_elapsed.count()) / 1e9;
 
         std::cout << "\r[" << total_elapsed.count() << "s] "
-                  << "Rate: " << std::fixed << std::setprecision(2) << instant_rate << " GH/s"
-                  << " (avg: " << average_rate << " GH/s) | "
-                  << "Candidates: " << system->total_candidates.load()
-                  << " | Total: " << current_hashes / 1e12 << " TH"
-                  << std::flush;
+                << "Rate: " << std::fixed << std::setprecision(2) << instant_rate << " GH/s"
+                << " (avg: " << average_rate << " GH/s) | "
+                << "Candidates: " << system->total_candidates.load()
+                << " | Total: " << static_cast<double>(current_hashes) / 1e12 << " TH"
+                << std::flush;
 
         last_update = now;
         last_hashes = current_hashes;
@@ -241,13 +240,13 @@ void cleanup_mining_system() {
     }
 
     // Synchronize all streams
-    for (const auto& stream : g_system->streams) {
+    for (const auto &stream: g_system->streams) {
         cudaStreamSynchronize(stream);
         cudaStreamDestroy(stream);
     }
 
     // Free GPU memory
-    for (auto& pool : g_system->gpu_pools) {
+    for (auto &pool: g_system->gpu_pools) {
         if (pool.results) cudaFree(pool.results);
         if (pool.count) cudaFree(pool.count);
     }
@@ -258,8 +257,9 @@ void cleanup_mining_system() {
 
     std::cout << "\nFinal Statistics:\n";
     std::cout << "Total Time: " << elapsed.count() << " seconds\n";
-    std::cout << "Total Hashes: " << g_system->total_hashes.load() / 1e12 << " trillion\n";
-    std::cout << "Average Rate: " << g_system->total_hashes.load() / static_cast<double>(elapsed.count()) / 1e9 << " GH/s\n";
+    std::cout << "Total Hashes: " << static_cast<double>(g_system->total_hashes.load()) / 1e12 << " trillion\n";
+    std::cout << "Average Rate: " << static_cast<double>(g_system->total_hashes.load()) / static_cast<double>(elapsed.
+        count()) / 1e9 << " GH/s\n";
     std::cout << "Total Candidates: " << g_system->total_candidates.load() << "\n";
 
     delete g_system;
@@ -289,8 +289,8 @@ void run_mining_loop(MiningJob job, uint32_t duration_seconds) {
 
     while (std::chrono::steady_clock::now() < end_time && !g_shutdown) {
         // Round-robin through streams
-        auto& stream = g_system->streams[stream_idx];
-        auto& pool = g_system->gpu_pools[stream_idx];
+        auto &stream = g_system->streams[stream_idx];
+        auto &pool = g_system->gpu_pools[stream_idx];
 
         // Update job nonce offset
         job.nonce_offset = nonce_offset;
@@ -313,14 +313,14 @@ void run_mining_loop(MiningJob job, uint32_t duration_seconds) {
         // Check for results from previous launches
         int prev_stream = (stream_idx - 1 + g_system->num_streams) % g_system->num_streams;
         if (cudaStreamQuery(g_system->streams[prev_stream]) == cudaSuccess) {
-            int count = process_results(g_system->gpu_pools[prev_stream],
-                                      results.data(), results.size());
+            size_t count = process_results(g_system->gpu_pools[prev_stream],
+                                           results.data(), results.size());
 
             // Process any found candidates
-            for (int i = 0; i < count; i++) {
+            for (size_t i = 0; i < count; i++) {
                 std::cout << "\n[CANDIDATE] Nonce: 0x" << std::hex << results[i].nonce
-                          << " | Matching bits: " << std::dec << results[i].matching_bits
-                          << " | Score: " << results[i].difficulty_score << "\n";
+                        << " | Matching bits: " << std::dec << results[i].matching_bits
+                        << " | Score: " << results[i].difficulty_score << "\n";
             }
         }
 
@@ -328,17 +328,17 @@ void run_mining_loop(MiningJob job, uint32_t duration_seconds) {
     }
 
     // Wait for all streams to complete
-    for (auto& stream : g_system->streams) {
+    for (auto &stream: g_system->streams) {
         cudaStreamSynchronize(stream);
     }
 
     // Process final results
     for (int i = 0; i < g_system->num_streams; i++) {
-        const int count = process_results(g_system->gpu_pools[i], results.data(), results.size());
-        for (int j = 0; j < count; j++) {
+        const size_t count = process_results(g_system->gpu_pools[i], results.data(), results.size());
+        for (size_t j = 0; j < count; j++) {
             std::cout << "\n[CANDIDATE] Nonce: 0x" << std::hex << results[j].nonce
-                      << " | Matching bits: " << std::dec << results[j].matching_bits
-                      << " | Score: " << results[j].difficulty_score << "\n";
+                    << " | Matching bits: " << std::dec << results[j].matching_bits
+                    << " | Score: " << results[j].difficulty_score << "\n";
         }
     }
 

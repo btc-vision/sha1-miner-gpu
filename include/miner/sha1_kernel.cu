@@ -24,37 +24,37 @@ __device__ __forceinline__ uint32_t f(int t, uint32_t b, uint32_t c, uint32_t d)
 
 // Optimized SHA-1 implementation with early exit
 __device__ bool sha1_with_early_exit(
-    const uint8_t* message,
+    const uint8_t *message,
     uint64_t nonce,
-    uint32_t* out_hash,
-    uint32_t* out_matching_bits,
+    uint32_t *out_hash,
+    uint32_t *out_matching_bits,
     uint32_t required_bits
 ) {
     // Prepare message with nonce
     uint32_t W[80];
 
     // Load message into W[0-7]
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < 6; i++) {
-        W[i] = swap_endian(((uint32_t*)message)[i]);
+        W[i] = swap_endian(((uint32_t *) message)[i]);
     }
 
     // Apply nonce to last 8 bytes
-    W[6] = swap_endian(((uint32_t*)message)[6] ^ (uint32_t)(nonce & 0xFFFFFFFF));
-    W[7] = swap_endian(((uint32_t*)message)[7] ^ (uint32_t)(nonce >> 32));
+    W[6] = swap_endian(((uint32_t *) message)[6] ^ (uint32_t) (nonce & 0xFFFFFFFF));
+    W[7] = swap_endian(((uint32_t *) message)[7] ^ (uint32_t) (nonce >> 32));
 
     // Padding
     W[8] = 0x80000000;
-    #pragma unroll
+#pragma unroll
     for (int i = 9; i < 15; i++) {
         W[i] = 0;
     }
     W[15] = 256; // Message length in bits
 
     // Message expansion
-    #pragma unroll
+#pragma unroll
     for (int i = 16; i < 80; i++) {
-        W[i] = rotl32(W[i-3] ^ W[i-8] ^ W[i-14] ^ W[i-16], 1);
+        W[i] = rotl32(W[i - 3] ^ W[i - 8] ^ W[i - 14] ^ W[i - 16], 1);
     }
 
     // Initialize working variables
@@ -65,9 +65,9 @@ __device__ bool sha1_with_early_exit(
     uint32_t e = H[4];
 
     // Main SHA-1 loop with early exit checks
-    #pragma unroll 4
+#pragma unroll 4
     for (int t = 0; t < 80; t++) {
-        uint32_t temp = rotl32(a, 5) + f(t, b, c, d) + e + K[t/20] + W[t];
+        uint32_t temp = rotl32(a, 5) + f(t, b, c, d) + e + K[t / 20] + W[t];
         e = d;
         d = c;
         c = rotl32(b, 30);
@@ -79,7 +79,7 @@ __device__ bool sha1_with_early_exit(
             uint32_t state[5] = {a + H[0], b + H[1], c + H[2], d + H[3], e + H[4]};
             uint32_t partial_bits = 0;
 
-            #pragma unroll
+#pragma unroll
             for (int i = 0; i < 5; i++) {
                 partial_bits += count_matching_bits(state[i], d_job.target_hash[i]);
             }
@@ -103,7 +103,7 @@ __device__ bool sha1_with_early_exit(
 
     // Calculate matching bits
     *out_matching_bits = 0;
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < 5; i++) {
         *out_matching_bits += count_matching_bits(out_hash[i], d_job.target_hash[i]);
     }
@@ -112,7 +112,7 @@ __device__ bool sha1_with_early_exit(
 }
 
 // Advanced difficulty scoring for near-collisions
-__device__ uint32_t calculate_difficulty_score(const uint32_t* hash, const uint32_t* target) {
+__device__ uint32_t calculate_difficulty_score(const uint32_t *hash, const uint32_t *target) {
     uint32_t score = 0;
 
     // Count consecutive matching bits from MSB
@@ -156,9 +156,9 @@ __global__ void sha1_near_collision_kernel(
     uint32_t local_best_hash[5];
 
     // Process multiple nonces per thread
-    #pragma unroll
+#pragma unroll
     for (int n = 0; n < NONCES_PER_THREAD; n++) {
-        uint64_t nonce_idx = (uint64_t)tid * NONCES_PER_THREAD + n;
+        uint64_t nonce_idx = (uint64_t) tid * NONCES_PER_THREAD + n;
         if (nonce_idx >= max_nonces) break;
 
         uint64_t nonce = nonce_base + nonce_idx;
@@ -181,7 +181,7 @@ __global__ void sha1_near_collision_kernel(
             local_best_match = matching_bits;
             local_best_nonce = nonce;
             local_best_score = calculate_difficulty_score(hash, d_job.target_hash);
-            #pragma unroll
+#pragma unroll
             for (int i = 0; i < 5; i++) {
                 local_best_hash[i] = hash[i];
             }
@@ -195,8 +195,8 @@ __global__ void sha1_near_collision_kernel(
     uint32_t warp_best_match = local_best_match;
     uint32_t warp_best_score = local_best_score;
 
-    #pragma unroll
-    for (int offset = WARP_SIZE/2; offset > 0; offset /= 2) {
+#pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
         uint32_t other_match = __shfl_xor_sync(0xFFFFFFFF, warp_best_match, offset);
         uint32_t other_score = __shfl_xor_sync(0xFFFFFFFF, warp_best_score, offset);
 
@@ -225,12 +225,12 @@ __global__ void sha1_near_collision_kernel(
         uint32_t result_idx = atomicAdd(pool.count, 1);
 
         if (result_idx < pool.capacity) {
-            MiningResult& result = pool.results[result_idx];
+            MiningResult &result = pool.results[result_idx];
             result.nonce = local_best_nonce;
             result.matching_bits = local_best_match;
             result.difficulty_score = local_best_score;
 
-            #pragma unroll
+#pragma unroll
             for (int i = 0; i < 5; i++) {
                 result.hash[i] = local_best_hash[i];
             }
@@ -240,20 +240,20 @@ __global__ void sha1_near_collision_kernel(
 
 // Host-side kernel launcher
 extern "C" void launch_mining_kernel(
-    const MiningJob& job,
-    ResultPool& pool,
-    const KernelConfig& config
+    const MiningJob &job,
+    ResultPool &pool,
+    const KernelConfig &config
 ) {
     // Upload job to constant memory
     cudaMemcpyToSymbolAsync(d_job, &job, sizeof(MiningJob), 0,
                             cudaMemcpyHostToDevice, config.stream);
 
     // Calculate work distribution
-    uint64_t total_nonces = (uint64_t)config.blocks * config.threads_per_block * NONCES_PER_THREAD;
+    uint64_t total_nonces = (uint64_t) config.blocks * config.threads_per_block * NONCES_PER_THREAD;
 
     // Launch kernel
     sha1_near_collision_kernel<<<config.blocks, config.threads_per_block,
-                                 config.shared_memory_size, config.stream>>>(
-        pool, job.nonce_offset, total_nonces
-    );
+            config.shared_memory_size, config.stream>>>(
+                pool, job.nonce_offset, total_nonces
+            );
 }
