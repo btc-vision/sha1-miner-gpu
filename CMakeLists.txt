@@ -48,6 +48,9 @@ if (MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /Oi /Ot /Oy /GT /GL /Gw /arch:AVX2 /fp:fast /MD")
     set(CMAKE_CXX_FLAGS_DEBUG "/Od /RTC1 /MDd")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /OPT:REF /OPT:ICF")
+
+    # Suppress MSVC warnings - only for C++ files, not CUDA
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/wd4996>)
 else ()
     # Linux/Unix optimization flags
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native -ffast-math -funroll-loops -finline-functions")
@@ -122,6 +125,7 @@ set(CUDA_SOURCES
 
 set(TEST_SOURCES
         src/verify_sha1.cpp
+        src/verify_sha1_gpu.cu
         src/globals.cpp
 )
 
