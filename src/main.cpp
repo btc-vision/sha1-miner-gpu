@@ -1,6 +1,5 @@
 #include "sha1_miner.cuh"
 #include "mining_system.hpp"
-#include "utilities.hpp"
 #include <iostream>
 #include <iomanip>
 #include <vector>
@@ -172,8 +171,8 @@ std::vector<uint8_t> generate_secure_random_message() {
 void auto_tune_parameters(MiningSystem::Config &config, int device_id) {
     std::cout << "Auto-tuning mining parameters...\n";
 
-    cudaDeviceProp props;
-    cudaGetDeviceProperties(&props, device_id);
+    gpuDeviceProp props;
+    gpuGetDeviceProperties(&props, device_id);
 
     // Calculate optimal blocks based on architecture and SM count
     int blocks_per_sm;
@@ -248,7 +247,7 @@ void auto_tune_parameters(MiningSystem::Config &config, int device_id) {
 
     // Adjust streams based on available memory
     size_t free_mem, total_mem;
-    cudaMemGetInfo(&free_mem, &total_mem);
+    gpuMemGetInfo(&free_mem, &total_mem);
     size_t mem_per_stream = sizeof(MiningResult) * config.result_buffer_size + (
                                 config.blocks_per_stream * config.threads_per_block * sizeof(uint32_t) * 5);
     int max_streams_by_memory = free_mem / (mem_per_stream * 2); // Use at most 50% of free memory
@@ -425,7 +424,7 @@ int main(int argc, char *argv[]) {
 
     // Check CUDA availability
     int device_count;
-    cudaGetDeviceCount(&device_count);
+    gpuGetDeviceCount(&device_count);
     if (device_count == 0) {
         std::cerr << "No CUDA devices found!\n";
         return 1;
@@ -437,8 +436,8 @@ int main(int argc, char *argv[]) {
     }
 
     // Print GPU information
-    cudaDeviceProp props;
-    cudaGetDeviceProperties(&props, config.gpu_id);
+    gpuDeviceProp props;
+    gpuGetDeviceProperties(&props, config.gpu_id);
     std::cout << "Using GPU " << config.gpu_id << ": " << props.name << "\n";
     std::cout << "  Compute capability: " << props.major << "." << props.minor << "\n";
     std::cout << "  Memory: " << (props.totalGlobalMem / (1024.0 * 1024.0 * 1024.0))

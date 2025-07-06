@@ -197,13 +197,17 @@ __global__ void sha1_mining_kernel_amd(
         if (matching_bits >= difficulty) {
             // AMD wavefront vote operations
             uint64_t mask = __ballot(matching_bits >= difficulty);
+
             // Only first active lane in wavefront performs atomic
-            if (lane_id == __ffsll(mask) - 1) {
+            if (lane_id == __ffsll(static_cast<long long>(mask)) - 1) {
                 uint32_t idx = atomicAdd(result_count, __popcll(mask));
+
                 // Store results for all matching threads in wavefront
-                for (int bit = __ffsll(mask) - 1; bit >= 0; bit = __ffsll(mask & ~((1ULL << (bit + 1)) - 1)) - 1) {
+                for (int bit = __ffsll(static_cast<long long>(mask)) - 1; bit >= 0;
+                     bit = __ffsll(static_cast<long long>(mask & ~((1ULL << (bit + 1)) - 1))) - 1) {
                     if (idx < result_capacity) {
                         uint32_t source_lane = bit;
+
                         // Use AMD's permute lane operations
                         uint64_t result_nonce = __shfl(nonce, source_lane, 64);
                         uint32_t result_bits = __shfl(matching_bits, source_lane, 64);
@@ -226,8 +230,9 @@ __global__ void sha1_mining_kernel_amd(
 
 /**
  * Launch the AMD HIP SHA-1 mining kernel
+ * Use extern "C" to ensure C linkage for cross-compilation unit calls
  */
-void launch_mining_kernel_amd(
+extern "C" void launch_mining_kernel_amd(
     const DeviceMiningJob &device_job,
     uint32_t difficulty,
     uint64_t nonce_offset,
@@ -252,7 +257,7 @@ void launch_mining_kernel_amd(
     }
 
     // Clear previous errors
-    hipGetLastError();
+    (void) hipGetLastError();
 
     // Launch configuration
     dim3 gridDim(config.blocks, 1, 1);

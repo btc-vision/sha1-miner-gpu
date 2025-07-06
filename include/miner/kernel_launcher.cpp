@@ -1,16 +1,13 @@
-// kernel_launcher.cpp - Vendor-specific kernel launcher
 #include "sha1_miner.cuh"
-#include "gpu_platform.hpp"
-#include "../../src/mining_system.hpp"
 
-// Forward declarations for vendor-specific kernels
+// Forward declarations of kernel launch functions
 #ifdef USE_HIP
-extern void launch_mining_kernel_amd(
-    const DeviceMiningJob &device_job,
+extern "C" void launch_mining_kernel_amd(
+    const DeviceMiningJob& device_job,
     uint32_t difficulty,
     uint64_t nonce_offset,
-    const ResultPool &pool,
-    const KernelConfig &config
+    const ResultPool& pool,
+    const KernelConfig& config
 );
 #else
 extern void launch_mining_kernel_nvidia(
@@ -22,9 +19,7 @@ extern void launch_mining_kernel_nvidia(
 );
 #endif
 
-/**
- * Unified kernel launcher that dispatches to the appropriate vendor-specific kernel
- */
+// Unified kernel launch function
 void launch_mining_kernel(
     const DeviceMiningJob &device_job,
     uint32_t difficulty,
@@ -32,11 +27,14 @@ void launch_mining_kernel(
     const ResultPool &pool,
     const KernelConfig &config
 ) {
+#ifdef DEBUG_SHA1
+    printf("[DEBUG] Launching mining kernel with difficulty=%u, nonce_offset=%llu\n",
+           difficulty, nonce_offset);
+#endif
+
 #ifdef USE_HIP
-    // Use AMD HIP kernel
     launch_mining_kernel_amd(device_job, difficulty, nonce_offset, pool, config);
 #else
-    // Use NVIDIA CUDA kernel
     launch_mining_kernel_nvidia(device_job, difficulty, nonce_offset, pool, config);
 #endif
 }

@@ -1,37 +1,14 @@
-cmake_minimum_required(VERSION 3.21)
+cmake_minimum_required(VERSION 3.16)
 
 # Detect if we should use HIP or CUDA
 option(USE_HIP "Use HIP for AMD GPUs instead of CUDA" OFF)
 
+# CRITICAL: For HIP, do NOT enable HIP language support globally
 if (USE_HIP)
-    # Set ROCm path
-    if (NOT DEFINED ROCM_PATH)
-        set(ROCM_PATH "/opt/rocm" CACHE PATH "Path to ROCm installation")
-    endif ()
-
-    # Set HIP path
-    set(HIP_PATH "${ROCM_PATH}/hip" CACHE PATH "Path to HIP installation")
-
-    # Add ROCm to CMAKE_PREFIX_PATH
-    list(APPEND CMAKE_PREFIX_PATH ${ROCM_PATH} ${HIP_PATH})
-
     project(SHA1NearCollisionMiner LANGUAGES CXX)
     set(GPU_BACKEND "HIP")
-
-    # Find HIP
-    find_package(HIP REQUIRED)
-
-    if (NOT HIP_FOUND)
-        message(FATAL_ERROR "HIP not found. Please ensure ROCm is installed and ROCM_PATH is set correctly.")
-    endif ()
-
-    message(STATUS "Found HIP: ${HIP_VERSION}")
-    message(STATUS "HIP Platform: ${HIP_PLATFORM}")
-    message(STATUS "HIP Compiler: ${HIP_COMPILER}")
-
 else ()
     project(SHA1NearCollisionMiner LANGUAGES CXX CUDA)
-    enable_language(CUDA)
     set(GPU_BACKEND "CUDA")
 endif ()
 
@@ -42,23 +19,87 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Export compile commands for IDEs
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Platform-specific optimization flags
+if (MSVC)
+    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /Oi /Ot /Oy /GT /GL /Gw /arch:AVX2 /fp:fast /MD")
+    set(CMAKE_CXX_FLAGS_DEBUG "/Od /RTC1 /MDd")
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /OPT:REF /OPT:ICF")
+else ()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native -ffast-math -funroll-loops -finline-functions")
+    set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
+endif ()
+
+# Set include directories
+set(PROJECT_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
+set(PROJECT_MINER_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include/miner)
+
+# Create include directories if they don't exist
+file(MAKE_DIRECTORY ${PROJECT_INCLUDE_DIR})
+file(MAKE_DIRECTORY ${PROJECT_MINER_INCLUDE_DIR})
+
 # Configure based on GPU backend
 if (GPU_BACKEND STREQUAL "HIP")
     # HIP Configuration for AMD GPUs
 
-    # Set GPU architectures
-    if (NOT HIP_ARCH)
-        set(HIP_ARCH "gfx900;gfx906;gfx908;gfx90a;gfx1030;gfx1100" CACHE STRING "HIP architectures")
+    # Set ROCm path
+    if (NOT DEFINED ROCM_PATH)
+        if (DEFINED ENV{ROCM_PATH})
+            set(ROCM_PATH $ENV{ROCM_PATH} CACHE PATH "Path to ROCm installation")
+        else ()
+            set(ROCM_PATH "/opt/rocm" CACHE PATH "Path to ROCm installation")
+        endif ()
     endif ()
 
-    # Define USE_HIP for preprocessor
-    add_compile_definitions(USE_HIP)
-    add_compile_definitions(__HIP_PLATFORM_AMD__)
+    # Set HIP architectures
+    if (NOT HIP_ARCH)
+        set(HIP_ARCH "gfx1010;gfx1030;gfx1100" CACHE STRING "HIP architectures")
+    endif ()
+
+    # Convert HIP architectures to offload-arch format
+    string(REPLACE ";" "," HIP_ARCH_FLAGS "${HIP_ARCH}")
+
+    # Create custom command to compile HIP kernel
+    set(HIP_KERNEL_SOURCE ${PROJECT_MINER_INCLUDE_DIR}/sha1_kernel_amd.hip.cpp)
+    set(HIP_KERNEL_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/sha1_kernel_amd.o)
+
+    add_custom_command(
+            OUTPUT ${HIP_KERNEL_OBJECT}
+            COMMAND ${ROCM_PATH}/bin/hipcc
+            -O3 -ffast-math -fno-gpu-rdc -fPIC
+            --offload-arch=${HIP_ARCH_FLAGS}
+            -I${PROJECT_INCLUDE_DIR}
+            -I${PROJECT_MINER_INCLUDE_DIR}
+            -DUSE_HIP -D__HIP_PLATFORM_AMD__
+            -c ${HIP_KERNEL_SOURCE}
+            -o ${HIP_KERNEL_OBJECT}
+            DEPENDS ${HIP_KERNEL_SOURCE}
+            COMMENT "Compiling HIP kernel for AMD GPUs"
+            VERBATIM
+    )
+
+    # Create custom target for the kernel
+    add_custom_target(hip_kernel ALL DEPENDS ${HIP_KERNEL_OBJECT})
+
+    # Set variables for includes and libraries
+    set(GPU_INCLUDE_DIRS ${ROCM_PATH}/include)
+    set(GPU_LINK_LIBRARIES
+            ${ROCM_PATH}/lib/libamdhip64.so
+            ${ROCM_PATH}/lib/libhiprtc.so
+    )
+    set(GPU_COMPILE_DEFINITIONS USE_HIP __HIP_PLATFORM_AMD__)
+
+    # Check for optional ROCm SMI
+    if (EXISTS ${ROCM_PATH}/lib/librocm_smi64.so)
+        list(APPEND GPU_LINK_LIBRARIES ${ROCM_PATH}/lib/librocm_smi64.so)
+        list(APPEND GPU_COMPILE_DEFINITIONS HAS_ROCM_SMI)
+        message(STATUS "Found ROCm SMI library")
+    endif ()
 
     message(STATUS "Building with HIP/ROCm for AMD GPUs")
-    message(STATUS "ROCm path: ${ROCM_PATH}")
-    message(STATUS "HIP path: ${HIP_PATH}")
-    message(STATUS "HIP architectures: ${HIP_ARCH}")
+    message(STATUS "  ROCm path: ${ROCM_PATH}")
+    message(STATUS "  HIP compiler: ${ROCM_PATH}/bin/hipcc")
+    message(STATUS "  HIP architectures: ${HIP_ARCH}")
 
 else ()
     # CUDA Configuration for NVIDIA GPUs
@@ -73,222 +114,118 @@ else ()
     endif ()
 
     # CUDA compilation flags
-    set(CMAKE_CUDA_FLAGS "--use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt --extra-device-vectorization --optimize 3")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --extra-device-vectorization --optimize 3")
     set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
 
-    message(STATUS "Building with CUDA for NVIDIA GPUs")
-endif ()
-
-# Platform-specific optimization flags
-if (MSVC)
-    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /Oi /Ot /Oy /GT /GL /Gw /arch:AVX2 /fp:fast /MD")
-    set(CMAKE_CXX_FLAGS_DEBUG "/Od /RTC1 /MDd")
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /OPT:REF /OPT:ICF")
-else ()
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native -ffast-math -funroll-loops -finline-functions")
-    set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
-endif ()
-
-# Set include directories
-set(PROJECT_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
-set(PROJECT_MINER_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include/miner)
-
-# Create include directories if they don't exist
-file(MAKE_DIRECTORY ${PROJECT_INCLUDE_DIR})
-file(MAKE_DIRECTORY ${PROJECT_MINER_INCLUDE_DIR})
-
-# Source files
-set(HOST_SOURCES
-        src/main.cpp
-        src/mining_system.cpp
-        src/globals.cpp
-)
-
-# Platform-specific kernel sources
-if (GPU_BACKEND STREQUAL "HIP")
-    set(GPU_KERNEL_SOURCE
-            include/miner/sha1_kernel_amd.hip.cpp
-            include/miner/kernel_launcher.cpp
-    )
-    set(HIP_SOURCES ${GPU_KERNEL_SOURCE})
-else ()
-    set(GPU_KERNEL_SOURCE
-            include/miner/sha1_kernel.cu
-            include/miner/kernel_launcher.cpp
-    )
-endif ()
-
-# Build GPU kernel library
-if (GPU_BACKEND STREQUAL "HIP")
-    # For HIP, we compile the kernels using hipcc
-    set(HIP_HIPCC_FLAGS "-O3 -ffast-math")
-
-    # Convert architectures to --offload-arch flags
-    set(HIP_OFFLOAD_ARCH_FLAGS "")
-    foreach (arch ${HIP_ARCH})
-        list(APPEND HIP_OFFLOAD_ARCH_FLAGS "--offload-arch=${arch}")
-    endforeach ()
-
-    # Create custom command to compile HIP files
-    add_library(sha1_kernel STATIC)
-
-    foreach (hip_file ${HIP_SOURCES})
-        get_filename_component(file_name ${hip_file} NAME_WE)
-        set(output_file "${CMAKE_CURRENT_BINARY_DIR}/${file_name}.o")
-
-        add_custom_command(
-                OUTPUT ${output_file}
-                COMMAND ${HIP_HIPCC_EXECUTABLE}
-                ${HIP_HIPCC_FLAGS}
-                ${HIP_OFFLOAD_ARCH_FLAGS}
-                -fPIC
-                -D__HIP_PLATFORM_AMD__
-                -DUSE_HIP
-                -I${PROJECT_INCLUDE_DIR}
-                -I${PROJECT_MINER_INCLUDE_DIR}
-                -I${HIP_INCLUDE_DIRS}
-                -c ${CMAKE_CURRENT_SOURCE_DIR}/${hip_file}
-                -o ${output_file}
-                DEPENDS ${hip_file}
-                COMMENT "Compiling HIP file ${hip_file}"
-        )
-
-        target_sources(sha1_kernel PRIVATE ${output_file})
-    endforeach ()
-
-    target_include_directories(sha1_kernel PUBLIC
-            ${PROJECT_INCLUDE_DIR}
-            ${PROJECT_MINER_INCLUDE_DIR}
-            ${HIP_INCLUDE_DIRS}
-    )
-
-    target_link_libraries(sha1_kernel PUBLIC
-            ${HIP_LIBRARIES}
-            amdhip64
-    )
-
-else ()
-    # CUDA library
-    add_library(sha1_kernel STATIC ${GPU_KERNEL_SOURCE})
-    set_target_properties(sha1_kernel PROPERTIES
+    # Create kernel library
+    add_library(sha1_kernel_cuda STATIC ${PROJECT_MINER_INCLUDE_DIR}/sha1_kernel.cu)
+    set_target_properties(sha1_kernel_cuda PROPERTIES
             CUDA_SEPARABLE_COMPILATION ON
             CUDA_RESOLVE_DEVICE_SYMBOLS ON
             CUDA_STANDARD 17
             CUDA_STANDARD_REQUIRED ON
+            POSITION_INDEPENDENT_CODE ON
     )
-    target_include_directories(sha1_kernel PUBLIC
+
+    target_include_directories(sha1_kernel_cuda PRIVATE
             ${PROJECT_INCLUDE_DIR}
             ${PROJECT_MINER_INCLUDE_DIR}
-            ${CUDAToolkit_INCLUDE_DIRS}
     )
+
+    # Set variables
+    set(GPU_INCLUDE_DIRS ${CUDAToolkit_INCLUDE_DIRS})
+    set(GPU_LINK_LIBRARIES CUDA::cudart_static CUDA::cuda_driver)
+    set(GPU_COMPILE_DEFINITIONS "")
+
+    message(STATUS "Building with CUDA for NVIDIA GPUs")
+    message(STATUS "  CUDA version: ${CUDAToolkit_VERSION}")
+    message(STATUS "  CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 endif ()
 
-# Build host library
-add_library(mining_system STATIC ${HOST_SOURCES})
-target_include_directories(mining_system PUBLIC
+# Create kernel launcher library - pure C++
+add_library(kernel_launcher STATIC ${PROJECT_MINER_INCLUDE_DIR}/kernel_launcher.cpp)
+set_target_properties(kernel_launcher PROPERTIES LINKER_LANGUAGE CXX)
+target_include_directories(kernel_launcher PRIVATE
         ${PROJECT_INCLUDE_DIR}
         ${PROJECT_MINER_INCLUDE_DIR}
+        ${GPU_INCLUDE_DIRS}
 )
+target_compile_definitions(kernel_launcher PRIVATE ${GPU_COMPILE_DEFINITIONS})
 
-# Link appropriate GPU runtime
-if (GPU_BACKEND STREQUAL "HIP")
-    target_link_libraries(mining_system PUBLIC
-            sha1_kernel
-            ${HIP_LIBRARIES}
-            amdhip64
-    )
-    target_compile_definitions(mining_system PUBLIC USE_HIP)
-    target_include_directories(mining_system PUBLIC ${HIP_INCLUDE_DIRS})
-else ()
-    target_link_libraries(mining_system PUBLIC
-            CUDA::cudart
-            sha1_kernel
-    )
-endif ()
+# Create mining system library - pure C++
+add_library(mining_system STATIC
+        src/mining_system.cpp
+        src/globals.cpp
+)
+set_target_properties(mining_system PROPERTIES LINKER_LANGUAGE CXX)
+target_include_directories(mining_system PRIVATE
+        ${PROJECT_INCLUDE_DIR}
+        ${PROJECT_MINER_INCLUDE_DIR}
+        ${GPU_INCLUDE_DIRS}
+)
+target_compile_definitions(mining_system PRIVATE ${GPU_COMPILE_DEFINITIONS})
 
-# Apply platform-specific optimizations
-if (MSVC)
-    target_compile_options(mining_system PRIVATE
-            $<$<CONFIG:Release>:/O2 /Ob3 /Oi /Ot /GL /arch:AVX2 /fp:fast>
-            $<$<CONFIG:Debug>:/Od /RTC1>
-    )
-else ()
-    target_compile_options(mining_system PRIVATE
-            $<$<CONFIG:Release>:-O3 -march=native -mtune=native -ffast-math>
-            $<$<CONFIG:Debug>:-O0 -g>
-    )
-endif ()
-
-# Create main executable
+# Main executable - pure C++
 add_executable(sha1_miner src/main.cpp)
+set_target_properties(sha1_miner PROPERTIES LINKER_LANGUAGE CXX)
 target_include_directories(sha1_miner PRIVATE
         ${PROJECT_INCLUDE_DIR}
         ${PROJECT_MINER_INCLUDE_DIR}
+        ${GPU_INCLUDE_DIRS}
 )
+target_compile_definitions(sha1_miner PRIVATE ${GPU_COMPILE_DEFINITIONS})
 
-# Link libraries based on backend
+# Thread support
+find_package(Threads REQUIRED)
+
+# Link everything together
 if (GPU_BACKEND STREQUAL "HIP")
+    # Ensure the HIP kernel is built before linking
+    add_dependencies(sha1_miner hip_kernel)
+
+    # For HIP, link with the kernel object file
     target_link_libraries(sha1_miner PRIVATE
-            sha1_kernel
             mining_system
-            ${HIP_LIBRARIES}
-            amdhip64
+            kernel_launcher
+            ${HIP_KERNEL_OBJECT}
+            ${GPU_LINK_LIBRARIES}
+            Threads::Threads
     )
-    target_compile_definitions(sha1_miner PRIVATE USE_HIP)
-    target_include_directories(sha1_miner PRIVATE ${HIP_INCLUDE_DIRS})
 else ()
-    set_target_properties(sha1_miner PROPERTIES
-            CUDA_SEPARABLE_COMPILATION ON
-            CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    )
+    # For CUDA, use normal linking
     target_link_libraries(sha1_miner PRIVATE
-            sha1_kernel
             mining_system
-            CUDA::cudart
-            CUDA::cuda_driver
+            kernel_launcher
+            sha1_kernel_cuda
+            ${GPU_LINK_LIBRARIES}
+            Threads::Threads
     )
 endif ()
 
-# Build verification tool
-set(TEST_SOURCES
-        src/verify_sha1.cpp
-        src/verify_sha1_gpu.cu
-        src/verify_sha1_gpu_comprehensive.cu
-        src/globals.cpp
-)
-
-# Verification tool - CUDA only for now
-if (NOT GPU_BACKEND STREQUAL "HIP")
-    add_executable(verify_sha1 ${TEST_SOURCES})
-    target_include_directories(verify_sha1 PRIVATE
-            ${PROJECT_INCLUDE_DIR}
-            ${PROJECT_MINER_INCLUDE_DIR}
-    )
-    target_link_libraries(verify_sha1 PRIVATE
-            sha1_kernel
-            mining_system
-            CUDA::cudart
-    )
-endif ()
-
-# Optional: Link with nvml for GPU monitoring (NVIDIA only)
-if (GPU_BACKEND STREQUAL "CUDA")
-    find_library(NVML_LIBRARY nvidia-ml PATHS ${CUDAToolkit_LIBRARY_DIR})
-    if (NVML_LIBRARY)
-        target_link_libraries(sha1_miner PRIVATE ${NVML_LIBRARY})
-        target_compile_definitions(sha1_miner PRIVATE HAS_NVML)
-        message(STATUS "Found NVML library for GPU monitoring")
+# Enable link-time optimization for release builds
+if (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT ipo_supported)
+    if (ipo_supported)
+        set_property(TARGET sha1_miner mining_system kernel_launcher
+                PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+        message(STATUS "Link-time optimization enabled")
     endif ()
 endif ()
 
-# Optional: Link with rocm-smi for GPU monitoring (AMD only)
-if (GPU_BACKEND STREQUAL "HIP")
-    find_library(ROCM_SMI_LIBRARY rocm_smi64 PATHS ${ROCM_PATH}/lib)
-    if (ROCM_SMI_LIBRARY)
-        target_link_libraries(sha1_miner PRIVATE ${ROCM_SMI_LIBRARY})
-        target_compile_definitions(sha1_miner PRIVATE HAS_ROCM_SMI)
-        message(STATUS "Found ROCm SMI library for GPU monitoring")
-    endif ()
+# Set default build type
+if (NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
 endif ()
 
-# Enable link-time optimization for
+# Install target
+install(TARGETS sha1_miner RUNTIME DESTINATION bin)
+
+# Print summary
+message(STATUS "")
+message(STATUS "Build Configuration:")
+message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "  GPU Backend: ${GPU_BACKEND}")
+message(STATUS "  C++ Compiler: ${CMAKE_CXX_COMPILER}")
+message(STATUS "")

@@ -61,13 +61,24 @@ enum class GPUVendor {
 class MiningSystem {
 public:
     struct Config {
-        int device_id = 0;
-        int num_streams = 4;
-        int blocks_per_stream = 0; // Auto-calculate
-        int threads_per_block = DEFAULT_THREADS_PER_BLOCK;
-        bool use_pinned_memory = true;
-        size_t result_buffer_size = MAX_CANDIDATES_PER_BATCH;
-        bool force_generic_kernel = false; // Force use of generic kernel
+        int device_id;
+        int num_streams;
+        int blocks_per_stream;
+        int threads_per_block;
+        bool use_pinned_memory;
+        size_t result_buffer_size;
+        bool force_generic_kernel;
+
+        // Constructor with default values
+        Config()
+            : device_id(0)
+              , num_streams(4)
+              , blocks_per_stream(0) // Auto-calculate
+              , threads_per_block(DEFAULT_THREADS_PER_BLOCK)
+              , use_pinned_memory(true)
+              , result_buffer_size(MAX_CANDIDATES_PER_BATCH)
+              , force_generic_kernel(false) {
+        }
     };
 
     // Timing statistics structure
@@ -83,7 +94,8 @@ public:
         void print() const;
     };
 
-    MiningSystem(const Config &config = {});
+    // Constructor with default config
+    MiningSystem(const Config &config = Config());
 
     ~MiningSystem();
 

@@ -1,11 +1,11 @@
-// mining_system.cpp - SHA-1 Near-Collision Mining System with AMD/NVIDIA support
 #include "mining_system.hpp"
 #include "sha1_miner.cuh"
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
 #include <cstring>
-#include <sstream>
+
+#include "utilities.hpp"
 
 // Global system instance
 std::unique_ptr<MiningSystem> g_mining_system;

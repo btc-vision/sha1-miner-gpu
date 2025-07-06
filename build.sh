@@ -1,22 +1,12 @@
 #!/bin/bash
 
-# SHA-1 Near-Collision Miner Build Script
-# Supports both NVIDIA (CUDA) and AMD (HIP/ROCm) GPUs
-
-set -e  # Exit on error
+# Build script for SHA-1 miner with AMD/NVIDIA GPU support
 
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
-
-# Default values
-BUILD_TYPE="Release"
-GPU_BACKEND=""
-CLEAN_BUILD=0
-VERBOSE=0
-JOBS=$(nproc)
 
 # Function to print colored output
 print_info() {
@@ -31,191 +21,80 @@ print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
-# Function to detect GPU
-detect_gpu() {
-    print_info "Detecting GPU..."
-
-    # Check for NVIDIA GPUs
-    if command -v nvidia-smi &> /dev/null; then
-        if nvidia-smi &> /dev/null; then
-            print_info "NVIDIA GPU detected"
-            GPU_BACKEND="CUDA"
-            return
-        fi
-    fi
-
-    # Check for AMD GPUs
-    if command -v rocm-smi &> /dev/null; then
-        if rocm-smi &> /dev/null; then
-            print_info "AMD GPU detected"
-            GPU_BACKEND="HIP"
-            return
-        fi
-    fi
-
-    # Check for Intel GPUs
-    if command -v sycl-ls &> /dev/null; then
-        if sycl-ls | grep -q "GPU"; then
-            print_info "Intel GPU detected"
-            GPU_BACKEND="SYCL"
-            return
-        fi
-    fi
-
-    print_error "No supported GPU detected!"
-    exit 1
-}
-
-# Function to check dependencies
-check_dependencies() {
-    print_info "Checking dependencies..."
-
-    if [ "$GPU_BACKEND" == "CUDA" ]; then
-        if ! command -v nvcc &> /dev/null; then
-            print_error "CUDA toolkit not found. Please install CUDA."
-            exit 1
-        fi
-        print_info "CUDA version: $(nvcc --version | grep release | awk '{print $6}')"
-
-    elif [ "$GPU_BACKEND" == "HIP" ]; then
-        if ! command -v hipcc &> /dev/null; then
-            print_error "HIP/ROCm not found. Please install ROCm."
-            exit 1
-        fi
-        print_info "HIP version: $(hipcc --version | grep HIP | head -1)"
-
-        # Check ROCm environment
-        if [ -z "$ROCM_PATH" ]; then
-            export ROCM_PATH=/opt/rocm
-            print_warning "ROCM_PATH not set, using default: $ROCM_PATH"
-        fi
-    fi
-
-    # Check CMake
-    if ! command -v cmake &> /dev/null; then
-        print_error "CMake not found. Please install CMake >= 3.21"
-        exit 1
-    fi
-
-    cmake_version=$(cmake --version | head -1 | awk '{print $3}')
-    print_info "CMake version: $cmake_version"
-
-    # Check compiler
-    if ! command -v g++ &> /dev/null; then
-        print_error "g++ not found. Please install a C++ compiler."
-        exit 1
-    fi
-
-    print_info "g++ version: $(g++ --version | head -1)"
-}
-
-# Function to print usage
-usage() {
-    cat << EOF
-Usage: $0 [OPTIONS]
-
-OPTIONS:
-    -h, --help              Show this help message
-    -c, --cuda              Build for NVIDIA GPUs (CUDA)
-    -a, --amd               Build for AMD GPUs (HIP/ROCm)
-    -d, --debug             Build in debug mode
-    -r, --release           Build in release mode (default)
-    --clean                 Clean build directory before building
-    -j, --jobs <N>          Number of parallel build jobs (default: $(nproc))
-    -v, --verbose           Verbose build output
-    --auto                  Auto-detect GPU and build accordingly
-
-EXAMPLES:
-    $0 --auto               # Auto-detect GPU and build
-    $0 --cuda               # Build for NVIDIA GPUs
-    $0 --amd                # Build for AMD GPUs
-    $0 --cuda --debug       # Debug build for NVIDIA
-    $0 --clean --auto       # Clean build with auto-detection
-
-EOF
-}
-
 # Parse command line arguments
+GPU_TYPE=""
+BUILD_TYPE="Release"
+CLEAN_BUILD=0
+HIP_ARCH=""
+
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        -c|--cuda)
-            GPU_BACKEND="CUDA"
+        --amd|--hip)
+            GPU_TYPE="AMD"
             shift
             ;;
-        -a|--amd)
-            GPU_BACKEND="HIP"
+        --nvidia|--cuda)
+            GPU_TYPE="NVIDIA"
             shift
             ;;
-        -d|--debug)
+        --debug)
             BUILD_TYPE="Debug"
-            shift
-            ;;
-        -r|--release)
-            BUILD_TYPE="Release"
             shift
             ;;
         --clean)
             CLEAN_BUILD=1
             shift
             ;;
-        -j|--jobs)
-            JOBS="$2"
+        --hip-arch)
+            HIP_ARCH="$2"
             shift 2
             ;;
-        -v|--verbose)
-            VERBOSE=1
-            shift
-            ;;
-        --auto)
-            detect_gpu
-            shift
+        --help|-h)
+            echo "Usage: $0 [OPTIONS]"
+            echo "Options:"
+            echo "  --amd, --hip     Build for AMD GPUs using HIP"
+            echo "  --nvidia, --cuda Build for NVIDIA GPUs using CUDA"
+            echo "  --debug          Build in debug mode"
+            echo "  --clean          Clean build directory before building"
+            echo "  --hip-arch ARCH  Specify HIP architecture (e.g., gfx1030)"
+            echo "  --help, -h       Show this help message"
+            exit 0
             ;;
         *)
             print_error "Unknown option: $1"
-            usage
             exit 1
             ;;
     esac
 done
 
-# If no GPU backend specified, try to auto-detect
-if [ -z "$GPU_BACKEND" ]; then
-    detect_gpu
+# Auto-detect GPU if not specified
+if [ -z "$GPU_TYPE" ]; then
+    print_info "Auto-detecting GPU type..."
+
+    # Check for NVIDIA GPU
+    if command -v nvidia-smi &> /dev/null; then
+        if nvidia-smi &> /dev/null; then
+            GPU_TYPE="NVIDIA"
+            print_info "Detected NVIDIA GPU"
+        fi
+    fi
+
+    # Check for AMD GPU
+    if command -v rocm-smi &> /dev/null; then
+        if rocm-smi &> /dev/null; then
+            GPU_TYPE="AMD"
+            print_info "Detected AMD GPU"
+        fi
+    fi
+
+    if [ -z "$GPU_TYPE" ]; then
+        print_error "Could not auto-detect GPU type. Please specify --amd or --nvidia"
+        exit 1
+    fi
 fi
 
-# Check dependencies
-check_dependencies
-
-# Set build directory based on backend
-if [ "$GPU_BACKEND" == "CUDA" ]; then
-    BUILD_DIR="build_cuda"
-    CMAKE_ARGS="-DUSE_HIP=OFF"
-elif [ "$GPU_BACKEND" == "HIP" ]; then
-    BUILD_DIR="build_hip"
-    CMAKE_ARGS="-DUSE_HIP=ON"
-else
-    print_error "Unknown GPU backend: $GPU_BACKEND"
-    exit 1
-fi
-
-# Add build type
-CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_BUILD_TYPE=$BUILD_TYPE"
-
-# Add verbose flag if requested
-if [ $VERBOSE -eq 1 ]; then
-    CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_VERBOSE_MAKEFILE=ON"
-fi
-
-# Print build configuration
-print_info "Build configuration:"
-print_info "  GPU Backend: $GPU_BACKEND"
-print_info "  Build Type: $BUILD_TYPE"
-print_info "  Build Directory: $BUILD_DIR"
-print_info "  Parallel Jobs: $JOBS"
+# Set build directory based on GPU type
+BUILD_DIR="build_${GPU_TYPE,,}"
 
 # Clean build directory if requested
 if [ $CLEAN_BUILD -eq 1 ]; then
@@ -227,54 +106,61 @@ fi
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
-# Configure with CMake
-print_info "Configuring with CMake..."
-if [ $VERBOSE -eq 1 ]; then
-    if [ "$GPU_BACKEND" == "HIP" ]; then
-        # For HIP, explicitly set the GPU architecture if detection fails
-        cmake $CMAKE_ARGS -DHIP_ARCH="gfx1030;gfx1100" ..
+# Configure CMake based on GPU type
+print_info "Configuring for $GPU_TYPE GPUs..."
+
+CMAKE_ARGS="-DCMAKE_BUILD_TYPE=$BUILD_TYPE"
+
+if [ "$GPU_TYPE" == "AMD" ]; then
+    CMAKE_ARGS="$CMAKE_ARGS -DUSE_HIP=ON"
+
+    # Add HIP architecture if specified
+    if [ -n "$HIP_ARCH" ]; then
+        CMAKE_ARGS="$CMAKE_ARGS -DHIP_ARCH=$HIP_ARCH"
     else
-        cmake $CMAKE_ARGS ..
+        # Try to auto-detect AMD GPU architecture
+        if command -v rocminfo &> /dev/null; then
+            DETECTED_ARCH=$(rocminfo | grep -oP 'gfx\d+' | head -1)
+            if [ -n "$DETECTED_ARCH" ]; then
+                print_info "Auto-detected AMD GPU architecture: $DETECTED_ARCH"
+                CMAKE_ARGS="$CMAKE_ARGS -DHIP_ARCH=$DETECTED_ARCH"
+            fi
+        fi
     fi
 else
-    if [ "$GPU_BACKEND" == "HIP" ]; then
-        cmake $CMAKE_ARGS -DHIP_ARCH="gfx1030;gfx1100" .. > /dev/null
-    else
-        cmake $CMAKE_ARGS .. > /dev/null
-    fi
+    CMAKE_ARGS="$CMAKE_ARGS -DUSE_HIP=OFF"
 fi
 
-# Build
-print_info "Building SHA-1 miner..."
-if [ $VERBOSE -eq 1 ]; then
-    make -j"$JOBS"
+# Run CMake
+print_info "Running CMake with args: $CMAKE_ARGS"
+if cmake .. $CMAKE_ARGS; then
+    print_info "CMake configuration successful"
 else
-    make -j"$JOBS" | grep -E "(Built target|\\[.*%\\]|Linking)"
-fi
-
-# Check if build succeeded
-if [ -f "sha1_miner" ]; then
-    print_info "Build successful!"
-    print_info "Executable: $BUILD_DIR/sha1_miner"
-
-    # Print basic info about the executable
-    file sha1_miner
-
-    # Suggest next steps
-    echo ""
-    print_info "To run the miner:"
-    print_info "  cd $BUILD_DIR"
-    print_info "  ./sha1_miner --help"
-    print_info ""
-    print_info "To run verification tests:"
-    print_info "  cd $BUILD_DIR"
-    print_info "  ./verify_sha1"
-else
-    print_error "Build failed!"
+    print_error "CMake configuration failed"
     exit 1
 fi
 
-# Return to original directory
-cd ..
+# Get number of CPU cores for parallel build
+if command -v nproc &> /dev/null; then
+    NUM_CORES=$(nproc)
+else
+    NUM_CORES=4
+fi
 
-print_info "Done!"
+# Build the project
+print_info "Building with $NUM_CORES parallel jobs..."
+if make -j$NUM_CORES; then
+    print_info "Build successful!"
+    print_info "Executable location: $BUILD_DIR/sha1_miner"
+
+    # Print usage instructions
+    echo ""
+    print_info "To run the miner:"
+    echo "  ./$BUILD_DIR/sha1_miner --gpu 0 --duration 60 --difficulty 20"
+    echo ""
+    print_info "For help:"
+    echo "  ./$BUILD_DIR/sha1_miner --help"
+else
+    print_error "Build failed"
+    exit 1
+fi

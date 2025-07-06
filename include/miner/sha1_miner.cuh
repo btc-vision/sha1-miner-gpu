@@ -93,17 +93,31 @@ struct DeviceMiningJob {
     }
 
     void free() {
-        if (base_message)
-            gpuFree(base_message);
-        if (target_hash)
-            gpuFree(target_hash);
-        base_message = nullptr;
-        target_hash = nullptr;
+        if (base_message) {
+            gpuError_t err = gpuFree(base_message);
+            if (err != gpuSuccess) {
+                fprintf(stderr, "Warning: Failed to free base_message: %s\n", gpuGetErrorString(err));
+            }
+            base_message = nullptr;
+        }
+        if (target_hash) {
+            gpuError_t err = gpuFree(target_hash);
+            if (err != gpuSuccess) {
+                fprintf(stderr, "Warning: Failed to free target_hash: %s\n", gpuGetErrorString(err));
+            }
+            target_hash = nullptr;
+        }
     }
 
     void copyFromHost(const MiningJob &job) {
-        gpuMemcpy(base_message, job.base_message, 32, gpuMemcpyHostToDevice);
-        gpuMemcpy(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice);
+        gpuError_t err = gpuMemcpy(base_message, job.base_message, 32, gpuMemcpyHostToDevice);
+        if (err != gpuSuccess) {
+            fprintf(stderr, "Failed to copy base_message to device: %s\n", gpuGetErrorString(err));
+        }
+        err = gpuMemcpy(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice);
+        if (err != gpuSuccess) {
+            fprintf(stderr, "Failed to copy target_hash to device: %s\n", gpuGetErrorString(err));
+        }
     }
 };
 
