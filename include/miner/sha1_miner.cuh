@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
 #include <cuda_runtime.h>
+#include <sstream>
+#include <iomanip>
 
 // Include CUDA device functions
 #ifdef __CUDACC__

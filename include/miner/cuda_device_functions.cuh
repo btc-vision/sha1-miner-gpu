@@ -58,4 +58,10 @@ __device__ __forceinline__ uint32_t device_popcount(uint32_t x) {
 #define swap_endian(x) device_swap_endian(x)
 #define count_matching_bits(a, b) (32 - device_popcount((a) ^ (b)))
 
-#endif // __CUDACC__
+#endif
+
+#ifdef __CUDACC__
+__device__ __forceinline__ uint32_t min(uint32_t a, uint32_t b) {
+    return a < b ? a : b;
+}
+#endif

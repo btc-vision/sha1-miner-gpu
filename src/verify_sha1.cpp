@@ -5,12 +5,14 @@
 #include <cassert>
 #include <chrono>
 #include <sstream>
+#include "sha1_miner_functions.h"
 #include "cxxsha1.hpp"
+#include "sha1_miner.cuh"
+#include <cuda_runtime.h>
 
 // Cross-platform bit manipulation functions
 #ifdef _MSC_VER
 #include <intrin.h>
-
 // MSVC implementations
 inline int popcount(unsigned int x) {
     return __popcnt(x);
@@ -38,24 +40,32 @@ inline int count_leading_zeros(unsigned int x) {
 struct TestVector {
     const char *message;
     const char *expected_hash;
+    bool is_hex_input; // true if message should be interpreted as hex
 };
 
 const TestVector test_vectors[] = {
-    // Standard test vectors
-    {"", "da39a3ee5e6b4b0d3255bfef95601890afd80709"},
-    {"abc", "a9993e364706816aba3e25717850c26c9cd0d89d"},
+    // Standard test vectors (ASCII strings)
+    {"", "da39a3ee5e6b4b0d3255bfef95601890afd80709", false},
+    {"abc", "a9993e364706816aba3e25717850c26c9cd0d89d", false},
     {
         "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
-        "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
+        "84983e441c3bd26ebaae4aa1f95129e5e54670f1", false
     },
     {
         "The quick brown fox jumps over the lazy dog",
-        "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12"
+        "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12", false
     },
 
-    // 32-byte messages (our use case)
-    {"0123456789abcdef0123456789abcdef", "8c0ae11688016515c088b8419513ae7fb0b8ee88"},
-    {"ffffffffffffffffffffffffffffffff", "c907254fba426c1c7e46b0bb89cefc7b43aef714"},
+    // 32-byte binary messages (hex input)
+    {"0123456789abcdef0123456789abcdef", "4cc4cf5b00c0e2f9c2d91768e9ca5def474c6908", true},
+    {
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "c8ae0c9a79e2aee3a1b807103187a9ec51c59d3e", true
+    },
+    {
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "07bae34777fe7569d8dd66701fb23a0cd4775d02", true
+    },
 };
 
 // Convert hex string to bytes
@@ -117,12 +127,22 @@ bool test_sha1_basic() {
 
     for (const auto &tv: test_vectors) {
         SHA1 sha1;
-        sha1.update(std::string(tv.message));
+
+        if (tv.is_hex_input) {
+            // Convert hex string to binary data
+            auto binary_data = hex_to_bytes(tv.message);
+            sha1.update(std::string(reinterpret_cast<char *>(binary_data.data()), binary_data.size()));
+        } else {
+            // Use string as-is
+            sha1.update(std::string(tv.message));
+        }
+
         std::string hash_hex = sha1.final();
 
         bool passed = (hash_hex == tv.expected_hash);
 
-        std::cout << "Message: \"" << tv.message << "\"\n";
+        std::cout << "Message: \"" << tv.message << "\""
+                << (tv.is_hex_input ? " (hex)" : " (ascii)") << "\n";
         std::cout << "Expected: " << tv.expected_hash << "\n";
         std::cout << "Got:      " << hash_hex << "\n";
         std::cout << "Status:   " << (passed ? "PASS" : "FAIL") << "\n\n";
@@ -133,9 +153,102 @@ bool test_sha1_basic() {
     return all_passed;
 }
 
+// Test GPU mining functionality
+void test_gpu_mining() {
+    std::cout << "\n=== Testing GPU Mining Functions ===\n\n";
+
+    // Check for CUDA devices
+    int deviceCount;
+    cudaError_t err = cudaGetDeviceCount(&deviceCount);
+    if (err != cudaSuccess || deviceCount == 0) {
+        std::cout << "No CUDA devices found. Skipping GPU tests.\n";
+        return;
+    }
+
+    std::cout << "Found " << deviceCount << " CUDA device(s)\n";
+
+    // Test 1: Initialize mining system
+    std::cout << "\n1. Testing mining system initialization...\n";
+    if (!init_mining_system(0)) {
+        std::cerr << "Failed to initialize mining system\n";
+        return;
+    }
+    std::cout << "✓ Mining system initialized successfully\n";
+
+    // Test 2: Create a mining job
+    std::cout << "\n2. Testing mining job creation...\n";
+    uint8_t test_message[32] = {0};
+    for (int i = 0; i < 32; i++) {
+        test_message[i] = static_cast<uint8_t>(i);
+    }
+
+    // Calculate target hash
+    SHA1 sha1;
+    sha1.update(std::string(reinterpret_cast<char *>(test_message), 32));
+    std::string target_hex = sha1.final();
+    auto target_bytes = hex_to_bytes(target_hex);
+
+    MiningJob job = create_mining_job(test_message, target_bytes.data(), 20); // Low difficulty for testing
+    std::cout << "✓ Mining job created\n";
+    std::cout << "  Base message: " << bytes_to_hex(test_message, 32) << "\n";
+    std::cout << "  Target hash:  " << target_hex << "\n";
+    std::cout << "  Difficulty:   " << job.difficulty << " bits\n";
+
+    // Test 3: Run a short mining test
+    std::cout << "\n3. Running GPU mining for 5 seconds...\n";
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // Run mining for 5 seconds
+    run_mining_loop(job, 5);
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
+    std::cout << "\n✓ GPU mining completed in " << duration.count() << " seconds\n";
+
+    // Test 4: Compare GPU vs CPU performance
+    std::cout << "\n4. Performance comparison (1 million hashes)...\n";
+
+    // CPU performance
+    const int cpu_hashes = 1000000;
+    auto cpu_start = std::chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < cpu_hashes; i++) {
+        uint8_t msg[32];
+        std::memcpy(msg, test_message, 32);
+        *reinterpret_cast<uint64_t *>(&msg[24]) ^= i;
+
+        SHA1 sha1_cpu;
+        sha1_cpu.update(std::string(reinterpret_cast<char *>(msg), 32));
+        sha1_cpu.final();
+    }
+
+    auto cpu_end = std::chrono::high_resolution_clock::now();
+    auto cpu_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_end - cpu_start);
+    double cpu_rate = static_cast<double>(cpu_hashes) / (cpu_duration.count() / 1000000.0) / 1000000.0;
+
+    std::cout << "  CPU Rate: " << std::fixed << std::setprecision(2) << cpu_rate << " MH/s\n";
+    std::cout << "  GPU Rate: Check the mining output above for GH/s rate\n";
+    std::cout << "  (GPU is typically 100-1000x faster than CPU)\n";
+
+    // Test 5: Test result processing
+    std::cout << "\n5. Testing near-collision detection on GPU...\n";
+
+    // Create a harder job that might find near-collisions
+    MiningJob hard_job = create_mining_job(test_message, target_bytes.data(), 16); // 16-bit collision
+    std::cout << "  Looking for 16-bit near-collisions...\n";
+
+    // Run for 10 seconds
+    run_mining_loop(hard_job, 10);
+
+    // Cleanup
+    std::cout << "\n6. Cleaning up GPU resources...\n";
+    cleanup_mining_system();
+    std::cout << "✓ GPU resources cleaned up successfully\n";
+}
+
 // Test near-collision detection
 void test_near_collision() {
-    std::cout << "Testing near-collision detection...\n\n";
+    std::cout << "\nTesting near-collision detection...\n\n";
 
     // Create two similar messages
     uint8_t msg1[32] = {0};
@@ -153,21 +266,18 @@ void test_near_collision() {
     std::string hex2 = sha1_2.final();
 
     // Convert hex to binary
-    uint8_t hash1[20], hash2[20];
-    for (int i = 0; i < 20; i++) {
-        hash1[i] = static_cast<uint8_t>(std::stoi(hex1.substr(i * 2, 2), nullptr, 16));
-        hash2[i] = static_cast<uint8_t>(std::stoi(hex2.substr(i * 2, 2), nullptr, 16));
-    }
+    auto hash1 = hex_to_bytes(hex1);
+    auto hash2 = hex_to_bytes(hex2);
 
     // Analyze similarity
-    int matching_bits = count_matching_bits(hash1, hash2);
-    int consecutive_bits = count_consecutive_bits(hash1, hash2);
+    int matching_bits = count_matching_bits(hash1.data(), hash2.data());
+    int consecutive_bits = count_consecutive_bits(hash1.data(), hash2.data());
 
     std::cout << "Message 1: " << bytes_to_hex(msg1, 32) << "\n";
-    std::cout << "Hash 1:    " << bytes_to_hex(hash1, 20) << "\n\n";
+    std::cout << "Hash 1:    " << hex1 << "\n\n";
 
     std::cout << "Message 2: " << bytes_to_hex(msg2, 32) << "\n";
-    std::cout << "Hash 2:    " << bytes_to_hex(hash2, 20) << "\n\n";
+    std::cout << "Hash 2:    " << hex2 << "\n\n";
 
     std::cout << "Matching bits:     " << matching_bits << " / 160\n";
     std::cout << "Consecutive bits:  " << consecutive_bits << "\n";
@@ -183,9 +293,9 @@ void test_near_collision() {
     std::cout << std::dec << "\n";
 }
 
-// Simulate mining attempts
-void simulate_mining() {
-    std::cout << "\nSimulating mining attempts...\n\n";
+// Simulate CPU mining attempts
+void simulate_cpu_mining() {
+    std::cout << "\nSimulating CPU mining attempts...\n\n";
 
     // Fixed base message
     uint8_t base_msg[32];
@@ -197,13 +307,9 @@ void simulate_mining() {
     SHA1 sha1_target;
     sha1_target.update(std::string(reinterpret_cast<char *>(base_msg), 32));
     std::string target_hex = sha1_target.final();
+    auto target_hash = hex_to_bytes(target_hex);
 
-    uint8_t target_hash[20];
-    for (int i = 0; i < 20; i++) {
-        target_hash[i] = static_cast<uint8_t>(std::stoi(target_hex.substr(i * 2, 2), nullptr, 16));
-    }
-
-    std::cout << "Target: " << bytes_to_hex(target_hash, 20) << "\n\n";
+    std::cout << "Target: " << target_hex << "\n\n";
 
     // Try different nonces
     int best_match = 0;
@@ -223,14 +329,10 @@ void simulate_mining() {
         SHA1 sha1;
         sha1.update(std::string(reinterpret_cast<char *>(msg), 32));
         std::string hex = sha1.final();
-
-        uint8_t hash[20];
-        for (int i = 0; i < 20; i++) {
-            hash[i] = static_cast<uint8_t>(std::stoi(hex.substr(i * 2, 2), nullptr, 16));
-        }
+        auto hash = hex_to_bytes(hex);
 
         // Check similarity
-        int matching_bits = count_matching_bits(hash, target_hash);
+        int matching_bits = count_matching_bits(hash.data(), target_hash.data());
 
         if (matching_bits > best_match) {
             best_match = matching_bits;
@@ -240,7 +342,7 @@ void simulate_mining() {
                 // Found something interesting
                 std::cout << "Nonce: " << std::hex << nonce << std::dec
                         << " | Matching bits: " << matching_bits
-                        << " | Hash: " << bytes_to_hex(hash, 20) << "\n";
+                        << " | Hash: " << hex << "\n";
             }
         }
 
@@ -257,7 +359,7 @@ void simulate_mining() {
 
 // Performance test
 void performance_test() {
-    std::cout << "\nPerformance test...\n";
+    std::cout << "\nCPU Performance test...\n";
 
     const int num_hashes = 1000000;
     uint8_t msg[32] = {0};
@@ -288,20 +390,23 @@ void performance_test() {
 
 int main() {
     std::cout << "+------------------------------------------+\n";
-    std::cout << "|       SHA-1 Implementation Test          |\n";
+    std::cout << "|    SHA-1 Implementation & GPU Test       |\n";
     std::cout << "+------------------------------------------+\n\n";
 
-    // Run tests
+    // Run CPU tests
     if (!test_sha1_basic()) {
         std::cerr << "SHA-1 basic tests FAILED!\n";
         return 1;
     }
 
     test_near_collision();
-    simulate_mining();
+    simulate_cpu_mining();
     performance_test();
 
-    std::cout << "\nAll tests completed successfully!\n";
+    // Run GPU tests
+    test_gpu_mining();
+
+    std::cout << "\nAll tests completed!\n";
 
     return 0;
 }

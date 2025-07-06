@@ -169,7 +169,7 @@ MiningJob create_mining_job(const uint8_t *message, const uint8_t *target_hash, 
 }
 
 // Process results from GPU
-size_t process_results(ResultPool &pool, MiningResult *host_results, size_t max_results) {
+int process_results(ResultPool &pool, MiningResult *host_results, size_t max_results) {
     if (!g_system) return 0;
 
     // Get result count

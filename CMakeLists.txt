@@ -32,15 +32,15 @@ if (MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /Oi /Ot /Oy /GT /GL /Gw /arch:AVX2 /fp:fast /MD")
     set(CMAKE_CXX_FLAGS_DEBUG "/Od /RTC1 /MDd")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /OPT:REF /OPT:ICF")
-else()
+else ()
     # Linux/Unix optimization flags
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native -ffast-math -funroll-loops -finline-functions")
     set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
-endif()
+endif ()
 
 # CUDA compilation flags - optimized for mining workload
 set(CMAKE_CUDA_FLAGS "--use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt --extra-device-vectorization --optimize 3")
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --restrict -maxrregcount=72")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --restrict -maxrregcount=64")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler")
 
 # Add line info for profiling in release, full debug in debug
@@ -73,12 +73,12 @@ function(add_gpu_library target_name)
                 $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/O2;/Ob3;/Oi;/Ot;/GL;/arch:AVX2;/fp:fast>
                 $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:/Od;/RTC1>
         )
-    else()
+    else ()
         target_compile_options(${target_name} PRIVATE
                 $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3;-march=native;-mtune=native;-ffast-math>
                 $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:-O0;-g>
         )
-    endif()
+    endif ()
 
     set_target_properties(${target_name} PROPERTIES
             CUDA_SEPARABLE_COMPILATION ON
@@ -124,12 +124,12 @@ if (MSVC)
             $<$<CONFIG:Release>:/O2;/Ob3;/Oi;/Ot;/GL;/arch:AVX2;/fp:fast>
             $<$<CONFIG:Debug>:/Od;/RTC1>
     )
-else()
+else ()
     target_compile_options(sha1_host PRIVATE
             $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>
             $<$<CONFIG:Debug>:-O0;-g>
     )
-endif()
+endif ()
 
 # Create main executable
 add_executable(sha1_miner src/main.cpp)
@@ -155,11 +155,17 @@ target_link_libraries(sha1_miner PRIVATE
         CUDA::cuda_driver
 )
 
-# Build verification tool
+# Build verification tool with GPU support
 add_executable(verify_sha1 ${TEST_SOURCES})
 target_include_directories(verify_sha1 PRIVATE
         ${PROJECT_INCLUDE_DIR}
         ${PROJECT_MINER_INCLUDE_DIR}
+        ${CUDAToolkit_INCLUDE_DIRS}
+)
+target_link_libraries(verify_sha1 PRIVATE
+        sha1_kernel
+        sha1_host
+        CUDA::cudart
 )
 
 # Platform-specific optimizations for executables
@@ -170,39 +176,39 @@ if (MSVC)
     target_compile_options(verify_sha1 PRIVATE
             $<$<CONFIG:Release>:/O2;/Ob3;/Oi;/Ot;/GL;/arch:AVX2;/fp:fast>
     )
-else()
+else ()
     target_compile_options(sha1_miner PRIVATE
             $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>
     )
     target_compile_options(verify_sha1 PRIVATE
             $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>
     )
-endif()
+endif ()
 
 # Optional: Link with nvml for GPU monitoring
 find_library(NVML_LIBRARY nvidia-ml PATHS ${CUDAToolkit_LIBRARY_DIR})
-if(NVML_LIBRARY)
+if (NVML_LIBRARY)
     target_link_libraries(sha1_miner PRIVATE ${NVML_LIBRARY})
     target_compile_definitions(sha1_miner PRIVATE HAS_NVML)
-endif()
+endif ()
 
 # Enable link-time optimization for release builds
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
+if (CMAKE_BUILD_TYPE STREQUAL "Release")
     include(CheckIPOSupported)
     check_ipo_supported(RESULT ipo_supported OUTPUT ipo_output)
-    if(ipo_supported)
+    if (ipo_supported)
         set_property(TARGET sha1_miner sha1_kernel sha1_host verify_sha1
                 PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
         message(STATUS "Link-time optimization enabled")
-    else()
+    else ()
         message(STATUS "Link-time optimization not supported: ${ipo_output}")
-    endif()
-endif()
+    endif ()
+endif ()
 
 # Set default build type if not specified
-if(NOT CMAKE_BUILD_TYPE)
+if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
-endif()
+endif ()
 
 # Install targets
 install(TARGETS sha1_miner verify_sha1
@@ -224,13 +230,13 @@ message(STATUS "  CUDA runtime: ${CMAKE_CUDA_RUNTIME_LIBRARY}")
 message(STATUS "  Include directories:")
 message(STATUS "    - ${PROJECT_INCLUDE_DIR}")
 message(STATUS "    - ${PROJECT_MINER_INCLUDE_DIR}")
-if(MSVC)
+if (MSVC)
     message(STATUS "  Platform: Windows/MSVC")
     message(STATUS "  CXX Release flags: ${CMAKE_CXX_FLAGS_RELEASE}")
-else()
+else ()
     message(STATUS "  Platform: Linux/Unix")
     message(STATUS "  CXX Release flags: ${CMAKE_CXX_FLAGS_RELEASE}")
-endif()
+endif ()
 message(STATUS "")
 
 # Add custom targets for profiling
