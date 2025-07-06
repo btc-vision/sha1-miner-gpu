@@ -109,7 +109,7 @@ struct DeviceMiningJob {
         }
     }
 
-    void copyFromHost(const MiningJob &job) {
+    void copyFromHost(const MiningJob &job) const {
         gpuError_t err = gpuMemcpy(base_message, job.base_message, 32, gpuMemcpyHostToDevice);
         if (err != gpuSuccess) {
             fprintf(stderr, "Failed to copy base_message to device: %s\n", gpuGetErrorString(err));
