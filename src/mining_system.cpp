@@ -111,20 +111,33 @@ void MiningSystem::autoTuneParameters() {
     if (gpu_vendor_ == GPUVendor::AMD) {
         // AMD-specific tuning
         optimal_threads = 256; // AMD typically prefers 256
+        // For RDNA (RX 5700 XT), multiProcessorCount may report half the actual CUs
+        int actual_cus = device_props_.multiProcessorCount;
+        // Check if this is RDNA by wavefront size
+        if (device_props_.warpSize == 32) {
+            // RDNA has 32-thread wavefronts instead of 64
+            // ROCm might report WGPs (Workgroup Processors) instead of CUs
+            // Each WGP has 2 CUs in RDNA
+            actual_cus *= 2;
+            std::cout << "Detected RDNA architecture, adjusting CU count to: " << actual_cus << "\n";
+        }
         // AMD GPU architectures
         if (device_props_.major >= 10) {
             // RDNA/RDNA2/RDNA3 (gfx10xx/gfx11xx)
-            blocks_per_sm = 16; // Increased from 8
+            blocks_per_sm = 32; // Much higher for RDNA
             config_.num_streams = 8;
         } else if (device_props_.major == 9) {
             // GCN5/Vega (gfx900/gfx906)
-            blocks_per_sm = 8; // Increased from 4
+            blocks_per_sm = 16;
             config_.num_streams = 4;
         } else {
             // Older GCN
-            blocks_per_sm = 4; // Increased from 2
+            blocks_per_sm = 8;
             config_.num_streams = 2;
         }
+
+        // Use actual CU count for calculations
+        config_.blocks_per_stream = actual_cus * blocks_per_sm;
     } else if (gpu_vendor_ == GPUVendor::NVIDIA) {
         // NVIDIA-specific tuning
         if (device_props_.major >= 8) {

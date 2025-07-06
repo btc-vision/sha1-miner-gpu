@@ -444,6 +444,22 @@ int main(int argc, char *argv[]) {
     // Check GPU availability
     int device_count;
     gpuGetDeviceCount(&device_count);
+    std::cout << "Raw device count from gpuGetDeviceCount: " << device_count << "\n";
+
+#ifdef USE_HIP
+    int hip_device_count = 0;
+    hipError_t hip_err = hipGetDeviceCount(&hip_device_count);
+    std::cout << "HIP device count: " << hip_device_count << "\n";
+    std::cout << "HIP error: " << hipGetErrorString(hip_err) << "\n";
+
+    // List all devices
+    for (int i = 0; i < hip_device_count; i++) {
+        hipDeviceProp_t props;
+        hipGetDeviceProperties(&props, i);
+        std::cout << "  Device " << i << ": " << props.name << "\n";
+    }
+#endif
+
     if (device_count == 0) {
 #ifdef USE_HIP
         std::cerr << "No AMD/HIP devices found!\n";
