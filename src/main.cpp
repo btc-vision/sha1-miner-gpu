@@ -4,25 +4,61 @@
 #include <iostream>
 #include <iomanip>
 #include <vector>
-#include <cstring>
 #include <random>
 #include <csignal>
 #include <atomic>
+#include <chrono>
+#include <thread>
+
+// Platform-specific includes
+#ifdef _WIN32
+#include <windows.h>
+#define SIGBREAK 21  // Windows-specific signal
+#else
+    #include <unistd.h>
+    #include <sys/types.h>
+    #include <sys/stat.h>
+#endif
 
 // Forward declarations
 void run_mining_loop(MiningJob job, uint32_t duration_seconds);
 
+// Signal handler for graceful shutdown
 void signal_handler(int sig) {
-    std::cout << "\nReceived signal " << sig << ", shutting down...\n";
+    const char *sig_name = "UNKNOWN";
+    switch (sig) {
+        case SIGINT: sig_name = "SIGINT";
+            break;
+        case SIGTERM: sig_name = "SIGTERM";
+            break;
+#ifdef _WIN32
+        case SIGBREAK: sig_name = "SIGBREAK";
+            break;
+#else
+        case SIGHUP:  sig_name = "SIGHUP"; break;
+        case SIGQUIT: sig_name = "SIGQUIT"; break;
+#endif
+    }
+    std::cout << "\nReceived signal " << sig_name << " (" << sig << "), shutting down...\n";
     g_shutdown.store(true);
 }
 
 // Set up signal handlers
 void setup_signal_handlers() {
+    // Common signals
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
-#ifdef _WIN32
+    def
+    _WIN32
+    // Windows-specific signals
     std::signal(SIGBREAK, signal_handler);
+#else
+    // Unix-specific signals
+    std::signal(SIGHUP, signal_handler);
+    std::signal(SIGQUIT, signal_handler);
+
+    // Ignore SIGPIPE (broken pipe)
+    std::signal(SIGPIPE, SIG_IGN);
 #endif
 }
 
@@ -35,6 +71,21 @@ struct Config {
     std::string target_hex;
     std::string message_hex;
 };
+
+void print_usage(const char *program_name) {
+    std::cout << "SHA-1 Near-Collision Miner v2.0\n\n";
+    std::cout << "Usage: " << program_name << " [options]\n\n";
+    std::cout << "Options:\n";
+    std::cout << "  --gpu <id>          GPU device ID (default: 0)\n";
+    std::cout << "  --difficulty <bits> Number of bits that must match (default: 120)\n";
+    std::cout << "  --duration <sec>    Mining duration in seconds (default: 60)\n";
+    std::cout << "  --target <hex>      Target hash in hex (40 chars)\n";
+    std::cout << "  --message <hex>     Base message in hex (64 chars)\n";
+    std::cout << "  --benchmark         Run performance benchmark\n";
+    std::cout << "  --help              Show this help\n\n";
+    std::cout << "Example:\n";
+    std::cout << "  " << program_name << " --gpu 0 --difficulty 100 --duration 300\n";
+}
 
 Config parse_args(int argc, char *argv[]) {
     Config config;
@@ -54,19 +105,8 @@ Config parse_args(int argc, char *argv[]) {
             config.message_hex = argv[++i];
         } else if (arg == "--benchmark") {
             config.benchmark = true;
-        } else if (arg == "--help") {
-            std::cout << "SHA-1 Near-Collision Miner\n\n";
-            std::cout << "Usage: " << argv[0] << " [options]\n\n";
-            std::cout << "Options:\n";
-            std::cout << "  --gpu <id>          GPU device ID (default: 0)\n";
-            std::cout << "  --difficulty <bits> Number of bits that must match (default: 120)\n";
-            std::cout << "  --duration <sec>    Mining duration in seconds (default: 60)\n";
-            std::cout << "  --target <hex>      Target hash in hex (40 chars)\n";
-            std::cout << "  --message <hex>     Base message in hex (64 chars)\n";
-            std::cout << "  --benchmark         Run performance benchmark\n";
-            std::cout << "  --help              Show this help\n\n";
-            std::cout << "Example:\n";
-            std::cout << "  " << argv[0] << " --gpu 0 --difficulty 100 --duration 300\n";
+        } else if (arg == "--help" || arg == "-h") {
+            print_usage(argv[0]);
             std::exit(0);
         } else {
             std::cerr << "Unknown option: " << arg << "\n";
@@ -78,13 +118,32 @@ Config parse_args(int argc, char *argv[]) {
     return config;
 }
 
+// Platform-independent high-resolution timer
+class Timer {
+private:
+    std::chrono::high_resolution_clock::time_point start_time;
+    lic:
+
+
+
+
+    void start() {
+        start_time = std::chrono::high_resolution_clock::now();
+    }
+
+    double elapsed_seconds() const {
+        auto now = std::chrono::high_resolution_clock::now();
+        return std::chrono::duration<double>(now - start_time).count();
+    }
+};
+
 // Convert hex string to bytes
 std::vector<uint8_t> hex_to_bytes(const std::string &hex) {
     std::vector<uint8_t> bytes;
 
     for (size_t i = 0; i < hex.length(); i += 2) {
         std::string byte_str = hex.substr(i, 2);
-        bytes.push_back(std::stoi(byte_str, nullptr, 16));
+        bytes.push_back(static_cast<uint8_t>(std::stoi(byte_str, nullptr, 16)));
     }
 
     return bytes;
@@ -98,7 +157,7 @@ std::vector<uint8_t> generate_random_message() {
 
     std::vector<uint8_t> message(32);
     for (auto &byte: message) {
-        byte = dis(gen);
+        byte = static_cast<uint8_t>(dis(gen));
     }
 
     return message;
@@ -121,6 +180,35 @@ std::vector<uint8_t> calculate_sha1(const std::vector<uint8_t> &message) {
     return hash;
 }
 
+// Print system information
+void print_system_info() {
+    std::cout << "System Information:\n";
+    def
+    _WIN32
+    std::cout << "  Platform: Windows\n";
+#elif __linux__
+    std::cout << "  Platform: Linux\n";
+#elif __APPLE__
+    std::cout << "  Platform: macOS\n";
+#else
+    std::cout << "  Platform: Unknown Unix\n";
+#endif
+
+    std::cout << "  CPU Threads: " << std::thread::hardware_concurrency() << "\n";
+    // CUDA information
+    int device_count;
+    cudaGetDeviceCount(&device_count);
+    std::cout << "  CUDA Devices: " << device_count << "\n";
+
+    for (int i = 0; i < device_count; i++) {
+        cudaDeviceProp props;
+        cudaGetDeviceProperties(&props, i);
+        std::cout << "    GPU " << i << ": " << props.name
+                << " (SM " << props.major << "." << props.minor << ")\n";
+    }
+    std::cout << "\n";
+}
+
 // Run benchmark mode
 void run_benchmark(int gpu_id) {
     std::cout << "\n=== SHA-1 Near-Collision Mining Benchmark ===\n\n";
@@ -134,6 +222,8 @@ void run_benchmark(int gpu_id) {
     std::vector<uint32_t> difficulties = {80, 90, 100, 110, 120, 130};
 
     for (uint32_t diff: difficulties) {
+        if (g_shutdown) break;
+
         std::cout << "\nTesting difficulty " << diff << " bits:\n";
 
         // Create test job
@@ -159,7 +249,11 @@ int main(int argc, char *argv[]) {
 
     std::cout << "+------------------------------------------+\n";
     std::cout << "|    SHA-1 Near-Collision Miner v2.0       |\n";
+    std::cout << "|         Cross-Platform Edition           |\n";
     std::cout << "+------------------------------------------+\n\n";
+
+    // Print system information
+    print_system_info();
 
     // Run benchmark if requested
     if (config.benchmark) {
@@ -188,7 +282,8 @@ int main(int argc, char *argv[]) {
         message = generate_random_message();
         std::cout << "Generated random message: ";
         for (uint8_t b: message) {
-            std::cout << std::hex << std::setw(2) << std::setfill('0') << (int) b;
+            std::cout << std::hex << std::setw(2) << std::setfill('0')
+                    << static_cast<int>(b);
         }
         std::cout << "\n";
     }
@@ -204,7 +299,8 @@ int main(int argc, char *argv[]) {
         target = calculate_sha1(message);
         std::cout << "Target SHA-1: ";
         for (uint8_t b: target) {
-            std::cout << std::hex << std::setw(2) << std::setfill('0') << (int) b;
+            std::cout << std::hex << std::setw(2) << std::setfill('0')
+                    << static_cast<int>(b);
         }
         std::cout << "\n";
     }
@@ -213,12 +309,20 @@ int main(int argc, char *argv[]) {
     MiningJob job = create_mining_job(message.data(), target.data(), config.difficulty);
 
     std::cout << "\nMining Configuration:\n";
-    std::cout << "Difficulty: " << config.difficulty << " bits must match\n";
-    std::cout << "Duration: " << config.duration << " seconds\n";
-    std::cout << "Success probability per hash: 2^-" << config.difficulty << "\n\n";
+    std::cout << "  Difficulty: " << config.difficulty << " bits must match\n";
+    std::cout << "  Duration: " << config.duration << " seconds\n";
+    std::cout << "  Success probability per hash: 2^-" << config.difficulty << "\n\n";
+
+    // Start timing
+    Timer timer;
+    timer.start();
 
     // Run mining
     run_mining_loop(job, config.duration);
+
+    // Print final timing
+    std::cout << "\nTotal runtime: " << std::fixed << std::setprecision(2)
+            << timer.elapsed_seconds() << " seconds\n";
 
     // Cleanup
     cleanup_mining_system();

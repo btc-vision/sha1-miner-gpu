@@ -17,10 +17,9 @@ set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
 find_package(CUDAToolkit REQUIRED)
 
 # Handle CUDA architectures
-# Check if architectures are already set (e.g., from preset)
 if (NOT CMAKE_CUDA_ARCHITECTURES)
-    # Default architectures
-    set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90")
+    # Support wide range of GPUs from Maxwell to Blackwell
+    set(CMAKE_CUDA_ARCHITECTURES "50;52;60;61;70;75;80;86;89;90")
 
     # Add Blackwell (120) if CUDA version supports it
     if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.5")
@@ -28,41 +27,19 @@ if (NOT CMAKE_CUDA_ARCHITECTURES)
     endif ()
 endif ()
 
-# For Windows with Ninja, we need special handling
-if (WIN32 AND CMAKE_GENERATOR MATCHES "Ninja")
-    # Ninja on Windows has issues with CUDA response files
-    set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_OBJECTS OFF)
-    set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES OFF)
-
-    # Simplify CUDA flags for Windows Ninja
-    set(CMAKE_CUDA_FLAGS "--use_fast_math -O3")
-else ()
-    # Full optimization flags for other configurations
-    set(CMAKE_CUDA_FLAGS "--use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt")
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --extra-device-vectorization --optimize 3")
-endif ()
+# CUDA compilation flags - optimized for mining workload
+set(CMAKE_CUDA_FLAGS "--use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt --extra-device-vectorization --optimize 3")
 
 # Platform-specific optimization flags
 if (MSVC)
-    # Windows optimization flags
+    # Windows optimization flags for C++ files
     set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /Oi /Ot /Oy /GT /GL /Gw /arch:AVX2 /fp:fast /MD")
     set(CMAKE_CXX_FLAGS_DEBUG "/Od /RTC1 /MDd")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /OPT:REF /OPT:ICF")
-
-    # Suppress MSVC warnings - only for C++ files, not CUDA
-    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/wd4996>)
 else ()
     # Linux/Unix optimization flags
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native -ffast-math -funroll-loops -finline-functions")
     set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
-
-    # Enable all warnings except some specific ones
-    add_compile_options(-Wall -Wextra -Wno-unused-parameter)
-endif ()
-
-# Allow unsupported compiler combinations if needed
-if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER "11")
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler")
 endif ()
 
 # Add line info for profiling in release, full debug in debug
@@ -80,10 +57,10 @@ set(PROJECT_MINER_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include/miner)
 file(MAKE_DIRECTORY ${PROJECT_INCLUDE_DIR})
 file(MAKE_DIRECTORY ${PROJECT_MINER_INCLUDE_DIR})
 
-# Add CUDA include directories for better IDE support
+# Add CUDA include directories
 include_directories(${CUDAToolkit_INCLUDE_DIRS})
 
-# Helper function for GPU targets
+# Helper function for GPU targets with proper optimization
 function(add_gpu_library target_name)
     add_library(${target_name} STATIC ${ARGN})
 
@@ -93,7 +70,7 @@ function(add_gpu_library target_name)
             ${CUDAToolkit_INCLUDE_DIRS}
     )
 
-    # Platform-specific compile options
+    # Apply C++ optimizations only to C++ files, not CUDA
     if (MSVC)
         target_compile_options(${target_name} PRIVATE
                 $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/O2;/Ob3;/Oi;/Ot;/GL;/arch:AVX2;/fp:fast>
@@ -132,7 +109,7 @@ set(TEST_SOURCES
 # Build GPU kernel library
 add_gpu_library(sha1_kernel ${CUDA_SOURCES})
 
-# Build host library
+# Build host library with full optimizations
 add_library(sha1_host STATIC ${HOST_SOURCES})
 target_include_directories(sha1_host PUBLIC
         ${PROJECT_INCLUDE_DIR}
@@ -141,15 +118,17 @@ target_include_directories(sha1_host PUBLIC
 )
 target_link_libraries(sha1_host PUBLIC
         CUDA::cudart
-        sha1_kernel  # Link kernel library
+        sha1_kernel
 )
 
-# Platform-specific options for host library
+# Apply platform-specific optimizations to host library
 if (MSVC)
     target_compile_options(sha1_host PRIVATE
             $<$<CONFIG:Release>:/O2;/Ob3;/Oi;/Ot;/GL;/arch:AVX2;/fp:fast>
             $<$<CONFIG:Debug>:/Od;/RTC1>
     )
+    # Suppress warnings only for C++ files
+    target_compile_options(sha1_host PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/wd4996>)
 else ()
     target_compile_options(sha1_host PRIVATE
             $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>
@@ -159,27 +138,32 @@ endif ()
 
 # Create main executable
 add_executable(sha1_miner src/main.cpp)
-
-# Set executable properties
 set_target_properties(sha1_miner PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
-
-# Configure includes for executable
 target_include_directories(sha1_miner PRIVATE
         ${PROJECT_INCLUDE_DIR}
         ${PROJECT_MINER_INCLUDE_DIR}
         ${CUDAToolkit_INCLUDE_DIRS}
 )
-
-# Link everything together
 target_link_libraries(sha1_miner PRIVATE
         sha1_kernel
         sha1_host
         CUDA::cudart
         CUDA::cuda_driver
 )
+
+# Apply optimizations to executable
+if (MSVC)
+    target_compile_options(sha1_miner PRIVATE
+            $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/O2;/Ob3;/Oi;/Ot;/GL;/arch:AVX2;/fp:fast>
+    )
+else ()
+    target_compile_options(sha1_miner PRIVATE
+            $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3;-march=native;-mtune=native;-ffast-math>
+    )
+endif ()
 
 # Build verification tool
 add_executable(verify_sha1 ${TEST_SOURCES})
@@ -194,20 +178,14 @@ target_link_libraries(verify_sha1 PRIVATE
         CUDA::cudart
 )
 
-# Platform-specific optimizations for executables
+# Apply optimizations to test executable
 if (MSVC)
-    target_compile_options(sha1_miner PRIVATE
-            $<$<CONFIG:Release>:/O2;/Ob3;/Oi;/Ot;/GL;/arch:AVX2;/fp:fast>
-    )
     target_compile_options(verify_sha1 PRIVATE
-            $<$<CONFIG:Release>:/O2;/Ob3;/Oi;/Ot;/GL;/arch:AVX2;/fp:fast>
+            $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/O2;/Ob3;/Oi;/Ot;/GL;/arch:AVX2;/fp:fast>
     )
 else ()
-    target_compile_options(sha1_miner PRIVATE
-            $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>
-    )
     target_compile_options(verify_sha1 PRIVATE
-            $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>
+            $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3;-march=native;-mtune=native;-ffast-math>
     )
 endif ()
 
@@ -266,35 +244,9 @@ else ()
 endif ()
 message(STATUS "")
 
-# Add custom targets for profiling
-add_custom_target(profile
-        COMMAND nsys profile --stats=true --output=sha1_profile ./sha1_miner --benchmark
-        DEPENDS sha1_miner
-        COMMENT "Profiling SHA-1 miner with Nsight Systems"
-        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-add_custom_target(ncu-profile
-        COMMAND ncu --kernel-name sha1_mining_kernel_optimized --launch-skip 100 --launch-count 10
-        --section ComputeWorkloadAnalysis --section MemoryWorkloadAnalysis
-        --section LaunchStats --section Occupancy
-        ./sha1_miner --benchmark
-        DEPENDS sha1_miner
-        COMMENT "Profiling kernel with Nsight Compute"
-        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-# Add test target
+# Testing
 enable_testing()
 add_test(NAME SHA1_Verification
         COMMAND verify_sha1
-        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-# Create a custom target to run tests
-add_custom_target(run_tests
-        COMMAND ${CMAKE_CTEST_COMMAND} -V
-        DEPENDS verify_sha1
-        COMMENT "Running SHA-1 verification tests"
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
