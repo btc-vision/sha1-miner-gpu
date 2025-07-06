@@ -71,9 +71,6 @@ MiningJob create_mining_job(const uint8_t *message, const uint8_t *target_hash, 
 // Launch mining kernel
 void launch_mining_kernel(const MiningJob &job, ResultPool &pool, const KernelConfig &config);
 
-// Process results - Note: non-const pool reference
-extern "C" size_t process_results(ResultPool &pool, MiningResult *host_results, size_t max_results);
-
 // Cleanup
 void cleanup_mining_system();
 

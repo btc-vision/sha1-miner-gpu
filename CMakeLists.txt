@@ -18,13 +18,14 @@ find_package(CUDAToolkit REQUIRED)
 
 # Set CUDA architectures (adjust based on your GPU)
 # Common architectures:
+# - 70: Volta (V100)
 # - 75: Turing (RTX 20xx, GTX 16xx)
-# - 80: Ampere (RTX 30xx, A100)
+# - 80: Ampere (A100)
 # - 86: Ampere (RTX 30xx consumer)
 # - 89: Ada Lovelace (RTX 40xx)
 # - 90: Hopper (H100)
-# - 120: Blackwell (future)
-set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90;120")
+# - 120: Blackwell (RTX 50xx)
+set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90;120")
 
 # Platform-specific optimization flags
 if (MSVC)
@@ -32,20 +33,30 @@ if (MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /Oi /Ot /Oy /GT /GL /Gw /arch:AVX2 /fp:fast /MD")
     set(CMAKE_CXX_FLAGS_DEBUG "/Od /RTC1 /MDd")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /OPT:REF /OPT:ICF")
+
+    # Suppress MSVC warnings
+    add_compile_options(/wd4996)  # Suppress deprecated warnings
 else ()
     # Linux/Unix optimization flags
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native -ffast-math -funroll-loops -finline-functions")
     set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
+
+    # Enable all warnings except some specific ones
+    add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 endif ()
 
 # CUDA compilation flags - optimized for mining workload
-set(CMAKE_CUDA_FLAGS "--use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt --extra-device-vectorization --optimize 3")
-#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --restrict -maxrregcount=64")
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --extra-device-vectorization --optimize 3")
+
+# Allow unsupported compiler combinations if needed
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER "11")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler")
+endif ()
 
 # Add line info for profiling in release, full debug in debug
-set(CMAKE_CUDA_FLAGS_RELEASE "-lineinfo")
-set(CMAKE_CUDA_FLAGS_DEBUG "-G -g")
+set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -lineinfo")
+set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G -g")
 
 # Enable separate compilation
 set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
@@ -53,6 +64,10 @@ set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 # Set include directories
 set(PROJECT_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(PROJECT_MINER_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include/miner)
+
+# Create include directories if they don't exist
+file(MAKE_DIRECTORY ${PROJECT_INCLUDE_DIR})
+file(MAKE_DIRECTORY ${PROJECT_MINER_INCLUDE_DIR})
 
 # Add CUDA include directories for better IDE support
 include_directories(${CUDAToolkit_INCLUDE_DIRS})
@@ -90,9 +105,7 @@ endfunction()
 set(HOST_SOURCES
         src/main.cpp
         src/sha1_host.cpp
-        src/job_upload.cpp
         src/globals.cpp
-        # src/cxxsha1.cpp is no longer needed as SHA-1 is header-only
 )
 
 set(CUDA_SOURCES
@@ -101,10 +114,10 @@ set(CUDA_SOURCES
 
 set(TEST_SOURCES
         src/verify_sha1.cpp
-        # src/cxxsha1.cpp is no longer needed
+        src/globals.cpp
 )
 
-# Build libraries
+# Build GPU kernel library
 add_gpu_library(sha1_kernel ${CUDA_SOURCES})
 
 # Build host library
@@ -116,6 +129,7 @@ target_include_directories(sha1_host PUBLIC
 )
 target_link_libraries(sha1_host PUBLIC
         CUDA::cudart
+        sha1_kernel  # Link kernel library
 )
 
 # Platform-specific options for host library
@@ -155,7 +169,7 @@ target_link_libraries(sha1_miner PRIVATE
         CUDA::cuda_driver
 )
 
-# Build verification tool with GPU support
+# Build verification tool
 add_executable(verify_sha1 ${TEST_SOURCES})
 target_include_directories(verify_sha1 PRIVATE
         ${PROJECT_INCLUDE_DIR}
@@ -190,6 +204,7 @@ find_library(NVML_LIBRARY nvidia-ml PATHS ${CUDAToolkit_LIBRARY_DIR})
 if (NVML_LIBRARY)
     target_link_libraries(sha1_miner PRIVATE ${NVML_LIBRARY})
     target_compile_definitions(sha1_miner PRIVATE HAS_NVML)
+    message(STATUS "Found NVML library for GPU monitoring")
 endif ()
 
 # Enable link-time optimization for release builds
@@ -248,7 +263,7 @@ add_custom_target(profile
 )
 
 add_custom_target(ncu-profile
-        COMMAND ncu --kernel-name sha1_near_collision_kernel --launch-skip 100 --launch-count 10
+        COMMAND ncu --kernel-name sha1_mining_kernel_optimized --launch-skip 100 --launch-count 10
         --section ComputeWorkloadAnalysis --section MemoryWorkloadAnalysis
         --section LaunchStats --section Occupancy
         ./sha1_miner --benchmark
@@ -257,9 +272,17 @@ add_custom_target(ncu-profile
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
-# Test build target to verify compilation
-add_custom_target(test_build
-        COMMAND ${CMAKE_COMMAND} -E echo "Testing CUDA compilation..."
-        COMMAND ${CMAKE_CUDA_COMPILER} --version
-        COMMENT "Verifying CUDA compiler"
+# Add test target
+enable_testing()
+add_test(NAME SHA1_Verification
+        COMMAND verify_sha1
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+# Create a custom target to run tests
+add_custom_target(run_tests
+        COMMAND ${CMAKE_CTEST_COMMAND} -V
+        DEPENDS verify_sha1
+        COMMENT "Running SHA-1 verification tests"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )

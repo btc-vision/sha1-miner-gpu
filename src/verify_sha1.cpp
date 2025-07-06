@@ -1,411 +1,340 @@
+#include "sha1_miner.cuh"
+#include "cxxsha1.hpp"
 #include <iostream>
 #include <iomanip>
 #include <vector>
 #include <cstring>
-#include <cassert>
-#include <chrono>
-#include <sstream>
-#include "cxxsha1.hpp"
-#include "sha1_miner.cuh"
 #include <cuda_runtime.h>
+#include <device_launch_parameters.h>
 
-// Cross-platform bit manipulation functions
-#ifdef _MSC_VER
-#include <intrin.h>
-// MSVC implementations
-inline int popcount(unsigned int x) {
-    return __popcnt(x);
-}
-
-inline int count_leading_zeros(unsigned int x) {
-    unsigned long index;
-    if (_BitScanReverse(&index, x)) {
-        return 31 - index;
-    }
-    return 32; // All bits are zero
-}
-#else
-// GCC/Clang implementations
-inline int popcount(unsigned int x) {
-    return __builtin_popcount(x);
-}
-
-inline int count_leading_zeros(unsigned int x) {
-    return x ? __builtin_clz(x) : 32;
-}
-#endif
-
-// Test vectors from NIST
+// Test vectors from NIST FIPS 180-1
 struct TestVector {
-    const char *message;
-    const char *expected_hash;
-    bool is_hex_input; // true if message should be interpreted as hex
-};
-
-const TestVector test_vectors[] = {
-    // Standard test vectors (ASCII strings)
-    {"", "da39a3ee5e6b4b0d3255bfef95601890afd80709", false},
-    {"abc", "a9993e364706816aba3e25717850c26c9cd0d89d", false},
-    {
-        "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
-        "84983e441c3bd26ebaae4aa1f95129e5e54670f1", false
-    },
-    {
-        "The quick brown fox jumps over the lazy dog",
-        "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12", false
-    },
-
-    // 32-byte binary messages (hex input)
-    {"0123456789abcdef0123456789abcdef", "4cc4cf5b00c0e2f9c2d91768e9ca5def474c6908", true},
-    {
-        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        "c8ae0c9a79e2aee3a1b807103187a9ec51c59d3e", true
-    },
-    {
-        "0000000000000000000000000000000000000000000000000000000000000000",
-        "07bae34777fe7569d8dd66701fb23a0cd4775d02", true
-    },
+    std::string name;
+    std::vector<uint8_t> message;
+    std::vector<uint8_t> expected_hash;
 };
 
 // Convert hex string to bytes
 std::vector<uint8_t> hex_to_bytes(const std::string &hex) {
     std::vector<uint8_t> bytes;
     for (size_t i = 0; i < hex.length(); i += 2) {
-        std::string byte_str = hex.substr(i, 2);
-        bytes.push_back(static_cast<uint8_t>(std::stoi(byte_str, nullptr, 16)));
+        bytes.push_back(std::stoi(hex.substr(i, 2), nullptr, 16));
     }
     return bytes;
 }
 
-// Convert bytes to hex string
-std::string bytes_to_hex(const uint8_t *bytes, size_t len) {
-    std::stringstream ss;
+// Print hash in hex format
+void print_hash(const uint8_t *hash, size_t len = 20) {
     for (size_t i = 0; i < len; i++) {
-        ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(bytes[i]);
+        std::cout << std::hex << std::setw(2) << std::setfill('0')
+                << static_cast<int>(hash[i]);
     }
-    return ss.str();
 }
 
-// Count matching bits between two hashes
-int count_matching_bits(const uint8_t *hash1, const uint8_t *hash2) {
-    int matching_bits = 0;
+// Test CPU implementation
+bool test_cpu_sha1(const TestVector &test) {
+    std::cout << "Testing CPU SHA-1: " << test.name << "\n";
 
-    for (int i = 0; i < 20; i++) {
-        uint8_t xor_byte = hash1[i] ^ hash2[i];
-        // Use popcount to count set bits in XOR result
-        matching_bits += 8 - popcount(static_cast<unsigned int>(xor_byte));
+    // Compute SHA-1 using our implementation
+    SHA1 sha1;
+    sha1.update(std::string(test.message.begin(), test.message.end()));
+    std::string hex_result = sha1.final();
+
+    // Convert hex to bytes
+    std::vector<uint8_t> computed_hash = hex_to_bytes(hex_result);
+
+    // Compare with expected
+    bool passed = (computed_hash == test.expected_hash);
+
+    std::cout << "  Input (" << test.message.size() << " bytes): ";
+    if (test.message.size() <= 64) {
+        print_hash(test.message.data(), test.message.size());
+    } else {
+        std::cout << "...";
     }
+    std::cout << "\n";
 
-    return matching_bits;
+    std::cout << "  Expected: ";
+    print_hash(test.expected_hash.data());
+    std::cout << "\n";
+
+    std::cout << "  Computed: ";
+    print_hash(computed_hash.data());
+    std::cout << "\n";
+
+    std::cout << "  Result: " << (passed ? "PASS" : "FAIL") << "\n\n";
+
+    return passed;
 }
 
-// Count consecutive matching bits from MSB
-int count_consecutive_bits(const uint8_t *hash1, const uint8_t *hash2) {
-    int consecutive_bits = 0;
+// GPU kernel for testing single SHA-1 computation
+__global__ void test_sha1_kernel(
+    const uint8_t *message,
+    size_t message_len,
+    uint64_t nonce,
+    uint32_t *output_hash
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    for (int i = 0; i < 20; i++) {
-        uint8_t xor_byte = hash1[i] ^ hash2[i];
+    // For testing, we'll compute SHA-1 of message + nonce
+    // This tests the nonce application logic
 
-        if (xor_byte == 0) {
-            consecutive_bits += 8;
-        } else {
-            // Count leading zeros in the byte
-            consecutive_bits += count_leading_zeros(static_cast<unsigned int>(xor_byte)) - 24; // Adjust for byte
-            break;
+    extern __device__ void sha1_compute(const uint32_t *, uint64_t, uint32_t *);
+
+    // Prepare message (pad to 32 bytes for our mining format)
+    uint32_t padded_msg[8] = {0};
+
+    // Copy message and convert to big-endian
+    for (size_t i = 0; i < message_len && i < 32; i += 4) {
+        uint32_t word = 0;
+        for (size_t j = 0; j < 4 && i + j < message_len; j++) {
+            word |= static_cast<uint32_t>(message[i + j]) << (24 - j * 8);
         }
+        padded_msg[i / 4] = word;
     }
 
-    return consecutive_bits;
+    // Compute SHA-1 with nonce
+    sha1_compute(padded_msg, nonce, output_hash);
 }
 
-// Test basic SHA-1 functionality
-bool test_sha1_basic() {
-    std::cout << "Testing SHA-1 implementation...\n\n";
+// Test GPU implementation
+bool test_gpu_sha1_with_nonce() {
+    std::cout << "Testing GPU SHA-1 with nonce application:\n";
+
+    // Test message (32 bytes)
+    std::vector<uint8_t> message(32, 0);
+    std::strcpy(reinterpret_cast<char *>(message.data()), "SHA-1 GPU Test Message");
+
+    // Test with different nonces
+    std::vector<uint64_t> test_nonces = {0, 1, 0x123456789ABCDEF0ULL, UINT64_MAX};
 
     bool all_passed = true;
 
-    for (const auto &tv: test_vectors) {
-        SHA1 sha1;
+    for (uint64_t nonce: test_nonces) {
+        // Allocate device memory
+        uint8_t *d_message;
+        uint32_t *d_hash;
+        cudaMalloc(&d_message, 32);
+        cudaMalloc(&d_hash, 5 * sizeof(uint32_t));
 
-        if (tv.is_hex_input) {
-            // Convert hex string to binary data
-            auto binary_data = hex_to_bytes(tv.message);
-            sha1.update(std::string(reinterpret_cast<char *>(binary_data.data()), binary_data.size()));
-        } else {
-            // Use string as-is
-            sha1.update(std::string(tv.message));
+        // Copy message to device
+        cudaMemcpy(d_message, message.data(), 32, cudaMemcpyHostToDevice);
+
+        // Launch kernel
+        test_sha1_kernel<<<1, 1>>>(d_message, 32, nonce, d_hash);
+        cudaDeviceSynchronize();
+
+        // Get result
+        uint32_t gpu_hash[5];
+        cudaMemcpy(gpu_hash, d_hash, 5 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+
+        // Compute expected hash on CPU
+        std::vector<uint8_t> cpu_message = message;
+        // Apply nonce to last 8 bytes
+        uint64_t *nonce_ptr = reinterpret_cast<uint64_t *>(&cpu_message[24]);
+        *nonce_ptr ^= nonce;
+
+        SHA1 sha1;
+        sha1.update(std::string(cpu_message.begin(), cpu_message.end()));
+        std::string hex_result = sha1.final();
+        std::vector<uint8_t> expected_hash = hex_to_bytes(hex_result);
+
+        // Convert GPU result to bytes for comparison
+        std::vector<uint8_t> gpu_hash_bytes(20);
+        for (int i = 0; i < 5; i++) {
+            gpu_hash_bytes[i * 4] = (gpu_hash[i] >> 24) & 0xFF;
+            gpu_hash_bytes[i * 4 + 1] = (gpu_hash[i] >> 16) & 0xFF;
+            gpu_hash_bytes[i * 4 + 2] = (gpu_hash[i] >> 8) & 0xFF;
+            gpu_hash_bytes[i * 4 + 3] = gpu_hash[i] & 0xFF;
         }
 
-        std::string hash_hex = sha1.final();
+        bool passed = (gpu_hash_bytes == expected_hash);
 
-        bool passed = (hash_hex == tv.expected_hash);
-
-        std::cout << "Message: \"" << tv.message << "\""
-                << (tv.is_hex_input ? " (hex)" : " (ascii)") << "\n";
-        std::cout << "Expected: " << tv.expected_hash << "\n";
-        std::cout << "Got:      " << hash_hex << "\n";
-        std::cout << "Status:   " << (passed ? "PASS" : "FAIL") << "\n\n";
+        std::cout << "  Nonce: 0x" << std::hex << nonce << std::dec << "\n";
+        std::cout << "  GPU Hash: ";
+        print_hash(gpu_hash_bytes.data());
+        std::cout << "\n";
+        std::cout << "  Expected: ";
+        print_hash(expected_hash.data());
+        std::cout << "\n";
+        std::cout << "  Result: " << (passed ? "PASS" : "FAIL") << "\n\n";
 
         all_passed &= passed;
+
+        // Cleanup
+        cudaFree(d_message);
+        cudaFree(d_hash);
     }
 
     return all_passed;
 }
 
-// Test GPU mining functionality
-void test_gpu_mining() {
-    std::cout << "\n=== Testing GPU Mining Functions ===\n\n";
+// Portable count leading zeros function
+inline uint32_t count_leading_zeros(uint32_t x) {
+    if (x == 0) return 32;
 
-    // Check for CUDA devices
-    int deviceCount;
-    cudaError_t err = cudaGetDeviceCount(&deviceCount);
-    if (err != cudaSuccess || deviceCount == 0) {
-        std::cout << "No CUDA devices found. Skipping GPU tests.\n";
-        return;
+    uint32_t n = 0;
+    if (x <= 0x0000FFFF) {
+        n += 16;
+        x <<= 16;
     }
-
-    std::cout << "Found " << deviceCount << " CUDA device(s)\n";
-
-    // Test 1: Initialize mining system
-    std::cout << "\n1. Testing mining system initialization...\n";
-    if (!init_mining_system(0)) {
-        std::cerr << "Failed to initialize mining system\n";
-        return;
+    if (x <= 0x00FFFFFF) {
+        n += 8;
+        x <<= 8;
     }
-    std::cout << "✓ Mining system initialized successfully\n";
-
-    // Test 2: Create a mining job
-    std::cout << "\n2. Testing mining job creation...\n";
-    uint8_t test_message[32] = {0};
-    for (int i = 0; i < 32; i++) {
-        test_message[i] = static_cast<uint8_t>(i);
+    if (x <= 0x0FFFFFFF) {
+        n += 4;
+        x <<= 4;
     }
-
-    // Calculate target hash
-    SHA1 sha1;
-    sha1.update(std::string(reinterpret_cast<char *>(test_message), 32));
-    std::string target_hex = sha1.final();
-    auto target_bytes = hex_to_bytes(target_hex);
-
-    MiningJob job = create_mining_job(test_message, target_bytes.data(), 20); // Low difficulty for testing
-    std::cout << "✓ Mining job created\n";
-    std::cout << "  Base message: " << bytes_to_hex(test_message, 32) << "\n";
-    std::cout << "  Target hash:  " << target_hex << "\n";
-    std::cout << "  Difficulty:   " << job.difficulty << " bits\n";
-
-    // Test 3: Run a short mining test
-    std::cout << "\n3. Running GPU mining for 5 seconds...\n";
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    // Run mining for 5 seconds
-    run_mining_loop(job, 5);
-
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
-    std::cout << "\n✓ GPU mining completed in " << duration.count() << " seconds\n";
-
-    // Test 4: Compare GPU vs CPU performance
-    std::cout << "\n4. Performance comparison (1 million hashes)...\n";
-
-    // CPU performance
-    const int cpu_hashes = 1000000;
-    auto cpu_start = std::chrono::high_resolution_clock::now();
-
-    for (int i = 0; i < cpu_hashes; i++) {
-        uint8_t msg[32];
-        std::memcpy(msg, test_message, 32);
-        *reinterpret_cast<uint64_t *>(&msg[24]) ^= i;
-
-        SHA1 sha1_cpu;
-        sha1_cpu.update(std::string(reinterpret_cast<char *>(msg), 32));
-        sha1_cpu.final();
+    if (x <= 0x3FFFFFFF) {
+        n += 2;
+        x <<= 2;
     }
+    if (x <= 0x7FFFFFFF) { n += 1; }
 
-    auto cpu_end = std::chrono::high_resolution_clock::now();
-    auto cpu_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_end - cpu_start);
-    double cpu_rate = static_cast<double>(cpu_hashes) / (cpu_duration.count() / 1000000.0) / 1000000.0;
-
-    std::cout << "  CPU Rate: " << std::fixed << std::setprecision(2) << cpu_rate << " MH/s\n";
-    std::cout << "  GPU Rate: Check the mining output above for GH/s rate\n";
-    std::cout << "  (GPU is typically 100-1000x faster than CPU)\n";
-
-    // Test 5: Test result processing
-    std::cout << "\n5. Testing near-collision detection on GPU...\n";
-
-    // Create a harder job that might find near-collisions
-    MiningJob hard_job = create_mining_job(test_message, target_bytes.data(), 16); // 16-bit collision
-    std::cout << "  Looking for 16-bit near-collisions...\n";
-
-    // Run for 10 seconds
-    run_mining_loop(hard_job, 10);
-
-    // Cleanup
-    std::cout << "\n6. Cleaning up GPU resources...\n";
-    cleanup_mining_system();
-    std::cout << "✓ GPU resources cleaned up successfully\n";
+    return n;
 }
 
 // Test near-collision detection
-void test_near_collision() {
-    std::cout << "\nTesting near-collision detection...\n\n";
+bool test_near_collision_detection() {
+    std::cout << "Testing near-collision detection:\n";
 
-    // Create two similar messages
-    uint8_t msg1[32] = {0};
-    uint8_t msg2[32] = {0};
+    // Create two hashes with known bit differences
+    uint32_t hash1[5] = {0x12345678, 0x9ABCDEF0, 0x11111111, 0x22222222, 0x33333333};
+    uint32_t hash2[5] = {0x12345678, 0x9ABCDEF0, 0x11111111, 0x22222222, 0x33333333};
 
-    // Make them slightly different
-    msg2[31] = 1; // Change last byte
-
-    // Compute hashes using SHA1 class
-    SHA1 sha1_1, sha1_2;
-    sha1_1.update(std::string(reinterpret_cast<char *>(msg1), 32));
-    sha1_2.update(std::string(reinterpret_cast<char *>(msg2), 32));
-
-    std::string hex1 = sha1_1.final();
-    std::string hex2 = sha1_2.final();
-
-    // Convert hex to binary
-    auto hash1 = hex_to_bytes(hex1);
-    auto hash2 = hex_to_bytes(hex2);
-
-    // Analyze similarity
-    int matching_bits = count_matching_bits(hash1.data(), hash2.data());
-    int consecutive_bits = count_consecutive_bits(hash1.data(), hash2.data());
-
-    std::cout << "Message 1: " << bytes_to_hex(msg1, 32) << "\n";
-    std::cout << "Hash 1:    " << hex1 << "\n\n";
-
-    std::cout << "Message 2: " << bytes_to_hex(msg2, 32) << "\n";
-    std::cout << "Hash 2:    " << hex2 << "\n\n";
-
-    std::cout << "Matching bits:     " << matching_bits << " / 160\n";
-    std::cout << "Consecutive bits:  " << consecutive_bits << "\n";
-    std::cout << "Hamming distance:  " << (160 - matching_bits) << "\n\n";
-
-    // Show bit-by-bit comparison
-    std::cout << "Bit-by-bit XOR:\n";
-    for (int i = 0; i < 20; i++) {
-        uint8_t xor_byte = hash1[i] ^ hash2[i];
-        std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(xor_byte) << " ";
-        if ((i + 1) % 8 == 0) std::cout << "\n";
-    }
-    std::cout << std::dec << "\n";
-}
-
-// Simulate CPU mining attempts
-void simulate_cpu_mining() {
-    std::cout << "\nSimulating CPU mining attempts...\n\n";
-
-    // Fixed base message
-    uint8_t base_msg[32];
-    for (int i = 0; i < 32; i++) {
-        base_msg[i] = static_cast<uint8_t>(i);
-    }
-
-    // Compute target hash
-    SHA1 sha1_target;
-    sha1_target.update(std::string(reinterpret_cast<char *>(base_msg), 32));
-    std::string target_hex = sha1_target.final();
-    auto target_hash = hex_to_bytes(target_hex);
-
-    std::cout << "Target: " << target_hex << "\n\n";
-
-    // Try different nonces
-    int best_match = 0;
-    uint64_t best_nonce = 0;
-
-    const uint64_t num_attempts = 1000000;
-
-    for (uint64_t nonce = 0; nonce < num_attempts; nonce++) {
-        // Apply nonce to message
-        uint8_t msg[32];
-        std::memcpy(msg, base_msg, 32);
-
-        // XOR nonce into last 8 bytes
-        *reinterpret_cast<uint64_t *>(&msg[24]) ^= nonce;
-
-        // Compute hash
-        SHA1 sha1;
-        sha1.update(std::string(reinterpret_cast<char *>(msg), 32));
-        std::string hex = sha1.final();
-        auto hash = hex_to_bytes(hex);
-
-        // Check similarity
-        int matching_bits = count_matching_bits(hash.data(), target_hash.data());
-
-        if (matching_bits > best_match) {
-            best_match = matching_bits;
-            best_nonce = nonce;
-
-            if (matching_bits >= 20) {
-                // Found something interesting
-                std::cout << "Nonce: " << std::hex << nonce << std::dec
-                        << " | Matching bits: " << matching_bits
-                        << " | Hash: " << hex << "\n";
+    // Test exact match (160 bits)
+    {
+        uint32_t matching_bits = 0;
+        for (int i = 0; i < 5; i++) {
+            uint32_t xor_val = hash1[i] ^ hash2[i];
+            if (xor_val == 0) {
+                matching_bits += 32;
+            } else {
+                matching_bits += count_leading_zeros(xor_val);
+                break;
             }
         }
 
-        if (nonce % 100000 == 0) {
-            std::cout << "\rProgress: " << static_cast<int>(nonce * 100 / num_attempts) << "%"
-                    << " | Best: " << best_match << " bits" << std::flush;
+        std::cout << "  Exact match test: " << matching_bits << " bits (expected: 160)\n";
+        bool passed = (matching_bits == 160);
+        std::cout << "  Result: " << (passed ? "PASS" : "FAIL") << "\n\n";
+
+        if (!passed) return false;
+    }
+
+    // Test 1-bit difference in last word
+    hash2[4] ^= 0x80000000; // Flip MSB of last word
+    {
+        uint32_t matching_bits = 0;
+        for (int i = 0; i < 5; i++) {
+            uint32_t xor_val = hash1[i] ^ hash2[i];
+            if (xor_val == 0) {
+                matching_bits += 32;
+            } else {
+                matching_bits += count_leading_zeros(xor_val);
+                break;
+            }
         }
+
+        std::cout << "  1-bit difference test: " << matching_bits << " bits (expected: 128)\n";
+        bool passed = (matching_bits == 128);
+        std::cout << "  Result: " << (passed ? "PASS" : "FAIL") << "\n\n";
+
+        if (!passed) return false;
     }
 
-    std::cout << "\n\nBest result after " << num_attempts << " attempts:\n";
-    std::cout << "Nonce: 0x" << std::hex << best_nonce << std::dec << "\n";
-    std::cout << "Matching bits: " << best_match << " / 160\n";
-}
+    // Test multiple bit differences
+    hash2[2] = 0x11110000; // 4 bits different in middle
+    {
+        uint32_t matching_bits = 0;
+        for (int i = 0; i < 5; i++) {
+            uint32_t xor_val = hash1[i] ^ hash2[i];
+            if (xor_val == 0) {
+                matching_bits += 32;
+            } else {
+                matching_bits += count_leading_zeros(xor_val);
+                break;
+            }
+        }
 
-// Performance test
-void performance_test() {
-    std::cout << "\nCPU Performance test...\n";
+        std::cout << "  Multi-bit difference test: " << matching_bits << " bits (expected: 64)\n";
+        bool passed = (matching_bits == 64);
+        std::cout << "  Result: " << (passed ? "PASS" : "FAIL") << "\n\n";
 
-    const int num_hashes = 1000000;
-    uint8_t msg[32] = {0};
-
-    auto start = std::chrono::high_resolution_clock::now();
-
-    for (int i = 0; i < num_hashes; i++) {
-        // Vary the message
-        *reinterpret_cast<uint32_t *>(msg) = static_cast<uint32_t>(i);
-
-        SHA1 sha1;
-        sha1.update(std::string(reinterpret_cast<char *>(msg), 32));
-        std::string result = sha1.final();
-        // Just computing, not storing
+        if (!passed) return false;
     }
 
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
-    double seconds = static_cast<double>(duration.count()) / 1000000.0;
-    double hashes_per_second = static_cast<double>(num_hashes) / seconds;
-
-    std::cout << "Computed " << num_hashes << " hashes in "
-            << std::fixed << std::setprecision(3) << seconds << " seconds\n";
-    std::cout << "Rate: " << std::fixed << std::setprecision(2)
-            << hashes_per_second / 1000000.0 << " MH/s (CPU)\n";
+    return true;
 }
 
 int main() {
-    std::cout << "+------------------------------------------+\n";
-    std::cout << "|    SHA-1 Implementation & GPU Test       |\n";
-    std::cout << "+------------------------------------------+\n\n";
+    std::cout << "SHA-1 Implementation Verification Tool\n";
+    std::cout << "=====================================\n\n";
 
-    // Run CPU tests
-    if (!test_sha1_basic()) {
-        std::cerr << "SHA-1 basic tests FAILED!\n";
+    // Initialize CUDA
+    int device_count;
+    cudaGetDeviceCount(&device_count);
+    if (device_count == 0) {
+        std::cerr << "No CUDA devices found\n";
         return 1;
     }
 
-    test_near_collision();
-    simulate_cpu_mining();
-    performance_test();
+    cudaSetDevice(0);
 
-    // Run GPU tests
-    test_gpu_mining();
+    // Test vectors
+    std::vector<TestVector> test_vectors = {
+        {
+            "Empty string",
+            {},
+            hex_to_bytes("da39a3ee5e6b4b0d3255bfef95601890afd80709")
+        },
+        {
+            "abc",
+            {'a', 'b', 'c'},
+            hex_to_bytes("a9993e364706816aba3e25717850c26c9cd0d89d")
+        },
+        {
+            "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+            std::vector<uint8_t>(
+                "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq" + 56
+            ),
+            hex_to_bytes("84983e441c3bd26ebaae4aa1f95129e5e54670f1")
+        },
+        {
+            "32-byte message for mining test",
+            std::vector<uint8_t>(32, 'X'), // 32 'X' characters
+            hex_to_bytes("7a0f092061e7cffe645e99fa4719203623f70e46")
+        }
+    };
 
-    std::cout << "\nAll tests completed!\n";
+    bool all_passed = true;
 
-    return 0;
+    // Test CPU implementation
+    std::cout << "1. CPU SHA-1 Tests\n";
+    std::cout << "==================\n\n";
+
+    for (const auto &test: test_vectors) {
+        all_passed &= test_cpu_sha1(test);
+    }
+
+    // Test GPU implementation
+    std::cout << "2. GPU SHA-1 Tests\n";
+    std::cout << "==================\n\n";
+
+    all_passed &= test_gpu_sha1_with_nonce();
+
+    // Test near-collision detection
+    std::cout << "3. Near-Collision Detection Tests\n";
+    std::cout << "=================================\n\n";
+
+    all_passed &= test_near_collision_detection();
+
+    // Summary
+    std::cout << "Test Summary\n";
+    std::cout << "============\n";
+    std::cout << "Overall Result: " << (all_passed ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << "\n";
+
+    return all_passed ? 0 : 1;
 }
