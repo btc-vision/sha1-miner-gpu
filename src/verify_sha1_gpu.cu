@@ -1,15 +1,9 @@
-// verify_sha1_gpu.cu - GPU-specific SHA-1 tests
-
 #include "sha1_miner.cuh"
 #include "cxxsha1.hpp"
 #include <iostream>
 #include <iomanip>
 #include <vector>
-#include <cstring>
 #include <cuda_runtime.h>
-
-// Forward declaration from kernel
-extern __device__ void sha1_compute(const uint32_t*, uint64_t, uint32_t*);
 
 // Convert hex string to bytes
 std::vector<uint8_t> hex_to_bytes(const std::string &hex) {
@@ -28,7 +22,7 @@ void print_hash(const uint8_t *hash, size_t len = 20) {
     }
 }
 
-// GPU kernel for testing single SHA-1 computation
+// Simple SHA-1 test kernel - self-contained implementation for testing
 __global__ void test_sha1_kernel(
     const uint8_t *message,
     size_t message_len,
@@ -37,8 +31,13 @@ __global__ void test_sha1_kernel(
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
+    // SHA-1 constants
+    const uint32_t K[4] = {0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xCA62C1D6};
+    const uint32_t H0[5] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
+
     // Prepare message (pad to 32 bytes for our mining format)
-    uint32_t padded_msg[8] = {0};
+    uint32_t W[16];
+    memset(W, 0, sizeof(W));
 
     // Copy message and convert to big-endian
     for (size_t i = 0; i < message_len && i < 32; i += 4) {
@@ -46,11 +45,62 @@ __global__ void test_sha1_kernel(
         for (size_t j = 0; j < 4 && i + j < message_len; j++) {
             word |= static_cast<uint32_t>(message[i + j]) << (24 - j * 8);
         }
-        padded_msg[i / 4] = word;
+        W[i / 4] = word;
     }
 
-    // Compute SHA-1 with nonce
-    sha1_compute(padded_msg, nonce, output_hash);
+    // Apply nonce to last 8 bytes
+    W[6] ^= __byte_perm(static_cast<uint32_t>(nonce >> 32), 0, 0x0123);
+    W[7] ^= __byte_perm(static_cast<uint32_t>(nonce & 0xFFFFFFFF), 0, 0x0123);
+
+    // Padding
+    W[8] = 0x80000000;
+    W[15] = 256; // Message length in bits
+
+    // Initialize working variables
+    uint32_t a = H0[0];
+    uint32_t b = H0[1];
+    uint32_t c = H0[2];
+    uint32_t d = H0[3];
+    uint32_t e = H0[4];
+
+    // Main SHA-1 computation
+#pragma unroll 4
+    for (int t = 0; t < 80; t++) {
+        if (t >= 16) {
+            uint32_t w_t = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
+                           W[(t - 14) & 15] ^ W[(t - 16) & 15];
+            W[t & 15] = (w_t << 1) | (w_t >> 31); // Rotate left by 1
+        }
+
+        uint32_t f, k;
+        if (t < 20) {
+            f = (b & c) | (~b & d);
+            k = K[0];
+        } else if (t < 40) {
+            f = b ^ c ^ d;
+            k = K[1];
+        } else if (t < 60) {
+            f = (b & c) | (b & d) | (c & d);
+            k = K[2];
+        } else {
+            f = b ^ c ^ d;
+            k = K[3];
+        }
+
+        uint32_t temp = ((a << 5) | (a >> 27)) + f + e + k + W[t & 15];
+        e = d;
+        d = c;
+        c = (b << 30) | (b >> 2);
+        b = a;
+        a = temp;
+    }
+
+    // Add initial values
+    output_hash[0] = a + H0[0];
+    output_hash[1] = b + H0[1];
+    output_hash[2] = c + H0[2];
+    output_hash[3] = d + H0[3];
+    output_hash[4] = e + H0[4];
 }
 
 // Test GPU implementation - exported function
