@@ -5,8 +5,34 @@
 #include <cassert>
 #include <chrono>
 #include <sstream>
-#include <ctime>
 #include "cxxsha1.hpp"
+
+// Cross-platform bit manipulation functions
+#ifdef _MSC_VER
+#include <intrin.h>
+
+// MSVC implementations
+inline int popcount(unsigned int x) {
+    return __popcnt(x);
+}
+
+inline int count_leading_zeros(unsigned int x) {
+    unsigned long index;
+    if (_BitScanReverse(&index, x)) {
+        return 31 - index;
+    }
+    return 32; // All bits are zero
+}
+#else
+// GCC/Clang implementations
+inline int popcount(unsigned int x) {
+    return __builtin_popcount(x);
+}
+
+inline int count_leading_zeros(unsigned int x) {
+    return x ? __builtin_clz(x) : 32;
+}
+#endif
 
 // Test vectors from NIST
 struct TestVector {
@@ -37,7 +63,7 @@ std::vector<uint8_t> hex_to_bytes(const std::string &hex) {
     std::vector<uint8_t> bytes;
     for (size_t i = 0; i < hex.length(); i += 2) {
         std::string byte_str = hex.substr(i, 2);
-        bytes.push_back(std::stoi(byte_str, nullptr, 16));
+        bytes.push_back(static_cast<uint8_t>(std::stoi(byte_str, nullptr, 16)));
     }
     return bytes;
 }
@@ -46,7 +72,7 @@ std::vector<uint8_t> hex_to_bytes(const std::string &hex) {
 std::string bytes_to_hex(const uint8_t *bytes, size_t len) {
     std::stringstream ss;
     for (size_t i = 0; i < len; i++) {
-        ss << std::hex << std::setw(2) << std::setfill('0') << (int) bytes[i];
+        ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(bytes[i]);
     }
     return ss.str();
 }
@@ -58,7 +84,7 @@ int count_matching_bits(const uint8_t *hash1, const uint8_t *hash2) {
     for (int i = 0; i < 20; i++) {
         uint8_t xor_byte = hash1[i] ^ hash2[i];
         // Use popcount to count set bits in XOR result
-        matching_bits += 8 - __builtin_popcount(static_cast<unsigned int>(xor_byte));
+        matching_bits += 8 - popcount(static_cast<unsigned int>(xor_byte));
     }
 
     return matching_bits;
@@ -75,7 +101,7 @@ int count_consecutive_bits(const uint8_t *hash1, const uint8_t *hash2) {
             consecutive_bits += 8;
         } else {
             // Count leading zeros in the byte
-            consecutive_bits += __builtin_clz(static_cast<unsigned int>(xor_byte)) - 24; // Adjust for byte
+            consecutive_bits += count_leading_zeros(static_cast<unsigned int>(xor_byte)) - 24; // Adjust for byte
             break;
         }
     }
@@ -219,7 +245,7 @@ void simulate_mining() {
         }
 
         if (nonce % 100000 == 0) {
-            std::cout << "\rProgress: " << (nonce * 100 / num_attempts) << "%"
+            std::cout << "\rProgress: " << static_cast<int>(nonce * 100 / num_attempts) << "%"
                     << " | Best: " << best_match << " bits" << std::flush;
         }
     }
@@ -235,7 +261,6 @@ void performance_test() {
 
     const int num_hashes = 1000000;
     uint8_t msg[32] = {0};
-    uint8_t hash[20];
 
     auto start = std::chrono::high_resolution_clock::now();
 
@@ -252,8 +277,8 @@ void performance_test() {
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
-    double seconds = duration.count() / 1000000.0;
-    double hashes_per_second = num_hashes / seconds;
+    double seconds = static_cast<double>(duration.count()) / 1000000.0;
+    double hashes_per_second = static_cast<double>(num_hashes) / seconds;
 
     std::cout << "Computed " << num_hashes << " hashes in "
             << std::fixed << std::setprecision(3) << seconds << " seconds\n";
