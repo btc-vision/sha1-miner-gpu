@@ -48,8 +48,7 @@ void setup_signal_handlers() {
     // Common signals
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
-    def
-    _WIN32
+#ifdef _WIN32
     // Windows-specific signals
     std::signal(SIGBREAK, signal_handler);
 #else
@@ -122,11 +121,8 @@ Config parse_args(int argc, char *argv[]) {
 class Timer {
 private:
     std::chrono::high_resolution_clock::time_point start_time;
-    lic:
 
-
-
-
+public:
     void start() {
         start_time = std::chrono::high_resolution_clock::now();
     }
@@ -136,6 +132,7 @@ private:
         return std::chrono::duration<double>(now - start_time).count();
     }
 };
+
 
 // Convert hex string to bytes
 std::vector<uint8_t> hex_to_bytes(const std::string &hex) {
@@ -183,8 +180,8 @@ std::vector<uint8_t> calculate_sha1(const std::vector<uint8_t> &message) {
 // Print system information
 void print_system_info() {
     std::cout << "System Information:\n";
-    def
-    _WIN32
+
+#ifdef _WIN32
     std::cout << "  Platform: Windows\n";
 #elif __linux__
     std::cout << "  Platform: Linux\n";
@@ -195,6 +192,7 @@ void print_system_info() {
 #endif
 
     std::cout << "  CPU Threads: " << std::thread::hardware_concurrency() << "\n";
+
     // CUDA information
     int device_count;
     cudaGetDeviceCount(&device_count);
@@ -249,7 +247,6 @@ int main(int argc, char *argv[]) {
 
     std::cout << "+------------------------------------------+\n";
     std::cout << "|    SHA-1 Near-Collision Miner v2.0       |\n";
-    std::cout << "|         Cross-Platform Edition           |\n";
     std::cout << "+------------------------------------------+\n\n";
 
     // Print system information
