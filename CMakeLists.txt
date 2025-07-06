@@ -40,7 +40,7 @@ endif ()
 
 # CUDA compilation flags - optimized for mining workload
 set(CMAKE_CUDA_FLAGS "--use_fast_math -Xptxas -O3,-dlcm=ca,-dscm=wt --extra-device-vectorization --optimize 3")
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --restrict -maxrregcount=64")
+#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --restrict -maxrregcount=64")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler")
 
 # Add line info for profiling in release, full debug in debug
