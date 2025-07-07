@@ -18,12 +18,12 @@
 
 #ifdef USE_HIP
     // AMD GPUs benefit from different tuning
-    #define NONCES_PER_THREAD 65536  // AMD prefers fewer nonces per thread
+    #define NONCES_PER_THREAD 131072  // AMD prefers fewer nonces per thread
     #define DEFAULT_THREADS_PER_BLOCK 256
 #else
 // NVIDIA GPUs can handle more work per thread
-#define NONCES_PER_THREAD 8192
-#define DEFAULT_THREADS_PER_BLOCK 256
+#define NONCES_PER_THREAD 65536
+#define DEFAULT_THREADS_PER_BLOCK 128
 #endif
 
 // Debug mode flag
