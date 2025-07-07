@@ -1,6 +1,7 @@
 #include "sha1_miner.cuh"
 #include "mining_system.hpp"
 #include "multi_gpu_manager.hpp"
+#include "../net/pool_integration.hpp"
 #include <iostream>
 #include <iomanip>
 #include <vector>
@@ -21,23 +22,35 @@
 
 // Advanced configuration for production mining
 struct MiningConfig {
+    // GPU configuration
     int gpu_id = 0;
-    uint32_t difficulty = 50; // Default to 50 bits (reasonable for testing)
-    uint32_t duration = 300; // 5 minutes default
-    bool benchmark = false;
-    bool use_pool = false;
-    bool test_sha1 = false;
-    bool test_bits = false;
-    bool debug_mode = false;
-    std::string pool_url;
-    std::string worker_name;
+    std::vector<int> gpu_ids;
+    bool use_all_gpus = false;
+    // Solo mining configuration
+    uint32_t difficulty = 50;
+    uint32_t duration = 300;
     std::string target_hex;
     std::string message_hex;
+
+    // Performance configuration
     int num_streams = 4;
     int threads_per_block = 256;
     bool auto_tune = true;
-    bool use_all_gpus = false; // Add this
-    std::vector<int> gpu_ids; // Add this
+
+    // Pool mining configuration
+    bool use_pool = false;
+    std::string pool_url;
+    std::string pool_wallet;
+    std::string worker_name;
+    std::string pool_password;
+    std::vector<std::string> backup_pools;
+    bool enable_pool_failover = true;
+
+    // Operating modes
+    bool benchmark = false;
+    bool test_sha1 = false;
+    bool test_bits = false;
+    bool debug_mode = false;
 };
 
 // Signal handler for graceful shutdown
@@ -75,80 +88,128 @@ void setup_signal_handlers() {
 void print_usage(const char *program_name) {
     std::cout << "SHA-1 OP_NET Miner\n\n";
     std::cout << "Usage: " << program_name << " [options]\n\n";
-    std::cout << "Options:\n";
+    std::cout << "GPU Options:\n";
     std::cout << "  --gpu <id>          GPU device ID (default: 0)\n";
-    std::cout << "  --all-gpus          Use all available GPUs\n"; // Add this
-    std::cout << "  --gpus <list>       Use specific GPUs (e.g., --gpus 0,1)\n"; // Add this
+    std::cout << "  --all-gpus          Use all available GPUs\n";
+    std::cout << "  --gpus <list>       Use specific GPUs (e.g., --gpus 0,1,2)\n";
+    std::cout << "\nSolo Mining Options:\n";
     std::cout << "  --difficulty <bits> Number of bits that must match (default: 50)\n";
     std::cout << "  --duration <sec>    Mining duration in seconds (default: 300)\n";
     std::cout << "  --target <hex>      Target hash in hex (40 chars)\n";
     std::cout << "  --message <hex>     Base message in hex (64 chars)\n";
+    std::cout << "\nPool Mining Options:\n";
+    std::cout << "  --pool <url>        Pool URL (ws://host:port or wss://host:port)\n";
+    std::cout << "  --wallet <addr>     Wallet address for pool mining\n";
+    std::cout << "  --worker <name>     Worker name (default: hostname)\n";
+    std::cout << "  --pool-pass <pass>  Pool password (if required)\n";
+    std::cout << "  --backup-pool <url> Add backup pool for failover\n";
+    std::cout << "  --no-failover       Disable automatic pool failover\n";
+    std::cout << "\nPerformance Options:\n";
     std::cout << "  --streams <n>       Number of CUDA streams (default: 4)\n";
     std::cout << "  --threads <n>       Threads per block (default: 256)\n";
-    std::cout << "  --benchmark         Run performance benchmark\n";
     std::cout << "  --auto-tune         Auto-tune for optimal performance\n";
-    std::cout << "  --pool <url>        Connect to mining pool\n";
-    std::cout << "  --worker <name>     Worker name for pool\n";
+    std::cout << "\nOther Options:\n";
+    std::cout << "  --benchmark         Run performance benchmark\n";
+    std::cout << "  --test-sha1         Test SHA-1 implementation\n";
+    std::cout << "  --test-bits         Test bit matching\n";
+    std::cout << "  --debug             Enable debug mode\n";
     std::cout << "  --help              Show this help\n\n";
-    std::cout << "Example:\n";
-    std::cout << "  " << program_name << " --gpu 0 --difficulty 45 --duration 600\n";
-    std::cout << "  " << program_name << " --all-gpus --difficulty 50\n"; // Add this
-    std::cout << "  " << program_name << " --benchmark --auto-tune\n";
+    std::cout << "Examples:\n";
+    std::cout << "  Solo mining: " << program_name << " --gpu 0 --difficulty 45 --duration 600\n";
+    std::cout << "  Pool mining: " << program_name <<
+            " --pool ws://pool.example.com:3333 --wallet YOUR_WALLET --worker rig1\n";
+    std::cout << "  Multi-GPU:   " << program_name <<
+            " --all-gpus --pool wss://secure.pool.com:443 --wallet YOUR_WALLET\n";
+    std::cout << "  Benchmark:   " << program_name << " --benchmark --auto-tune\n";
 }
 
 MiningConfig parse_args(int argc, char *argv[]) {
     MiningConfig config;
 
+    // Set default worker name to hostname
+    char hostname[256];
+    if (gethostname(hostname, sizeof(hostname)) == 0) {
+        config.worker_name = hostname;
+    } else {
+        config.worker_name = "default_worker";
+    }
+
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
 
+        // GPU options
         if (arg == "--gpu" && i + 1 < argc) {
             config.gpu_id = std::stoi(argv[++i]);
         } else if (arg == "--all-gpus") {
-            // Add this
             config.use_all_gpus = true;
         } else if (arg == "--gpus" && i + 1 < argc) {
-            // Add this
-            // Parse comma-separated GPU IDs like --gpus 0,1,2
             std::string gpu_list = argv[++i];
             std::stringstream ss(gpu_list);
             std::string token;
             while (std::getline(ss, token, ',')) {
                 config.gpu_ids.push_back(std::stoi(token));
             }
-        } else if (arg == "--difficulty" && i + 1 < argc) {
+        }
+        // Solo mining options
+        else if (arg == "--difficulty" && i + 1 < argc) {
             config.difficulty = std::stoi(argv[++i]);
         } else if (arg == "--duration" && i + 1 < argc) {
             config.duration = std::stoi(argv[++i]);
+        } else if (arg == "--target" && i + 1 < argc) {
+            config.target_hex = argv[++i];
+        } else if (arg == "--message" && i + 1 < argc) {
+            config.message_hex = argv[++i];
+        }
+        // Pool mining options
+        else if (arg == "--pool" && i + 1 < argc) {
+            config.use_pool = true;
+            config.pool_url = argv[++i];
+        } else if (arg == "--wallet" && i + 1 < argc) {
+            config.pool_wallet = argv[++i];
+        } else if (arg == "--worker" && i + 1 < argc) {
+            config.worker_name = argv[++i];
+        } else if (arg == "--pool-pass" && i + 1 < argc) {
+            config.pool_password = argv[++i];
+        } else if (arg == "--backup-pool" && i + 1 < argc) {
+            config.backup_pools.push_back(argv[++i]);
+        } else if (arg == "--no-failover") {
+            config.enable_pool_failover = false;
+        }
+        // Performance options
+        else if (arg == "--streams" && i + 1 < argc) {
+            config.num_streams = std::stoi(argv[++i]);
+        } else if (arg == "--threads" && i + 1 < argc) {
+            config.threads_per_block = std::stoi(argv[++i]);
+        } else if (arg == "--auto-tune") {
+            config.auto_tune = true;
+        }
+        // Other options
+        else if (arg == "--benchmark") {
+            config.benchmark = true;
         } else if (arg == "--test-sha1") {
             config.test_sha1 = true;
         } else if (arg == "--test-bits") {
             config.test_bits = true;
         } else if (arg == "--debug") {
             config.debug_mode = true;
-        } else if (arg == "--target" && i + 1 < argc) {
-            config.target_hex = argv[++i];
-        } else if (arg == "--message" && i + 1 < argc) {
-            config.message_hex = argv[++i];
-        } else if (arg == "--streams" && i + 1 < argc) {
-            config.num_streams = std::stoi(argv[++i]);
-        } else if (arg == "--threads" && i + 1 < argc) {
-            config.threads_per_block = std::stoi(argv[++i]);
-        } else if (arg == "--benchmark") {
-            config.benchmark = true;
-        } else if (arg == "--auto-tune") {
-            config.auto_tune = true;
-        } else if (arg == "--pool" && i + 1 < argc) {
-            config.use_pool = true;
-            config.pool_url = argv[++i];
-        } else if (arg == "--worker" && i + 1 < argc) {
-            config.worker_name = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             std::exit(0);
         } else {
             std::cerr << "Unknown option: " << arg << "\n";
             std::cerr << "Use --help for usage information\n";
+            std::exit(1);
+        }
+    }
+
+    // Validate pool configuration
+    if (config.use_pool) {
+        if (config.pool_wallet.empty()) {
+            std::cerr << "Error: --wallet is required for pool mining\n";
+            std::exit(1);
+        }
+        if (config.pool_url.empty()) {
+            std::cerr << "Error: --pool URL is required for pool mining\n";
             std::exit(1);
         }
     }
@@ -198,9 +259,8 @@ void auto_tune_parameters(MiningSystem::Config &config, int device_id) {
     int optimal_threads;
     if (props.major >= 8) {
         // Ampere and newer (RTX 30xx, 40xx, A100, etc.)
-        // These have 128 CUDA cores per SM
-        blocks_per_sm = 16; // Can handle many blocks
-        optimal_threads = 256; // 256 or 512 work well
+        blocks_per_sm = 16;
+        optimal_threads = 256;
     } else if (props.major == 7) {
         if (props.minor >= 5) {
             // Turing (RTX 20xx, T4)
@@ -214,11 +274,9 @@ void auto_tune_parameters(MiningSystem::Config &config, int device_id) {
     } else if (props.major == 6) {
         // Pascal (GTX 10xx, P100)
         if (props.minor >= 1) {
-            // GP102/GP104 (GTX 1080 Ti, 1080, 1070)
             blocks_per_sm = 8;
             optimal_threads = 256;
         } else {
-            // GP100 (P100)
             blocks_per_sm = 4;
             optimal_threads = 256;
         }
@@ -244,50 +302,43 @@ void auto_tune_parameters(MiningSystem::Config &config, int device_id) {
     config.threads_per_block = optimal_threads;
 
     // For very large GPUs, limit total blocks to avoid scheduling overhead
-    int max_total_blocks = 2048; // Empirically determined
+    int max_total_blocks = 2048;
     if (config.blocks_per_stream > max_total_blocks) {
         config.blocks_per_stream = max_total_blocks;
     }
 
     // Number of streams based on GPU class
     if (props.multiProcessorCount >= 80) {
-        // High-end GPUs (RTX 4090, A100, etc.)
         config.num_streams = 16;
     } else if (props.multiProcessorCount >= 40) {
-        // Mid-high GPUs (RTX 3070, 2080, etc.)
         config.num_streams = 8;
     } else if (props.multiProcessorCount >= 20) {
-        // Mid-range GPUs
         config.num_streams = 4;
     } else {
-        // Entry-level GPUs
         config.num_streams = 2;
     }
 
     // Adjust streams based on available memory
     size_t free_mem, total_mem;
     gpuMemGetInfo(&free_mem, &total_mem);
-    size_t mem_per_stream = sizeof(MiningResult) * config.result_buffer_size + (
-                                config.blocks_per_stream * config.threads_per_block * sizeof(uint32_t) * 5);
-    int max_streams_by_memory = free_mem / (mem_per_stream * 2); // Use at most 50% of free memory
+    size_t mem_per_stream = sizeof(MiningResult) * config.result_buffer_size +
+                            (config.blocks_per_stream * config.threads_per_block * sizeof(uint32_t) * 5);
+    int max_streams_by_memory = free_mem / (mem_per_stream * 2);
     if (config.num_streams > max_streams_by_memory && max_streams_by_memory > 0) {
         config.num_streams = max_streams_by_memory;
     }
 
-    // Result buffer size - balance between PCIe transfers and memory usage
     config.result_buffer_size = 128;
 
     // Special optimizations for specific GPUs
     std::string gpu_name = props.name;
     if (gpu_name.find("4090") != std::string::npos || gpu_name.find("4080") != std::string::npos) {
-        // RTX 4090/4080 specific
-        config.threads_per_block = 512; // These GPUs love high thread counts
+        config.threads_per_block = 512;
         blocks_per_sm = 16;
         config.blocks_per_stream = props.multiProcessorCount * blocks_per_sm;
     } else if (gpu_name.find("A100") != std::string::npos || gpu_name.find("H100") != std::string::npos) {
-        // Data center GPUs
         config.threads_per_block = 512;
-        blocks_per_sm = 32; // These can handle extreme occupancy
+        blocks_per_sm = 32;
         config.blocks_per_stream = props.multiProcessorCount * blocks_per_sm;
         config.num_streams = 32;
     }
@@ -415,6 +466,152 @@ bool verify_sha1_implementation() {
     return all_passed;
 }
 
+// Pool mining status display
+void display_pool_stats(const MiningPool::PoolMiningSystem::PoolMiningStats &stats) {
+    std::cout << "\r";
+    std::cout << "[POOL] ";
+
+    if (!stats.connected) {
+        std::cout << "Disconnected - Attempting to reconnect...              ";
+    } else if (!stats.authenticated) {
+        std::cout << "Connected - Authenticating...                         ";
+    } else {
+        std::cout << "Worker: " << stats.worker_id << " | ";
+        std::cout << "Diff: " << stats.current_difficulty << " | ";
+        std::cout << "Hash: " << std::fixed << std::setprecision(2)
+                << stats.hashrate / 1e9 << " GH/s | ";
+        std::cout << "Shares: " << stats.shares_accepted << "/"
+                << stats.shares_submitted;
+
+        if (stats.shares_submitted > 0) {
+            std::cout << " (" << std::setprecision(1)
+                    << stats.share_success_rate * 100 << "%)";
+        }
+
+        std::cout << " | Up: " << stats.uptime.count() << "s     ";
+    }
+
+    std::cout << std::flush;
+}
+
+// Run pool mining
+int run_pool_mining(const MiningConfig &config) {
+    std::cout << "\n=== SHA-1 Pool Mining Mode ===\n";
+    std::cout << "Pool: " << config.pool_url << "\n";
+    std::cout << "Wallet: " << config.pool_wallet << "\n";
+    std::cout << "Worker: " << config.worker_name << "\n\n";
+
+    // Create pool configuration
+    MiningPool::PoolConfig pool_config;
+    pool_config.url = config.pool_url;
+    pool_config.username = config.pool_wallet;
+    pool_config.worker_name = config.worker_name;
+    pool_config.password = config.pool_password;
+    pool_config.auth_method = MiningPool::AuthMethod::WORKER_PASS;
+
+    // Auto-detect TLS from URL
+    pool_config.use_tls = (config.pool_url.find("wss://") == 0);
+    pool_config.verify_server_cert = true;
+
+    // Connection settings
+    pool_config.keepalive_interval_s = 30;
+    pool_config.response_timeout_ms = 10000;
+    pool_config.reconnect_delay_ms = 5000;
+    pool_config.max_reconnect_delay_ms = 60000;
+    pool_config.reconnect_attempts = -1; // Infinite retries
+
+    // Create mining configuration
+    MiningPool::PoolMiningSystem::Config mining_config;
+    mining_config.pool_config = pool_config;
+    mining_config.dev_fee_percent = 0.0; // No dev fee
+
+    // Set GPU configuration
+    if (config.use_all_gpus) {
+        int device_count;
+        gpuGetDeviceCount(&device_count);
+        for (int i = 0; i < device_count; i++) {
+            mining_config.gpu_ids.push_back(i);
+        }
+        mining_config.use_all_gpus = true;
+    } else if (!config.gpu_ids.empty()) {
+        mining_config.gpu_ids = config.gpu_ids;
+    } else {
+        mining_config.gpu_ids.push_back(config.gpu_id);
+    }
+
+    // Handle multiple pools with failover
+    if (!config.backup_pools.empty() && config.enable_pool_failover) {
+        auto multi_pool_manager = std::make_unique<MiningPool::MultiPoolManager>();
+
+        // Add primary pool
+        multi_pool_manager->add_pool("primary", pool_config, 0);
+
+        // Add backup pools
+        int priority = 1;
+        for (const auto &backup_url: config.backup_pools) {
+            auto backup_config = pool_config;
+            backup_config.url = backup_url;
+            backup_config.use_tls = (backup_url.find("wss://") == 0);
+            multi_pool_manager->add_pool("backup_" + std::to_string(priority),
+                                         backup_config, priority);
+            priority++;
+        }
+
+        // Start mining with failover
+        if (!multi_pool_manager->start_mining(mining_config)) {
+            std::cerr << "Failed to start pool mining\n";
+            return 1;
+        }
+
+        std::cout << "Mining started with " << (priority) << " pool(s)\n";
+        std::cout << "Press Ctrl+C to stop mining\n\n";
+
+        // Monitor and display stats
+        while (!g_shutdown) {
+            auto all_stats = multi_pool_manager->get_all_stats();
+            auto active_pool = multi_pool_manager->get_active_pool();
+
+            if (all_stats.count(active_pool) > 0) {
+                display_pool_stats(all_stats[active_pool]);
+            }
+
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+
+        multi_pool_manager->stop_mining();
+    } else {
+        // Single pool mining
+        auto pool_mining = std::make_unique<MiningPool::PoolMiningSystem>(mining_config);
+
+        if (!pool_mining->start()) {
+            std::cerr << "Failed to start pool mining\n";
+            return 1;
+        }
+
+        std::cout << "Mining started\n";
+        std::cout << "Press Ctrl+C to stop mining\n\n";
+
+        // Monitor and display stats
+        auto last_stats_time = std::chrono::steady_clock::now();
+        while (!g_shutdown) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_stats_time >= std::chrono::seconds(1)) {
+                auto stats = pool_mining->get_stats();
+                display_pool_stats(stats);
+                last_stats_time = now;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        std::cout << "\n\nStopping mining...\n";
+        pool_mining->stop();
+    }
+
+    std::cout << "\nPool mining stopped.\n";
+    return 0;
+}
+
 // Main program
 int main(int argc, char *argv[]) {
     // Set up signal handlers
@@ -433,7 +630,9 @@ int main(int argc, char *argv[]) {
             std::cerr << "SHA-1 implementation verification failed!\n";
             return 1;
         }
+        return 0;
     }
+
     // Verify SHA-1 implementation
     if (!verify_sha1_implementation()) {
         std::cerr << "SHA-1 implementation verification failed!\n";
@@ -444,21 +643,6 @@ int main(int argc, char *argv[]) {
     // Check GPU availability
     int device_count;
     gpuGetDeviceCount(&device_count);
-    std::cout << "Raw device count from gpuGetDeviceCount: " << device_count << "\n";
-
-#ifdef USE_HIP
-    int hip_device_count = 0;
-    hipError_t hip_err = hipGetDeviceCount(&hip_device_count);
-    std::cout << "HIP device count: " << hip_device_count << "\n";
-    std::cout << "HIP error: " << hipGetErrorString(hip_err) << "\n";
-
-    // List all devices
-    for (int i = 0; i < hip_device_count; i++) {
-        hipDeviceProp_t props;
-        hipGetDeviceProperties(&props, i);
-        std::cout << "  Device " << i << ": " << props.name << "\n";
-    }
-#endif
 
     if (device_count == 0) {
 #ifdef USE_HIP
@@ -510,6 +694,11 @@ int main(int argc, char *argv[]) {
     }
     std::cout << "\n";
 
+    // Check if pool mining is requested
+    if (config.use_pool) {
+        return run_pool_mining(config);
+    }
+
     // Run benchmark if requested
     if (config.benchmark) {
         if (gpu_ids_to_use.size() > 1) {
@@ -520,6 +709,9 @@ int main(int argc, char *argv[]) {
         }
         return 0;
     }
+
+    // Solo mining mode
+    std::cout << "Running in solo mining mode\n";
 
     // Prepare message and target
     std::vector<uint8_t> message;
@@ -569,7 +761,7 @@ int main(int argc, char *argv[]) {
         // Run multi-GPU mining
         multi_gpu_manager.runMining(job, config.duration);
     } else {
-        // Single GPU path (existing code)
+        // Single GPU path
         MiningSystem::Config sys_config;
         sys_config.device_id = gpu_ids_to_use[0];
         sys_config.num_streams = config.num_streams;

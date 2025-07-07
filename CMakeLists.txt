@@ -18,6 +18,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Export compile commands
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Find required packages
+find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(Boost 1.70 REQUIRED COMPONENTS system thread)
+
 # Platform-specific optimization flags
 if (MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /Oi /Ot /Oy /GT /GL /Gw /arch:AVX2 /fp:fast /MD")
@@ -34,6 +39,58 @@ set(INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(MINER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include/miner)
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+# WebSocketPP configuration
+set(WEBSOCKETPP_ROOT "" CACHE PATH "WebSocketPP root directory")
+
+# First try to find WebSocketPP via vcpkg
+find_path(WEBSOCKETPP_INCLUDE_DIR
+        NAMES websocketpp/config/asio_no_tls.hpp
+        PATHS
+        ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
+        ${CMAKE_PREFIX_PATH}/include
+)
+
+# If not found via vcpkg, try other locations
+if (NOT WEBSOCKETPP_INCLUDE_DIR)
+    if (NOT WEBSOCKETPP_ROOT)
+        # Try to find websocketpp in common locations
+        find_path(WEBSOCKETPP_INCLUDE_DIR
+                NAMES websocketpp/config/asio_no_tls.hpp
+                PATHS
+                /usr/include
+                /usr/local/include
+                ${CMAKE_CURRENT_SOURCE_DIR}/external/websocketpp
+                ${CMAKE_CURRENT_SOURCE_DIR}/third_party/websocketpp
+                ${CMAKE_CURRENT_SOURCE_DIR}/../external/websocketpp
+        )
+    else ()
+        set(WEBSOCKETPP_INCLUDE_DIR ${WEBSOCKETPP_ROOT})
+    endif ()
+endif ()
+
+if (NOT WEBSOCKETPP_INCLUDE_DIR)
+    message(FATAL_ERROR "WebSocketPP not found. Please run fix_vcpkg.bat or manually install WebSocketPP")
+endif ()
+
+message(STATUS "Found WebSocketPP at: ${WEBSOCKETPP_INCLUDE_DIR}")
+
+# nlohmann/json
+find_package(nlohmann_json 3.2.0 QUIET)
+if (NOT nlohmann_json_FOUND)
+    # Try to find it manually
+    find_path(NLOHMANN_JSON_INCLUDE_DIR
+            NAMES nlohmann/json.hpp
+            PATHS
+            /usr/include
+            /usr/local/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/external/json/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/include
+    )
+    if (NOT NLOHMANN_JSON_INCLUDE_DIR)
+        message(FATAL_ERROR "nlohmann/json not found. Please install it (e.g., 'apt install nlohmann-json3-dev' or download from https://github.com/nlohmann/json)")
+    endif ()
+endif ()
+
 if (GPU_BACKEND STREQUAL "HIP")
     # AMD/HIP Build
     set(ROCM_PATH $ENV{ROCM_PATH})
@@ -41,9 +98,9 @@ if (GPU_BACKEND STREQUAL "HIP")
         set(ROCM_PATH "/opt/rocm")
     endif ()
 
-    # Get HIP architectures - FIXED VERSION
+    # Get HIP architectures
     if (NOT HIP_ARCH)
-        # Default architectures - using correct target IDs
+        # Default architectures
         set(HIP_ARCH_LIST
                 "gfx900"    # Vega 10
                 "gfx906"    # Vega 20
@@ -112,10 +169,9 @@ if (GPU_BACKEND STREQUAL "HIP")
     message(STATUS "Building with HIP/ROCm for AMD GPUs")
     message(STATUS "  ROCm path: ${ROCM_PATH}")
     message(STATUS "  HIP architectures: ${HIP_ARCH}")
-    message(STATUS "  HIP offload flags: ${HIP_OFFLOAD_ARCH_FLAGS}")
 
 else ()
-    # NVIDIA/CUDA Build - WITH ALL OPTIMIZATIONS
+    # NVIDIA/CUDA Build
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
 
@@ -127,7 +183,7 @@ else ()
         endif ()
     endif ()
 
-    # CUDA compilation flags - ALL OPTIMIZATIONS
+    # CUDA compilation flags
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math")
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xptxas -O3,-dlcm=ca,-dscm=wt")
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --extra-device-vectorization")
@@ -137,7 +193,7 @@ else ()
     set(CMAKE_CUDA_FLAGS_DEBUG "-g -G")
     set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
 
-    # Create CUDA kernel library with all optimizations
+    # Create CUDA kernel library
     add_library(gpu_kernel STATIC ${MINER_DIR}/sha1_kernel.cu)
     set_target_properties(gpu_kernel PROPERTIES
             CUDA_SEPARABLE_COMPILATION ON
@@ -162,7 +218,6 @@ else ()
     message(STATUS "Building with CUDA for NVIDIA GPUs")
     message(STATUS "  CUDA version: ${CUDAToolkit_VERSION}")
     message(STATUS "  CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
-    message(STATUS "  CUDA flags: ${CMAKE_CUDA_FLAGS}")
 endif ()
 
 # Create main executable with all sources
@@ -171,6 +226,8 @@ add_executable(sha1_miner
         ${SRC_DIR}/mining_system.cpp
         ${SRC_DIR}/multi_gpu_manager.cpp
         ${SRC_DIR}/globals.cpp
+        ${SRC_DIR}/pool_client.cpp
+        ${SRC_DIR}/pool_integration.cpp
         ${MINER_DIR}/kernel_launcher.cpp
 )
 
@@ -185,10 +242,21 @@ target_include_directories(sha1_miner PRIVATE
         ${INCLUDE_DIR}
         ${MINER_DIR}
         ${GPU_INCLUDES}
+        ${WEBSOCKETPP_INCLUDE_DIR}
+        ${Boost_INCLUDE_DIRS}
 )
 
+# If nlohmann/json was found manually, add include directory
+if (NLOHMANN_JSON_INCLUDE_DIR)
+    target_include_directories(sha1_miner PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
+endif ()
+
 # Compile definitions
-target_compile_definitions(sha1_miner PRIVATE ${GPU_DEFINES})
+target_compile_definitions(sha1_miner PRIVATE
+        ${GPU_DEFINES}
+        BOOST_BIND_GLOBAL_PLACEHOLDERS
+        _WEBSOCKETPP_CPP11_STL_
+)
 
 # Apply C++ optimizations
 if (NOT MSVC)
@@ -199,17 +267,22 @@ if (NOT MSVC)
 endif ()
 
 # Linking
-find_package(Threads REQUIRED)
 if (GPU_BACKEND STREQUAL "HIP")
     add_dependencies(sha1_miner hip_kernel_target)
     target_link_libraries(sha1_miner PRIVATE
             ${KERNEL_OBJECT}
             ${GPU_LIBRARIES}
+            ${Boost_LIBRARIES}
+            OpenSSL::SSL
+            OpenSSL::Crypto
             Threads::Threads
     )
 else ()
     target_link_libraries(sha1_miner PRIVATE
             ${GPU_LIBRARIES}
+            ${Boost_LIBRARIES}
+            OpenSSL::SSL
+            OpenSSL::Crypto
             Threads::Threads
     )
 
@@ -218,6 +291,11 @@ else ()
             CUDA_SEPARABLE_COMPILATION ON
             CUDA_RESOLVE_DEVICE_SYMBOLS ON
     )
+endif ()
+
+# If using nlohmann/json as a package
+if (nlohmann_json_FOUND)
+    target_link_libraries(sha1_miner PRIVATE nlohmann_json::nlohmann_json)
 endif ()
 
 # Enable link-time optimization for release builds
@@ -250,4 +328,7 @@ message(STATUS "  C++ Compiler: ${CMAKE_CXX_COMPILER}")
 if (GPU_BACKEND STREQUAL "CUDA")
     message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
 endif ()
+message(STATUS "  WebSocketPP found at: ${WEBSOCKETPP_INCLUDE_DIR}")
+message(STATUS "  Boost version: ${Boost_VERSION}")
+message(STATUS "  OpenSSL version: ${OPENSSL_VERSION}")
 message(STATUS "")
