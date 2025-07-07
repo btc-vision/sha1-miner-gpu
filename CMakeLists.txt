@@ -317,9 +317,6 @@ set(POOL_SOURCES "")
 if (EXISTS ${NET_DIR}/pool_protocol.cpp)
     list(APPEND POOL_SOURCES ${NET_DIR}/pool_protocol.cpp)
 endif ()
-if (EXISTS ${NET_DIR}/pool_utils.cpp)
-    list(APPEND POOL_SOURCES ${NET_DIR}/pool_utils.cpp)
-endif ()
 
 # Create main executable with all sources
 add_executable(sha1_miner
