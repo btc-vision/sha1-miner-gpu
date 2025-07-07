@@ -74,7 +74,7 @@ if (GPU_BACKEND STREQUAL "HIP")
     set(HIP_OFFLOAD_ARCH_FLAGS "")
     foreach (arch IN LISTS HIP_ARCH_LIST)
         string(STRIP ${arch} arch)
-        set(HIP_OFFLOAD_ARCH_FLAGS "${HIP_OFFLOAD_ARCH_FLAGS} --offload-arch=${arch}")
+        list(APPEND HIP_OFFLOAD_ARCH_FLAGS "--offload-arch=${arch}")
     endforeach ()
 
     # Compile HIP kernel with custom command
