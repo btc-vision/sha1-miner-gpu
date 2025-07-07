@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# SHA-1 OP_NET Miner - Linux Installation Script with uWebSockets
-# Supports: Ubuntu, Debian, Fedora, RHEL, CentOS, Arch, openSUSE
+# SHA-1 OP_NET Miner - Linux Dependencies Installer
+# This script only installs dependencies (system packages and uWebSockets)
 #
 
 set -e
@@ -14,7 +14,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Default installation directory
-INSTALL_DIR="${1:-$HOME/sha1-miner}"
+INSTALL_DIR="${1:-$PWD}"
 
 # Print colored output
 print_info() {
@@ -55,153 +55,109 @@ detect_distro() {
     fi
 }
 
-# Check for GPU support
-check_gpu() {
-    print_info "Checking GPU support..."
-
-    GPU_TYPE="NONE"
-
-    # Check for NVIDIA
-    if command -v nvidia-smi &> /dev/null; then
-        print_success "NVIDIA GPU detected"
-        GPU_TYPE="NVIDIA"
-        nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
-    # Check for AMD
-    elif [ -d /opt/rocm ] || command -v rocm-smi &> /dev/null; then
-        print_success "AMD GPU detected"
-        GPU_TYPE="AMD"
-        if command -v rocm-smi &> /dev/null; then
-            rocm-smi --showproductname 2>/dev/null || true
-        fi
+# Check for sudo
+check_sudo() {
+    if [ "$EUID" -eq 0 ]; then
+        SUDO=""
     else
-        print_error "No supported GPU detected. Please install CUDA (NVIDIA) or ROCm (AMD) drivers."
-        exit 1
+        SUDO="sudo"
+        # Test sudo access
+        if ! sudo -n true 2>/dev/null; then
+            print_warning "This script requires sudo access to install packages."
+            sudo true
+        fi
     fi
 }
 
 # Install dependencies for Ubuntu/Debian
 install_deps_debian() {
     print_info "Installing dependencies for Ubuntu/Debian..."
-    sudo apt-get update
-    sudo apt-get install -y \
+    $SUDO apt-get update
+    $SUDO apt-get install -y \
         build-essential \
         cmake \
         git \
         libssl-dev \
+        libboost-all-dev \
+        nlohmann-json3-dev \
         zlib1g-dev \
         libuv1-dev \
         pkg-config \
         wget \
         curl \
         ninja-build
-
-    # Install Boost if not using vcpkg
-    sudo apt-get install -y \
-        libboost-all-dev
-
-    # For uWebSockets compilation
-    sudo apt-get install -y \
-        python3 \
-        python3-pip
 }
 
 # Install dependencies for Fedora/RHEL/CentOS
 install_deps_fedora() {
     print_info "Installing dependencies for Fedora/RHEL/CentOS..."
-    sudo dnf install -y \
+    $SUDO dnf install -y \
         gcc-c++ \
         cmake \
         git \
         openssl-devel \
+        boost-devel \
+        json-devel \
         zlib-devel \
         libuv-devel \
         pkgconfig \
         wget \
         curl \
-        ninja-build \
-        python3 \
-        python3-pip
-
-    # Install Boost
-    sudo dnf install -y \
-        boost-devel
+        ninja-build
 }
 
 # Install dependencies for Arch Linux
 install_deps_arch() {
     print_info "Installing dependencies for Arch Linux..."
-    sudo pacman -Syu --noconfirm \
+    $SUDO pacman -Syu --noconfirm --needed \
         base-devel \
         cmake \
         git \
         openssl \
+        boost \
+        nlohmann-json \
         zlib \
         libuv \
-        boost \
-        ninja \
-        python \
-        python-pip \
+        pkg-config \
         wget \
-        curl
+        curl \
+        ninja
 }
 
 # Install dependencies for openSUSE
 install_deps_opensuse() {
     print_info "Installing dependencies for openSUSE..."
-    sudo zypper install -y \
+    $SUDO zypper install -y \
         gcc-c++ \
         cmake \
         git \
         libopenssl-devel \
+        boost-devel \
+        nlohmann_json-devel \
         zlib-devel \
         libuv-devel \
-        boost-devel \
-        ninja \
-        python3 \
-        python3-pip \
+        pkg-config \
         wget \
-        curl
+        curl \
+        ninja
 }
 
-# Install nlohmann/json
-install_json() {
-    print_info "Installing nlohmann/json..."
-
-    # Check if already installed system-wide
-    if pkg-config --exists nlohmann_json 2>/dev/null; then
-        print_success "nlohmann/json already installed system-wide"
-        return
-    fi
-
-    # Install based on distro
-    case $OS in
-        ubuntu|debian)
-            if sudo apt-get install -y nlohmann-json3-dev; then
-                return
-            fi
-            ;;
-        fedora|rhel|centos)
-            if sudo dnf install -y json-devel; then
-                return
-            fi
-            ;;
-        arch)
-            if sudo pacman -S --noconfirm nlohmann-json; then
-                return
-            fi
-            ;;
-    esac
-
-    # Manual installation if package not available
-    print_info "Installing nlohmann/json from source..."
-    cd /tmp
-    git clone https://github.com/nlohmann/json.git
-    cd json
-    mkdir build && cd build
-    cmake ..
-    sudo make install
-    cd /
-    rm -rf /tmp/json
+# Install dependencies for Alpine
+install_deps_alpine() {
+    print_info "Installing dependencies for Alpine Linux..."
+    $SUDO apk add --no-cache \
+        build-base \
+        cmake \
+        git \
+        openssl-dev \
+        boost-dev \
+        nlohmann-json \
+        zlib-dev \
+        libuv-dev \
+        pkgconfig \
+        wget \
+        curl \
+        ninja
 }
 
 # Install uWebSockets and uSockets
@@ -218,21 +174,31 @@ install_uwebsockets() {
     if [ -d "uSockets" ]; then
         print_info "uSockets already exists, updating..."
         cd uSockets
-        git pull
+        git pull origin master
         cd ..
     else
         print_info "Cloning uSockets..."
         git clone https://github.com/uNetworking/uSockets.git
+        if [ $? -ne 0 ]; then
+            print_error "Failed to clone uSockets"
+            return 1
+        fi
     fi
 
-    # Build and install uSockets
+    # Build uSockets
     print_info "Building uSockets..."
     cd uSockets
     make
 
-    # Install uSockets headers and library
-    sudo cp src/libusockets.h /usr/local/include/
-    sudo cp uSockets.a /usr/local/lib/libuSockets.a
+    # Install uSockets headers and library (optional, for system-wide installation)
+    if [ -n "$SUDO" ]; then
+        read -p "Install uSockets system-wide? (requires sudo) [y/N] " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            $SUDO cp src/libusockets.h /usr/local/include/
+            $SUDO cp uSockets.a /usr/local/lib/libuSockets.a
+        fi
+    fi
 
     cd ..
 
@@ -240,340 +206,130 @@ install_uwebsockets() {
     if [ -d "uWebSockets" ]; then
         print_info "uWebSockets already exists, updating..."
         cd uWebSockets
-        git pull
+        git pull origin master
         cd ..
     else
         print_info "Cloning uWebSockets..."
         git clone https://github.com/uNetworking/uWebSockets.git
+        if [ $? -ne 0 ]; then
+            print_error "Failed to clone uWebSockets"
+            return 1
+        fi
     fi
 
-    # uWebSockets is header-only, just need to make it accessible
-    print_info "Setting up uWebSockets headers..."
-
     cd "$INSTALL_DIR"
-    print_success "uWebSockets installed successfully"
+    print_success "uWebSockets installed successfully in external/"
 }
 
-# Create the project structure
-create_project_structure() {
-    print_info "Creating project structure..."
+# Check GPU support
+check_gpu() {
+    print_info "Checking GPU support..."
 
-    cd "$INSTALL_DIR"
-
-    # Create directories
-    mkdir -p src include/miner build external
-
-    # Create a CMakeLists.txt if it doesn't exist
-    if [ ! -f "CMakeLists.txt" ]; then
-        print_warning "CMakeLists.txt not found. Creating a template..."
-        cat > CMakeLists.txt << 'EOF'
-cmake_minimum_required(VERSION 3.16)
-project(SHA1NearCollisionMiner LANGUAGES CXX CUDA)
-
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-# Find packages
-find_package(CUDA REQUIRED)
-find_package(Threads REQUIRED)
-find_package(OpenSSL REQUIRED)
-find_package(Boost 1.70 REQUIRED COMPONENTS system thread)
-
-# Directories
-set(INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
-set(MINER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include/miner)
-set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
-
-# CUDA settings
-if(NOT CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES "50;52;60;61;70;75;80;86;89;90")
-endif()
-
-# Find uWebSockets
-find_path(UWEBSOCKETS_INCLUDE_DIR
-    NAMES uwebsockets/App.h
-    PATHS
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets/src
-        /usr/include
-        /usr/local/include
-)
-
-find_path(USOCKETS_INCLUDE_DIR
-    NAMES libusockets.h
-    PATHS
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/uSockets/src
-        /usr/include
-        /usr/local/include
-)
-
-find_library(USOCKETS_LIB
-    NAMES uSockets usockets
-    PATHS
-        /usr/local/lib
-        /usr/lib
-)
-
-# Find nlohmann/json
-find_package(nlohmann_json QUIET)
-if(NOT nlohmann_json_FOUND)
-    find_path(NLOHMANN_JSON_INCLUDE_DIR
-        NAMES nlohmann/json.hpp
-        PATHS /usr/include /usr/local/include
-    )
-endif()
-
-# Add executable
-add_executable(sha1_miner
-    ${SRC_DIR}/main.cpp
-    ${SRC_DIR}/mining_system.cpp
-    ${SRC_DIR}/multi_gpu_manager.cpp
-    ${SRC_DIR}/globals.cpp
-    ${SRC_DIR}/pool_client.cpp
-    ${SRC_DIR}/pool_integration.cpp
-    ${MINER_DIR}/kernel_launcher.cpp
-)
-
-# Add CUDA kernel
-add_library(gpu_kernel STATIC ${MINER_DIR}/sha1_kernel.cu)
-set_target_properties(gpu_kernel PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    POSITION_INDEPENDENT_CODE ON
-)
-
-# Include directories
-target_include_directories(sha1_miner PRIVATE
-    ${INCLUDE_DIR}
-    ${MINER_DIR}
-    ${CUDA_INCLUDE_DIRS}
-    ${UWEBSOCKETS_INCLUDE_DIR}
-    ${USOCKETS_INCLUDE_DIR}
-    ${Boost_INCLUDE_DIRS}
-)
-
-if(NLOHMANN_JSON_INCLUDE_DIR)
-    target_include_directories(sha1_miner PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
-endif()
-
-# Link libraries
-target_link_libraries(sha1_miner PRIVATE
-    gpu_kernel
-    ${CUDA_LIBRARIES}
-    ${USOCKETS_LIB}
-    ${Boost_LIBRARIES}
-    OpenSSL::SSL
-    OpenSSL::Crypto
-    Threads::Threads
-)
-
-if(nlohmann_json_FOUND)
-    target_link_libraries(sha1_miner PRIVATE nlohmann_json::nlohmann_json)
-endif()
-
-# Compiler options
-target_compile_options(sha1_miner PRIVATE
-    $<$<CONFIG:Release>:-O3 -march=native -mtune=native -ffast-math>
-    $<$<CONFIG:Debug>:-O0 -g>
-)
-
-# CUDA flags
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math -O3")
-
-# Install
-install(TARGETS sha1_miner RUNTIME DESTINATION bin)
-EOF
-    fi
-}
-
-# Build the project
-build_project() {
-    print_info "Building the project..."
-
-    cd "$INSTALL_DIR"
-
-    # Configure based on GPU type
-    cd build
-
-    if [ "$GPU_TYPE" = "AMD" ]; then
-        print_info "Configuring for AMD GPU with HIP..."
-        cmake .. -DUSE_HIP=ON -DCMAKE_BUILD_TYPE=Release -GNinja
+    # Check for NVIDIA
+    if command -v nvidia-smi &> /dev/null; then
+        print_success "NVIDIA GPU detected"
+        if ! command -v nvcc &> /dev/null; then
+            print_warning "CUDA toolkit not found. You'll need to install CUDA for GPU mining."
+            print_warning "Visit: https://developer.nvidia.com/cuda-downloads"
+        fi
+    # Check for AMD
+    elif [ -d /opt/rocm ] || command -v rocm-smi &> /dev/null; then
+        print_success "AMD GPU detected"
+        if [ ! -d /opt/rocm ]; then
+            print_warning "ROCm not found. You'll need to install ROCm for GPU mining."
+            print_warning "Visit: https://rocm.docs.amd.com/en/latest/deploy/linux/index.html"
+        fi
     else
-        print_info "Configuring for NVIDIA GPU with CUDA..."
-        cmake .. -DCMAKE_BUILD_TYPE=Release -GNinja
+        print_warning "No supported GPU detected. You'll need CUDA (NVIDIA) or ROCm (AMD) for GPU mining."
     fi
-
-    # Build
-    print_info "Compiling... This may take a few minutes."
-    if command -v ninja &> /dev/null; then
-        ninja -j$(nproc)
-    else
-        make -j$(nproc)
-    fi
-
-    cd ..
-
-    print_success "Build completed successfully!"
 }
 
-# Create wrapper scripts
-create_scripts() {
-    print_info "Creating helper scripts..."
-
-    cd "$INSTALL_DIR"
-
-    # Create run script
-    cat > run_miner.sh << 'EOF'
-#!/bin/bash
-# SHA-1 Miner Run Script
-
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-MINER_BIN="$SCRIPT_DIR/build/sha1_miner"
-
-if [ ! -f "$MINER_BIN" ]; then
-    echo "Error: Miner binary not found at $MINER_BIN"
-    echo "Please run install.sh first."
-    exit 1
-fi
-
-# Pass all arguments to the miner
-"$MINER_BIN" "$@"
-EOF
-    chmod +x run_miner.sh
-
-    # Create pool mining script
-    cat > pool_mining.sh << 'EOF'
-#!/bin/bash
-# Pool Mining Configuration
-
-# Edit these values:
-POOL_URL="ws://pool.example.com:3333"
-WALLET="YOUR_WALLET_ADDRESS"
-WORKER_NAME="${HOSTNAME:-worker1}"
-
-# Run miner
-./run_miner.sh --pool "$POOL_URL" --wallet "$WALLET" --worker "$WORKER_NAME" --auto-tune "$@"
-EOF
-    chmod +x pool_mining.sh
-
-    # Create solo mining script
-    cat > solo_mining.sh << 'EOF'
-#!/bin/bash
-# Solo Mining Configuration
-
-# Run miner with default settings
-./run_miner.sh --gpu 0 --difficulty 45 --duration 3600 --auto-tune "$@"
-EOF
-    chmod +x solo_mining.sh
-}
-
-# Main installation process
+# Main installation
 main() {
     clear
     echo "====================================="
-    echo "SHA-1 OP_NET Miner - Linux Installer"
-    echo "with uWebSockets support"
+    echo "SHA-1 Miner - Linux Dependencies Installer"
     echo "====================================="
     echo
-    echo "Installation directory: $INSTALL_DIR"
+    echo "Working directory: $INSTALL_DIR"
     echo
 
-    # Create installation directory
-    mkdir -p "$INSTALL_DIR"
+    # Check sudo access
+    check_sudo
 
     # Detect distribution
     detect_distro
     print_info "Detected OS: $OS $VER"
+    echo
 
     # Check GPU
     check_gpu
+    echo
 
     # Install dependencies based on distro
     case $OS in
-        ubuntu|debian|linuxmint|pop)
+        ubuntu|debian|linuxmint|pop|elementary|zorin)
             install_deps_debian
             ;;
-        fedora|rhel|centos|rocky|almalinux)
+        fedora|rhel|centos|rocky|almalinux|oracle)
             install_deps_fedora
             ;;
-        arch|manjaro|endeavouros)
+        arch|manjaro|endeavouros|garuda|artix)
             install_deps_arch
             ;;
-        opensuse|suse)
+        opensuse*|suse*)
             install_deps_opensuse
+            ;;
+        alpine)
+            install_deps_alpine
             ;;
         *)
             print_error "Unsupported distribution: $OS"
-            print_info "Please install dependencies manually:"
-            print_info "- CMake 3.16+"
-            print_info "- GCC 9+ or Clang 10+"
-            print_info "- Boost libraries"
-            print_info "- OpenSSL"
-            print_info "- zlib"
-            print_info "- libuv"
-            print_info "- nlohmann/json"
+            print_info "Please install these packages manually:"
+            print_info "  - build-essential/base-devel (compiler toolchain)"
+            print_info "  - cmake (3.16+)"
+            print_info "  - git"
+            print_info "  - libssl-dev/openssl-devel"
+            print_info "  - libboost-all-dev/boost-devel"
+            print_info "  - nlohmann-json3-dev/json-devel"
+            print_info "  - zlib1g-dev/zlib-devel"
+            print_info "  - libuv1-dev/libuv-devel"
+            print_info "  - pkg-config"
+            print_info "  - ninja-build (optional but recommended)"
             exit 1
             ;;
     esac
 
-    # Install nlohmann/json
-    install_json
+    echo
 
     # Install uWebSockets
     install_uwebsockets
 
-    # Create project structure
-    create_project_structure
-
-    # Check for source files
     echo
-    if [ ! -f "$INSTALL_DIR/src/main.cpp" ]; then
-        print_warning "Source files not found!"
-        print_warning "Please copy your source files to:"
-        print_warning "  $INSTALL_DIR/src/*.cpp"
-        print_warning "  $INSTALL_DIR/include/*.hpp"
-        print_warning "  $INSTALL_DIR/include/miner/*.cuh"
-        echo
-        read -p "Press Enter when you've copied the files, or Ctrl+C to exit..."
-    fi
-
-    # Build the project
-    build_project
-
-    # Create scripts
-    create_scripts
-
-    # Create system-wide symlink if desired
+    print_success "Dependencies installation complete!"
     echo
-    read -p "Create system-wide command 'sha1-miner'? (requires sudo) [y/N] " -n 1 -r
+    echo "Installed packages:"
+    echo "  - OpenSSL (SSL/TLS support)"
+    echo "  - Boost (system, thread, program-options)"
+    echo "  - nlohmann-json (JSON parsing)"
+    echo "  - zlib (compression)"
+    echo "  - libuv (async I/O)"
+    echo "  - uWebSockets (WebSocket client) in external/"
     echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        sudo ln -sf "$INSTALL_DIR/run_miner.sh" /usr/local/bin/sha1-miner
-        print_success "System-wide command 'sha1-miner' created"
-    fi
-
-    echo
-    print_success "Installation completed successfully!"
-    echo
-    echo "Installation directory: $INSTALL_DIR"
-    echo
-    echo "To run the miner:"
-    echo "  cd $INSTALL_DIR"
-    echo "  ./run_miner.sh --help"
-    echo
-    echo "Example commands:"
-    echo "  Solo mining: ./solo_mining.sh"
-    echo "  Pool mining: ./pool_mining.sh"
-    echo
-    echo "Or edit the scripts to customize your settings."
+    echo "To build your project:"
+    echo "  1. Make sure your source files are in place"
+    echo "  2. Create build directory: mkdir -p build && cd build"
+    echo "  3. Configure: cmake .. -DCMAKE_BUILD_TYPE=Release"
+    echo "  4. Build: make -j\$(nproc)"
     echo
 
-    if [ -f /usr/local/bin/sha1-miner ]; then
-        echo "System-wide command available:"
-        echo "  sha1-miner --help"
+    if [ ! -f "$INSTALL_DIR/CMakeLists.txt" ]; then
+        print_warning "No CMakeLists.txt found in current directory."
+        print_warning "Make sure you're running this from your project root."
     fi
 }
 
-# Run if not sourced
+# Run main if not sourced
 if [ "${BASH_SOURCE[0]}" == "${0}" ]; then
     main "$@"
 fi

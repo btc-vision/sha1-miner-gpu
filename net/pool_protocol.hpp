@@ -1,11 +1,8 @@
-// pool_protocol.hpp - SHA-1 Mining Pool Protocol Definition
 #pragma once
 
 #include <string>
 #include <cstdint>
 #include <vector>
-#include <memory>
-#include <functional>
 #include <chrono>
 #include <map>
 #include <mutex>
