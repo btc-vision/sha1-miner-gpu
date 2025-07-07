@@ -53,7 +53,7 @@ if (POLICY CMP0167)
     cmake_policy(SET CMP0167 OLD)
 endif ()
 
-# Find Boost with vcpkg hints
+# Find Boost with vcpkg hints - ADDED program_options
 if (WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE)
     # Help CMake find Boost from vcpkg
     set(BOOST_ROOT ${CMAKE_PREFIX_PATH})
@@ -63,7 +63,7 @@ if (WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE)
     set(Boost_USE_STATIC_RUNTIME OFF)
 endif ()
 
-find_package(Boost 1.70 REQUIRED COMPONENTS system thread)
+find_package(Boost 1.70 REQUIRED COMPONENTS system thread program_options)
 if (Boost_FOUND)
     message(STATUS "Boost found:")
     message(STATUS "  Version: ${Boost_VERSION}")
@@ -71,11 +71,16 @@ if (Boost_FOUND)
     message(STATUS "  Libraries: ${Boost_LIBRARIES}")
 endif ()
 
+# Find zlib (required by uWebSockets)
+find_package(ZLIB REQUIRED)
+
 # Platform-specific optimization flags
 if (MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob3 /Oi /Ot /Oy /GT /GL /Gw /arch:AVX2 /fp:fast /MD")
     set(CMAKE_CXX_FLAGS_DEBUG "/Od /RTC1 /MDd")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /OPT:REF /OPT:ICF")
+    # Add /NODEFAULTLIB:LIBCMT to avoid conflicts
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /NODEFAULTLIB:LIBCMT")
 else ()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native -ffast-math -funroll-loops -finline-functions")
@@ -117,6 +122,39 @@ find_library(USOCKETS_LIB
         ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib
         ${CMAKE_PREFIX_PATH}/lib
 )
+
+# Find libuv (required by uSockets)
+find_package(libuv CONFIG QUIET)
+if (libuv_FOUND)
+    # Check if static library target exists
+    if (TARGET libuv::uv_a)
+        set(LIBUV_LIB libuv::uv_a)
+    elseif (TARGET libuv::uv)
+        set(LIBUV_LIB libuv::uv)
+    else ()
+        # Fallback to manual search
+        set(libuv_FOUND FALSE)
+    endif ()
+endif ()
+
+if (NOT libuv_FOUND)
+    find_library(LIBUV_LIB
+            NAMES uv_a uv libuv
+            PATHS
+            ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib
+            ${CMAKE_PREFIX_PATH}/lib
+    )
+    find_path(LIBUV_INCLUDE_DIR
+            NAMES uv.h
+            PATHS
+            ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
+            ${CMAKE_PREFIX_PATH}/include
+    )
+
+    if (NOT LIBUV_LIB)
+        message(FATAL_ERROR "libuv not found. Please install it via: vcpkg install libuv:x64-windows")
+    endif ()
+endif ()
 
 if (UWEBSOCKETS_INCLUDE_DIR AND USOCKETS_INCLUDE_DIR)
     message(STATUS "Found uWebSockets at: ${UWEBSOCKETS_INCLUDE_DIR}")
@@ -274,6 +312,15 @@ else ()
     message(STATUS "  CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 endif ()
 
+# Add pool protocol source files - only if they exist
+set(POOL_SOURCES "")
+if (EXISTS ${NET_DIR}/pool_protocol.cpp)
+    list(APPEND POOL_SOURCES ${NET_DIR}/pool_protocol.cpp)
+endif ()
+if (EXISTS ${NET_DIR}/pool_utils.cpp)
+    list(APPEND POOL_SOURCES ${NET_DIR}/pool_utils.cpp)
+endif ()
+
 # Create main executable with all sources
 add_executable(sha1_miner
         ${SRC_DIR}/main.cpp
@@ -282,6 +329,7 @@ add_executable(sha1_miner
         ${SRC_DIR}/globals.cpp
         ${NET_DIR}/pool_client.cpp
         ${NET_DIR}/pool_integration.cpp
+        ${POOL_SOURCES}
         ${MINER_DIR}/kernel_launcher.cpp
 )
 
@@ -300,7 +348,13 @@ target_include_directories(sha1_miner PRIVATE
         ${UWEBSOCKETS_INCLUDE_DIR}
         ${USOCKETS_INCLUDE_DIR}
         ${Boost_INCLUDE_DIRS}
+        ${ZLIB_INCLUDE_DIRS}
 )
+
+# Add libuv include directory if found
+if (LIBUV_INCLUDE_DIR)
+    target_include_directories(sha1_miner PRIVATE ${LIBUV_INCLUDE_DIR})
+endif ()
 
 # If nlohmann/json was found manually, add include directory
 if (NLOHMANN_JSON_INCLUDE_DIR)
@@ -322,7 +376,7 @@ if (NOT MSVC)
     )
 endif ()
 
-# Linking
+# Linking - Fixed order and added missing libraries
 if (GPU_BACKEND STREQUAL "HIP")
     add_dependencies(sha1_miner hip_kernel_target)
     target_link_libraries(sha1_miner PRIVATE
@@ -330,6 +384,8 @@ if (GPU_BACKEND STREQUAL "HIP")
             ${GPU_LIBRARIES}
             ${Boost_LIBRARIES}
             ${USOCKETS_LIB}
+            ${LIBUV_LIB}
+            ZLIB::ZLIB
             OpenSSL::SSL
             OpenSSL::Crypto
             Threads::Threads
@@ -339,10 +395,23 @@ else ()
             ${GPU_LIBRARIES}
             ${Boost_LIBRARIES}
             ${USOCKETS_LIB}
+            ${LIBUV_LIB}
+            ZLIB::ZLIB
             OpenSSL::SSL
             OpenSSL::Crypto
             Threads::Threads
     )
+
+    # Windows-specific libraries
+    if (WIN32)
+        target_link_libraries(sha1_miner PRIVATE
+                synchronization.lib
+                ws2_32.lib
+                iphlpapi.lib
+                userenv.lib
+                psapi.lib
+        )
+    endif ()
 
     # For CUDA, also handle separable compilation
     set_target_properties(sha1_miner PROPERTIES
@@ -386,7 +455,9 @@ message(STATUS "  C++ Compiler: ${CMAKE_CXX_COMPILER}")
 if (GPU_BACKEND STREQUAL "CUDA")
     message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
 endif ()
-message(STATUS "  WebSocketPP found at: ${WEBSOCKETPP_INCLUDE_DIR}")
+message(STATUS "  uWebSockets found at: ${UWEBSOCKETS_INCLUDE_DIR}")
 message(STATUS "  Boost version: ${Boost_VERSION}")
 message(STATUS "  OpenSSL version: ${OPENSSL_VERSION}")
+message(STATUS "  zlib found: ${ZLIB_FOUND}")
+message(STATUS "  libuv found: ${LIBUV_LIB}")
 message(STATUS "")
