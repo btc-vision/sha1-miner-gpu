@@ -136,6 +136,12 @@ void MiningSystem::autoTuneParameters() {
             config_.num_streams = 2;
         }
 
+        size_t gpu_memory = device_props_.totalGlobalMem;
+        if (gpu_memory > 12ULL * 1024 * 1024 * 1024) {
+            // Large GPU (16GB) - be more conservative
+            blocks_per_sm = 6;
+        }
+
         // Use actual CU count for calculations
         config_.blocks_per_stream = actual_cus * blocks_per_sm;
     } else if (gpu_vendor_ == GPUVendor::NVIDIA) {
