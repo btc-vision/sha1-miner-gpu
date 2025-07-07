@@ -4,7 +4,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <cstring>
-
+#include "gpu_architecture.hpp"
 #include "utilities.hpp"
 
 // Global system instance
@@ -109,43 +109,52 @@ void MiningSystem::autoTuneParameters() {
     int optimal_threads;
 
     if (gpu_vendor_ == GPUVendor::AMD) {
-        // AMD-specific tuning
-        optimal_threads = 256; // AMD typically prefers 256
-        // For RDNA (RX 5700 XT), multiProcessorCount may report half the actual CUs
-        int actual_cus = device_props_.multiProcessorCount;
-        // Check if this is RDNA by wavefront size
-        if (device_props_.warpSize == 32) {
-            // RDNA has 32-thread wavefronts instead of 64
-            // ROCm might report WGPs (Workgroup Processors) instead of CUs
-            // Each WGP has 2 CUs in RDNA
-            actual_cus *= 2;
-            std::cout << "Detected RDNA architecture, adjusting CU count to: " << actual_cus << "\n";
-        }
-        // AMD GPU architectures
-        if (device_props_.major >= 10) {
-            // RDNA/RDNA2/RDNA3 (gfx10xx/gfx11xx)
-            blocks_per_sm = 32; // Much higher for RDNA
-            config_.num_streams = 8;
-        } else if (device_props_.major == 9) {
-            // GCN5/Vega (gfx900/gfx906)
-            blocks_per_sm = 16;
-            config_.num_streams = 4;
-        } else {
-            // Older GCN
-            blocks_per_sm = 8;
-            config_.num_streams = 2;
+#ifdef USE_HIP
+        // Use enhanced AMD detection
+        AMDArchitecture arch = AMDGPUDetector::detectArchitecture(device_props_);
+        AMDArchParams arch_params = AMDGPUDetector::getArchitectureParams(arch);
+
+        // Print detailed architecture info
+        printAMDArchitectureInfo(device_props_);
+
+        // Check for known issues
+        if (AMDGPUDetector::hasKnownIssues(arch, device_props_.name)) {
+            std::cout << "\nWARNING: This GPU may have compatibility issues.\n";
+            std::cout << "Consider updating ROCm/drivers or using reduced settings.\n\n";
         }
 
-        size_t gpu_memory = device_props_.totalGlobalMem;
-        if (gpu_memory > 12ULL * 1024 * 1024 * 1024) {
-            // Large GPU (16GB) - be more conservative
-            blocks_per_sm = 6;
+        // Use architecture-specific configuration
+        AMDGPUDetector::configureForArchitecture(config_, device_props_, arch);
+
+        // Override threads per block based on architecture
+        if (arch == AMDArchitecture::RDNA3 || arch == AMDArchitecture::RDNA2) {
+            // RDNA prefers 128 or 256 threads
+            config_.threads_per_block = 256;
+        } else if (arch == AMDArchitecture::GCN5 || arch == AMDArchitecture::GCN4) {
+            // GCN works well with 256
+            config_.threads_per_block = 256;
         }
 
-        // Use actual CU count for calculations
-        config_.blocks_per_stream = actual_cus * blocks_per_sm;
+        // Special handling for specific GPUs
+        std::string gpu_name = device_props_.name;
+        if (gpu_name.find("7900") != std::string::npos) {
+            // RX 7900 XTX/XT specific tuning
+            std::cout << "Applying RX 7900 series optimizations\n";
+            config_.threads_per_block = 256;
+            if (config_.blocks_per_stream > 1536) {
+                config_.blocks_per_stream = 1536;
+            }
+        }
+#else
+        // Fallback for non-HIP builds
+        optimal_threads = 256;
+        blocks_per_sm = 8;
+        config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
+        config_.threads_per_block = optimal_threads;
+        config_.num_streams = 4;
+#endif
     } else if (gpu_vendor_ == GPUVendor::NVIDIA) {
-        // NVIDIA-specific tuning
+        // NVIDIA-specific tuning (existing code)
         if (device_props_.major >= 8) {
             // Ampere and newer (RTX 30xx, 40xx, A100, etc.)
             blocks_per_sm = 16;
@@ -174,40 +183,30 @@ void MiningSystem::autoTuneParameters() {
             optimal_threads = 128;
             config_.num_streams = 2;
         }
+
+        // Set configuration for NVIDIA
+        config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
+        config_.threads_per_block = optimal_threads;
     } else {
         // Unknown vendor - use conservative defaults
         blocks_per_sm = 4;
         optimal_threads = 256;
         config_.num_streams = 4;
+        config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
+        config_.threads_per_block = optimal_threads;
     }
 
-    // Adjust based on register and shared memory limits
-    int max_threads_per_sm = device_props_.maxThreadsPerMultiProcessor;
-    int max_blocks_per_sm = max_threads_per_sm / optimal_threads;
-    if (blocks_per_sm > max_blocks_per_sm) {
-        blocks_per_sm = max_blocks_per_sm;
-    }
+    // Common adjustments for all vendors
 
-    // Set configuration
-    config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
-    config_.threads_per_block = optimal_threads;
+    // Ensure we don't exceed device limits
+    if (config_.threads_per_block > device_props_.maxThreadsPerBlock) {
+        config_.threads_per_block = device_props_.maxThreadsPerBlock;
+    }
 
     // For very large GPUs, limit total blocks to avoid scheduling overhead
-    int max_total_blocks = (gpu_vendor_ == GPUVendor::AMD) ? 2048 : 2048; // Same for both now
+    int max_total_blocks = (gpu_vendor_ == GPUVendor::AMD) ? 2048 : 2048;
     if (config_.blocks_per_stream > max_total_blocks) {
         config_.blocks_per_stream = max_total_blocks;
-    }
-
-    // Adjust number of streams based on SM/CU count for both vendors
-    if (device_props_.multiProcessorCount >= 80) {
-        // High-end GPUs (RTX 4090, RX 7900 XTX, etc.)
-        config_.num_streams = 16;
-    } else if (device_props_.multiProcessorCount >= 40) {
-        // Mid-high GPUs (RTX 3070, RX 6800, etc.)
-        config_.num_streams = 8;
-    } else if (device_props_.multiProcessorCount >= 20) {
-        // Mid-range GPUs
-        config_.num_streams = 4;
     }
 
     // Adjust streams based on available memory
@@ -215,7 +214,7 @@ void MiningSystem::autoTuneParameters() {
     gpuMemGetInfo(&free_mem, &total_mem);
     size_t mem_per_stream = sizeof(MiningResult) * config_.result_buffer_size +
                             (config_.blocks_per_stream * config_.threads_per_block * sizeof(uint32_t) * 5);
-    int max_streams_by_memory = free_mem / (mem_per_stream * 2); // Use at most 50% of free memory
+    int max_streams_by_memory = free_mem / (mem_per_stream * 2);
     if (config_.num_streams > max_streams_by_memory && max_streams_by_memory > 0) {
         config_.num_streams = max_streams_by_memory;
     }
@@ -228,45 +227,13 @@ void MiningSystem::autoTuneParameters() {
     // Result buffer size
     config_.result_buffer_size = 128;
 
-    // Special optimizations for specific GPUs
-    std::string gpu_name = device_props_.name;
-
-    // NVIDIA specific models
-    if (gpu_name.find("4090") != std::string::npos || gpu_name.find("4080") != std::string::npos) {
-        // RTX 4090/4080 specific
-        config_.threads_per_block = 512; // These GPUs love high thread counts
-        blocks_per_sm = 16;
-        config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
-    } else if (gpu_name.find("A100") != std::string::npos || gpu_name.find("H100") != std::string::npos) {
-        // Data center GPUs
-        config_.threads_per_block = 512;
-        blocks_per_sm = 32; // These can handle extreme occupancy
-        config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
-        config_.num_streams = 32;
-    }
-    // AMD specific models
-    else if (gpu_name.find("7900") != std::string::npos) {
-        // RX 7900 XTX/XT (RDNA3)
-        config_.threads_per_block = 256;
-        blocks_per_sm = 16;
-        config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
-        config_.num_streams = 16;
-    } else if (gpu_name.find("6900") != std::string::npos || gpu_name.find("6800") != std::string::npos) {
-        // RX 6900/6800 (RDNA2)
-        config_.threads_per_block = 256;
-        blocks_per_sm = 12;
-        config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
-    }
-
-    // Ensure we don't exceed device limits
-    if (config_.threads_per_block > device_props_.maxThreadsPerBlock) {
-        config_.threads_per_block = device_props_.maxThreadsPerBlock;
-    }
-
+    // Print final configuration
     std::cout << "Auto-tuned configuration for " << device_props_.name << ":\n";
     std::cout << "  Compute Capability: " << device_props_.major << "." << device_props_.minor << "\n";
     std::cout << "  SMs/CUs: " << device_props_.multiProcessorCount << "\n";
-    std::cout << "  Blocks per SM/CU: " << blocks_per_sm << "\n";
+    if (gpu_vendor_ == GPUVendor::NVIDIA) {
+        std::cout << "  Blocks per SM: " << (config_.blocks_per_stream / device_props_.multiProcessorCount) << "\n";
+    }
     std::cout << "  Blocks per stream: " << config_.blocks_per_stream << "\n";
     std::cout << "  Threads per block: " << config_.threads_per_block << "\n";
     std::cout << "  Number of streams: " << config_.num_streams << "\n";

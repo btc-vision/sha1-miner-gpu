@@ -1,9 +1,11 @@
-#include "../include/multi_gpu_manager.hpp"
+#include "multi_gpu_manager.hpp"
+#include "utilities.hpp"
+#ifdef USE_HIP
+#include "gpu_architecture.hpp"
+#endif
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
-
-#include "utilities.hpp"
 
 MultiGPUManager::MultiGPUManager() {
     start_time_ = std::chrono::steady_clock::now();
@@ -23,12 +25,6 @@ bool MultiGPUManager::initialize(const std::vector<int> &gpu_ids) {
     std::cout << "=====================================\n";
 
     for (int gpu_id: gpu_ids) {
-        // Skip GPU 2 if it's the problematic RDNA3
-        if (gpu_id == 2) {
-            std::cout << "Skipping GPU " << gpu_id << " (known issues with RDNA3)\n";
-            continue;
-        }
-
         auto worker = std::make_unique<GPUWorker>();
         worker->device_id = gpu_id;
 
@@ -40,7 +36,43 @@ bool MultiGPUManager::initialize(const std::vector<int> &gpu_ids) {
             continue;
         }
 
-        std::cout << "Initializing GPU " << gpu_id << ": " << props.name << "\n";
+        std::cout << "\nInitializing GPU " << gpu_id << ": " << props.name << "\n";
+
+#ifdef USE_HIP
+        // Check for AMD GPU issues
+        AMDArchitecture arch = AMDGPUDetector::detectArchitecture(props);
+        AMDArchParams arch_params = AMDGPUDetector::getArchitectureParams(arch);
+
+        std::cout << "  Architecture: " << arch_params.arch_name << " (" << props.gcnArchName << ")\n";
+        std::cout << "  Wavefront size: " << arch_params.wavefront_size << "\n";
+
+        if (AMDGPUDetector::hasKnownIssues(arch, props.name)) {
+            std::cout << "WARNING: GPU " << gpu_id << " has known compatibility issues.\n";
+
+            // Get ROCm version
+            int version;
+            if (hipRuntimeGetVersion(&version) == hipSuccess) {
+                int major = version / 10000000;
+                int minor = (version % 10000000) / 100000;
+                int patch = (version % 100000) / 100;
+                std::cout << "Current ROCm version: " << major << "." << minor << "." << patch << "\n";
+
+                if (version < 50700000 && arch == AMDArchitecture::RDNA3) {
+                    std::cout << "RDNA3 requires ROCm 5.7 or later. ";
+
+                    // Ask user whether to skip or try anyway
+                    std::cout << "Skip this GPU? (Recommended) [Y/n]: ";
+                    std::string response;
+                    std::getline(std::cin, response);
+                    if (response.empty() || response[0] == 'Y' || response[0] == 'y') {
+                        std::cout << "Skipping GPU " << gpu_id << "\n";
+                        continue;
+                    }
+                    std::cout << "Attempting to initialize with reduced settings...\n";
+                }
+            }
+        }
+#endif
 
         // Create mining system for this GPU
         MiningSystem::Config config;
@@ -49,14 +81,33 @@ bool MultiGPUManager::initialize(const std::vector<int> &gpu_ids) {
         config.threads_per_block = DEFAULT_THREADS_PER_BLOCK;
         config.use_pinned_memory = true;
         config.result_buffer_size = 256;
+#ifdef USE_HIP
+        // Apply architecture-specific configuration for problematic GPUs
+        if (arch == AMDArchitecture::RDNA3) {
+            std::cout << "Applying RDNA3-specific workarounds...\n";
+            config.num_streams = 2; // Reduce streams
+            config.blocks_per_stream = 256; // Start conservative
+            config.threads_per_block = 128; // Smaller workgroups
+        }
+#endif
 
         worker->mining_system = std::make_unique<MiningSystem>(config);
-        if (!worker->mining_system->initialize()) {
-            std::cerr << "Failed to initialize GPU " << gpu_id << "\n";
+        // Try to initialize with error handling
+        try {
+            if (!worker->mining_system->initialize()) {
+                std::cerr << "Failed to initialize GPU " << gpu_id << "\n";
+                continue;
+            }
+        } catch (const std::exception &e) {
+            std::cerr << "Exception initializing GPU " << gpu_id << ": " << e.what() << "\n";
+            continue;
+        } catch (...) {
+            std::cerr << "Unknown exception initializing GPU " << gpu_id << "\n";
             continue;
         }
 
         workers_.push_back(std::move(worker));
+        std::cout << "Successfully initialized GPU " << gpu_id << "\n";
     }
 
     if (workers_.empty()) {
@@ -78,73 +129,104 @@ void MultiGPUManager::workerThread(GPUWorker *worker, const MiningJob &job, uint
     // Set GPU context for this thread
     gpuError_t err = gpuSetDevice(worker->device_id);
     if (err != gpuSuccess) {
-        std::cerr << "[GPU " << worker->device_id << "] Failed to set device context\n";
+        std::cerr << "[GPU " << worker->device_id << "] Failed to set device context: " << gpuGetErrorString(err) <<
+                "\n";
         return;
     }
 
     std::cout << "[GPU " << worker->device_id << "] Worker thread started\n";
+
+    // For problematic GPUs, add extra error handling
+    bool has_errors = false;
+    int consecutive_errors = 0;
+    const int max_consecutive_errors = 5;
 
     auto end_time = std::chrono::steady_clock::now() + std::chrono::seconds(duration_seconds);
 
     // Get initial nonce batch
     uint64_t current_nonce_base = getNextNonceBatch();
     uint64_t nonces_used_in_batch = 0;
-    // We need to run the mining loop manually to track hashes properly
-    while (!shutdown_ && std::chrono::steady_clock::now() < end_time) {
-        // Create job with current nonce offset
-        MiningJob worker_job = job;
-        worker_job.nonce_offset = current_nonce_base + nonces_used_in_batch;
 
-        // Run a single kernel batch
-        auto kernel_start = std::chrono::steady_clock::now();
-        // Call the lower-level mining function instead of runMiningLoop
-        uint64_t hashes_this_round = worker->mining_system->runSingleBatch(worker_job);
-        if (hashes_this_round == 0) {
-            // If runSingleBatch doesn't exist, we need to implement it
-            // For now, estimate based on configuration
-            auto config = worker->mining_system->getConfig();
-            hashes_this_round = static_cast<uint64_t>(config.blocks_per_stream) * config.threads_per_block *
-                                NONCES_PER_THREAD;
-        }
-        // Update worker stats
-        worker->hashes_computed += hashes_this_round;
-        nonces_used_in_batch += hashes_this_round;
-        // Check if we need a new nonce batch
-        if (nonces_used_in_batch >= NONCE_BATCH_SIZE * 0.9) {
-            current_nonce_base = getNextNonceBatch();
-            nonces_used_in_batch = 0;
-        }
-        // Get any results from this batch
-        auto results = worker->mining_system->getLastResults();
-        worker->candidates_found += results.size();
-        // Check for new best
-        for (const auto &result: results) {
-            if (result.matching_bits > worker->best_match_bits) {
-                worker->best_match_bits = result.matching_bits;
-                // Check if this is a global best
-                if (global_best_tracker_.isNewBest(result.matching_bits)) {
-                    std::lock_guard<std::mutex> lock(stats_mutex_);
-                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                        std::chrono::steady_clock::now() - start_time_
-                    );
-                    std::cout << "\n[GPU " << worker->device_id << " - NEW BEST!] Time: " << elapsed.count() << "s\n";
-                    std::cout << "  Nonce: 0x" << std::hex << result.nonce << std::dec << "\n";
-                    std::cout << "  Matching bits: " << result.matching_bits << "\n";
-                    std::cout << "  Hash: ";
-                    for (int j = 0; j < 5; j++) {
-                        std::cout << std::hex << std::setw(8) << std::setfill('0')
-                                << result.hash[j];
-                        if (j < 4) std::cout << " ";
+    while (!shutdown_ && std::chrono::steady_clock::now() < end_time && !has_errors) {
+        try {
+            // Create job with current nonce offset
+            MiningJob worker_job = job;
+            worker_job.nonce_offset = current_nonce_base + nonces_used_in_batch;
+
+            // Run a single kernel batch with error handling
+            auto kernel_start = std::chrono::steady_clock::now();
+            uint64_t hashes_this_round = worker->mining_system->runSingleBatch(worker_job);
+            if (hashes_this_round == 0) {
+                // Fallback estimation
+                auto config = worker->mining_system->getConfig();
+                hashes_this_round = static_cast<uint64_t>(config.blocks_per_stream) * config.threads_per_block *
+                                    NONCES_PER_THREAD;
+            }
+
+            // Update worker stats
+            worker->hashes_computed += hashes_this_round;
+            nonces_used_in_batch += hashes_this_round;
+
+            // Check if we need a new nonce batch
+            if (nonces_used_in_batch >= NONCE_BATCH_SIZE * 0.9) {
+                current_nonce_base = getNextNonceBatch();
+                nonces_used_in_batch = 0;
+            }
+
+            // Get any results from this batch
+            auto results = worker->mining_system->getLastResults();
+            worker->candidates_found += results.size();
+
+            // Check for new best
+            for (const auto &result: results) {
+                if (result.matching_bits > worker->best_match_bits) {
+                    worker->best_match_bits = result.matching_bits;
+                    // Check if this is a global best
+                    if (global_best_tracker_.isNewBest(result.matching_bits)) {
+                        std::lock_guard<std::mutex> lock(stats_mutex_);
+                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::steady_clock::now() - start_time_
+                        );
+                        std::cout << "\n[GPU " << worker->device_id << " - NEW BEST!] Time: " << elapsed.count() <<
+                                "s\n";
+                        std::cout << "  Nonce: 0x" << std::hex << result.nonce << std::dec << "\n";
+                        std::cout << "  Matching bits: " << result.matching_bits << "\n";
+                        std::cout << "  Hash: ";
+                        for (int j = 0; j < 5; j++) {
+                            std::cout << std::hex << std::setw(8) << std::setfill('0')
+                                    << result.hash[j];
+                            if (j < 4) std::cout << " ";
+                        }
+                        std::cout << std::dec << "\n\n";
                     }
-                    std::cout << std::dec << "\n\n";
                 }
             }
+
+            // Reset error counter on success
+            consecutive_errors = 0;
+        } catch (const std::exception &e) {
+            std::cerr << "[GPU " << worker->device_id << "] Error: " << e.what() << "\n";
+            consecutive_errors++;
+
+            if (consecutive_errors >= max_consecutive_errors) {
+                std::cerr << "[GPU " << worker->device_id << "] Too many consecutive errors, stopping worker\n";
+                has_errors = true;
+                break;
+            }
+
+            // Wait a bit before retrying
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
+
         // Small delay to prevent CPU spinning
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    std::cout << "[GPU " << worker->device_id << "] Worker thread finished\n";
+    if (has_errors) {
+        std::cerr << "[GPU " << worker->device_id << "] Worker thread stopped due to errors\n";
+    } else {
+        std::cout << "[GPU " << worker->device_id << "] Worker thread finished normally\n";
+    }
 }
 
 void MultiGPUManager::runMining(const MiningJob &job, uint32_t duration_seconds) {
