@@ -30,3 +30,9 @@
 *.exe
 *.out
 *.app
+
+build_amd
+build_nvidia
+
+build_amd/*
+build_nvidia/*

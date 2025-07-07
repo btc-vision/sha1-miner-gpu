@@ -249,14 +249,6 @@ extern "C" void launch_mining_kernel_amd(
     // AMD GPUs prefer fewer nonces per thread due to different memory hierarchy
     uint32_t nonces_per_thread = NONCES_PER_THREAD;
 
-    // For RDNA, increase work per thread
-    hipDeviceProp_t props;
-    hipGetDeviceProperties(&props, 0); // Assuming device 0
-    if (props.warpSize == 32) {
-        // RDNA architecture - increase work per thread
-        nonces_per_thread *= 2; // Double the work
-    }
-
     // Reset result count
     hipError_t err = hipMemsetAsync(pool.count, 0, sizeof(uint32_t), config.stream);
     if (err != hipSuccess) {
