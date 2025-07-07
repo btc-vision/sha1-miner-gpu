@@ -2,45 +2,184 @@
   "version": 3,
   "configurePresets": [
     {
+      "name": "windows-base",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CXX_STANDARD_REQUIRED": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "windows-vcpkg-base",
+      "hidden": true,
+      "inherits": "windows-base",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "OPENSSL_ROOT_DIR": "${sourceDir}/vcpkg/installed/x64-windows"
+      },
+      "environment": {
+        "VCPKG_ROOT": "${sourceDir}/vcpkg",
+        "OPENSSL_ROOT_DIR": "${sourceDir}/vcpkg/installed/x64-windows"
+      }
+    },
+    {
       "name": "windows-ninja-release",
-      "displayName": "Release (CUDA 12.9 + Ninja)",
+      "displayName": "Windows Release (CUDA 12.9 + Ninja + uWebSockets)",
+      "inherits": "windows-vcpkg-base",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_CUDA_ARCHITECTURES": "86;89;90;120",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
         "CMAKE_CUDA_STANDARD": "20",
-        "CMAKE_CXX_STANDARD": "20",
-        "CMAKE_CUDA_COMPILER": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe"
+        "CMAKE_CUDA_COMPILER": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe",
+        "UWEBSOCKETS_ROOT": "${sourceDir}/external/uWebSockets",
+        "USOCKETS_ROOT": "${sourceDir}/external/uSockets"
       }
     },
     {
       "name": "windows-ninja-debug",
-      "displayName": "Debug (CUDA 12.9 + Ninja)",
+      "displayName": "Windows Debug (CUDA 12.9 + Ninja + uWebSockets)",
+      "inherits": "windows-vcpkg-base",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CXX_FLAGS_DEBUG": "/Od /RTC1 /MDd",
-        "CMAKE_C_FLAGS_DEBUG": "/Od /RTC1 /MDd",
-        "CMAKE_CUDA_FLAGS_DEBUG": "--generate-line-info",
+        "CMAKE_CUDA_ARCHITECTURES": "86",
+        "CMAKE_CUDA_STANDARD": "20",
+        "CMAKE_CUDA_COMPILER": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe",
+        "UWEBSOCKETS_ROOT": "${sourceDir}/external/uWebSockets",
+        "USOCKETS_ROOT": "${sourceDir}/external/uSockets"
+      }
+    },
+    {
+      "name": "windows-vs2022-release",
+      "displayName": "Windows Release (VS 2022 + uWebSockets)",
+      "inherits": "windows-vcpkg-base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": {
+        "value": "x64",
+        "strategy": "set"
+      },
+      "binaryDir": "${sourceDir}/build/vs2022-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
+        "CMAKE_CUDA_STANDARD": "20",
+        "UWEBSOCKETS_ROOT": "${sourceDir}/external/uWebSockets",
+        "USOCKETS_ROOT": "${sourceDir}/external/uSockets"
+      }
+    },
+    {
+      "name": "linux-gcc-release",
+      "displayName": "Linux Release (GCC + CUDA + uWebSockets)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
         "CMAKE_CUDA_STANDARD": "20",
         "CMAKE_CXX_STANDARD": "20",
-        "CMAKE_CUDA_ARCHITECTURES": "86;89;90;120",
-        "CMAKE_CUDA_COMPILER": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe"
+        "UWEBSOCKETS_ROOT": "${sourceDir}/external/uWebSockets",
+        "USOCKETS_ROOT": "${sourceDir}/external/uSockets"
+      }
+    },
+    {
+      "name": "linux-clang-release",
+      "displayName": "Linux Release (Clang + CUDA + uWebSockets)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/clang-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
+        "CMAKE_CUDA_STANDARD": "20",
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CUDA_HOST_COMPILER": "clang++",
+        "UWEBSOCKETS_ROOT": "${sourceDir}/external/uWebSockets",
+        "USOCKETS_ROOT": "${sourceDir}/external/uSockets"
+      }
+    },
+    {
+      "name": "linux-hip-release",
+      "displayName": "Linux Release (HIP/ROCm + uWebSockets)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/hip-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CXX_STANDARD": "20",
+        "USE_HIP": "ON",
+        "ROCM_PATH": "/opt/rocm",
+        "HIP_ARCH": "gfx900,gfx906,gfx908,gfx90a,gfx1030,gfx1100",
+        "UWEBSOCKETS_ROOT": "${sourceDir}/external/uWebSockets",
+        "USOCKETS_ROOT": "${sourceDir}/external/uSockets"
+      },
+      "environment": {
+        "ROCM_PATH": "/opt/rocm",
+        "HIP_PATH": "/opt/rocm/hip"
       }
     }
   ],
   "buildPresets": [
     {
       "name": "release",
+      "displayName": "Release Build",
       "configurePreset": "windows-ninja-release",
-      "jobs": 12
+      "jobs": 12,
+      "targets": [
+        "sha1_miner"
+      ]
     },
     {
       "name": "debug",
+      "displayName": "Debug Build",
       "configurePreset": "windows-ninja-debug",
+      "jobs": 12,
+      "targets": [
+        "sha1_miner"
+      ]
+    },
+    {
+      "name": "release-vs",
+      "displayName": "Release Build (Visual Studio)",
+      "configurePreset": "windows-vs2022-release",
+      "configuration": "Release",
       "jobs": 12
+    },
+    {
+      "name": "linux-release",
+      "displayName": "Linux Release Build",
+      "configurePreset": "linux-gcc-release",
+      "jobs": 12,
+      "targets": [
+        "sha1_miner"
+      ]
+    },
+    {
+      "name": "linux-hip",
+      "displayName": "Linux HIP/AMD Build",
+      "configurePreset": "linux-hip-release",
+      "jobs": 12,
+      "targets": [
+        "sha1_miner"
+      ]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "test-release",
+      "displayName": "Test Release",
+      "configurePreset": "windows-ninja-release",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

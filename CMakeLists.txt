@@ -20,8 +20,56 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Find required packages
 find_package(Threads REQUIRED)
+
+# Find OpenSSL with vcpkg hints
+if (WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE)
+    # vcpkg should handle this, but sometimes needs help
+    set(OPENSSL_USE_STATIC_LIBS TRUE)
+    set(OPENSSL_MSVC_STATIC_RT TRUE)
+endif ()
+
+# Additional search paths for OpenSSL
+if (WIN32)
+    set(OPENSSL_ROOT_DIR
+            ${OPENSSL_ROOT_DIR}
+            ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}
+            ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/installed/x64-windows
+            ${CMAKE_CURRENT_SOURCE_DIR}/external/openssl
+            $ENV{OPENSSL_ROOT_DIR}
+    )
+endif ()
+
 find_package(OpenSSL REQUIRED)
+if (OpenSSL_FOUND)
+    message(STATUS "OpenSSL found:")
+    message(STATUS "  Version: ${OPENSSL_VERSION}")
+    message(STATUS "  Include: ${OPENSSL_INCLUDE_DIR}")
+    message(STATUS "  SSL Library: ${OPENSSL_SSL_LIBRARY}")
+    message(STATUS "  Crypto Library: ${OPENSSL_CRYPTO_LIBRARY}")
+endif ()
+
+# Set policy for FindBoost removal warning
+if (POLICY CMP0167)
+    cmake_policy(SET CMP0167 OLD)
+endif ()
+
+# Find Boost with vcpkg hints
+if (WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE)
+    # Help CMake find Boost from vcpkg
+    set(BOOST_ROOT ${CMAKE_PREFIX_PATH})
+    set(Boost_NO_SYSTEM_PATHS ON)
+    set(Boost_USE_STATIC_LIBS ON)
+    set(Boost_USE_MULTITHREADED ON)
+    set(Boost_USE_STATIC_RUNTIME OFF)
+endif ()
+
 find_package(Boost 1.70 REQUIRED COMPONENTS system thread)
+if (Boost_FOUND)
+    message(STATUS "Boost found:")
+    message(STATUS "  Version: ${Boost_VERSION}")
+    message(STATUS "  Include: ${Boost_INCLUDE_DIRS}")
+    message(STATUS "  Libraries: ${Boost_LIBRARIES}")
+endif ()
 
 # Platform-specific optimization flags
 if (MSVC)
@@ -39,40 +87,45 @@ set(INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(MINER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include/miner)
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-# WebSocketPP configuration
-set(WEBSOCKETPP_ROOT "" CACHE PATH "WebSocketPP root directory")
-
-# First try to find WebSocketPP via vcpkg
-find_path(WEBSOCKETPP_INCLUDE_DIR
-        NAMES websocketpp/config/asio_no_tls.hpp
+# uWebSockets configuration
+find_path(UWEBSOCKETS_INCLUDE_DIR
+        NAMES uwebsockets/App.h
         PATHS
         ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
         ${CMAKE_PREFIX_PATH}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets
+        /usr/include
+        /usr/local/include
 )
 
-# If not found via vcpkg, try other locations
-if (NOT WEBSOCKETPP_INCLUDE_DIR)
-    if (NOT WEBSOCKETPP_ROOT)
-        # Try to find websocketpp in common locations
-        find_path(WEBSOCKETPP_INCLUDE_DIR
-                NAMES websocketpp/config/asio_no_tls.hpp
-                PATHS
-                /usr/include
-                /usr/local/include
-                ${CMAKE_CURRENT_SOURCE_DIR}/external/websocketpp
-                ${CMAKE_CURRENT_SOURCE_DIR}/third_party/websocketpp
-                ${CMAKE_CURRENT_SOURCE_DIR}/../external/websocketpp
-        )
-    else ()
-        set(WEBSOCKETPP_INCLUDE_DIR ${WEBSOCKETPP_ROOT})
+find_path(USOCKETS_INCLUDE_DIR
+        NAMES libusockets.h
+        PATHS
+        ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
+        ${CMAKE_PREFIX_PATH}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/uSockets/src
+        /usr/include
+        /usr/local/include
+)
+
+# Find uSockets library if using vcpkg
+find_library(USOCKETS_LIB
+        NAMES uSockets usockets
+        PATHS
+        ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib
+        ${CMAKE_PREFIX_PATH}/lib
+)
+
+if (UWEBSOCKETS_INCLUDE_DIR AND USOCKETS_INCLUDE_DIR)
+    message(STATUS "Found uWebSockets at: ${UWEBSOCKETS_INCLUDE_DIR}")
+    message(STATUS "Found uSockets at: ${USOCKETS_INCLUDE_DIR}")
+    if (USOCKETS_LIB)
+        message(STATUS "Found uSockets library: ${USOCKETS_LIB}")
     endif ()
+else ()
+    message(FATAL_ERROR "uWebSockets not found. Please run install_uwebsockets.bat")
 endif ()
-
-if (NOT WEBSOCKETPP_INCLUDE_DIR)
-    message(FATAL_ERROR "WebSocketPP not found. Please run fix_vcpkg.bat or manually install WebSocketPP")
-endif ()
-
-message(STATUS "Found WebSocketPP at: ${WEBSOCKETPP_INCLUDE_DIR}")
 
 # nlohmann/json
 find_package(nlohmann_json 3.2.0 QUIET)
@@ -242,7 +295,8 @@ target_include_directories(sha1_miner PRIVATE
         ${INCLUDE_DIR}
         ${MINER_DIR}
         ${GPU_INCLUDES}
-        ${WEBSOCKETPP_INCLUDE_DIR}
+        ${UWEBSOCKETS_INCLUDE_DIR}
+        ${USOCKETS_INCLUDE_DIR}
         ${Boost_INCLUDE_DIRS}
 )
 
@@ -273,6 +327,7 @@ if (GPU_BACKEND STREQUAL "HIP")
             ${KERNEL_OBJECT}
             ${GPU_LIBRARIES}
             ${Boost_LIBRARIES}
+            ${USOCKETS_LIB}
             OpenSSL::SSL
             OpenSSL::Crypto
             Threads::Threads
@@ -281,6 +336,7 @@ else ()
     target_link_libraries(sha1_miner PRIVATE
             ${GPU_LIBRARIES}
             ${Boost_LIBRARIES}
+            ${USOCKETS_LIB}
             OpenSSL::SSL
             OpenSSL::Crypto
             Threads::Threads
