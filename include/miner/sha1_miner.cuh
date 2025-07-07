@@ -17,8 +17,8 @@
 #define MAX_CANDIDATES_PER_BATCH 1024
 
 #ifdef USE_HIP
-    #define NONCES_PER_THREAD 4096  // Reasonable for AMD
-    #define DEFAULT_THREADS_PER_BLOCK 256
+    #define NONCES_PER_THREAD 64  // Reasonable for AMD
+    #define DEFAULT_THREADS_PER_BLOCK 64
 #else
 #define NONCES_PER_THREAD 4096
 #define DEFAULT_THREADS_PER_BLOCK 512
