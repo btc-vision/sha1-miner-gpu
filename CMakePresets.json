@@ -2,45 +2,262 @@
   "version": 3,
   "configurePresets": [
     {
+      "name": "windows-base",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CXX_STANDARD_REQUIRED": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_POLICY_DEFAULT_CMP0144": "NEW",
+        "CMAKE_POLICY_DEFAULT_CMP0167": "OLD"
+      }
+    },
+    {
+      "name": "windows-vcpkg-base",
+      "hidden": true,
+      "inherits": "windows-base",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "CMAKE_PREFIX_PATH": "${sourceDir}/vcpkg/installed/x64-windows",
+        "OPENSSL_ROOT_DIR": "${sourceDir}/vcpkg/installed/x64-windows",
+        "OPENSSL_USE_STATIC_LIBS": "OFF",
+        "Boost_ROOT": "${sourceDir}/vcpkg/installed/x64-windows",
+        "Boost_NO_SYSTEM_PATHS": "ON",
+        "Boost_USE_STATIC_LIBS": "ON",
+        "Boost_USE_MULTITHREADED": "ON",
+        "Boost_USE_STATIC_RUNTIME": "OFF"
+      },
+      "environment": {
+        "VCPKG_ROOT": "${sourceDir}/vcpkg"
+      }
+    },
+    {
       "name": "windows-ninja-release",
-      "displayName": "Release (CUDA 12.9 + Ninja)",
+      "displayName": "Windows Release (CUDA 12.9 + Ninja + Boost.Beast)",
+      "inherits": "windows-vcpkg-base",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_CUDA_ARCHITECTURES": "86;89;90;120",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
         "CMAKE_CUDA_STANDARD": "20",
-        "CMAKE_CXX_STANDARD": "20",
         "CMAKE_CUDA_COMPILER": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe"
       }
     },
     {
       "name": "windows-ninja-debug",
-      "displayName": "Debug (CUDA 12.9 + Ninja)",
+      "displayName": "Windows Debug (CUDA 12.9 + Ninja + Boost.Beast)",
+      "inherits": "windows-vcpkg-base",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CXX_FLAGS_DEBUG": "/Od /RTC1 /MDd",
-        "CMAKE_C_FLAGS_DEBUG": "/Od /RTC1 /MDd",
-        "CMAKE_CUDA_FLAGS_DEBUG": "--generate-line-info",
+        "CMAKE_CUDA_ARCHITECTURES": "86",
+        "CMAKE_CUDA_STANDARD": "20",
+        "CMAKE_CUDA_COMPILER": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe"
+      }
+    },
+    {
+      "name": "windows-vs2022-release",
+      "displayName": "Windows Release (VS 2022 + Boost.Beast)",
+      "inherits": "windows-vcpkg-base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": {
+        "value": "x64",
+        "strategy": "set"
+      },
+      "binaryDir": "${sourceDir}/build/vs2022-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
+        "CMAKE_CUDA_STANDARD": "20"
+      }
+    },
+    {
+      "name": "windows-vs2022-debug",
+      "displayName": "Windows Debug (VS 2022 + Boost.Beast)",
+      "inherits": "windows-vcpkg-base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": {
+        "value": "x64",
+        "strategy": "set"
+      },
+      "binaryDir": "${sourceDir}/build/vs2022-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CUDA_ARCHITECTURES": "86",
+        "CMAKE_CUDA_STANDARD": "20"
+      }
+    },
+    {
+      "name": "linux-gcc-release",
+      "displayName": "Linux Release (GCC + CUDA + Boost.Beast)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
+        "CMAKE_CUDA_STANDARD": "20",
+        "CMAKE_CXX_STANDARD": "20"
+      }
+    },
+    {
+      "name": "linux-gcc-debug",
+      "displayName": "Linux Debug (GCC + CUDA + Boost.Beast)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "CMAKE_CUDA_ARCHITECTURES": "86",
+        "CMAKE_CUDA_STANDARD": "20",
+        "CMAKE_CXX_STANDARD": "20"
+      }
+    },
+    {
+      "name": "linux-clang-release",
+      "displayName": "Linux Release (Clang + CUDA + Boost.Beast)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/clang-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
         "CMAKE_CUDA_STANDARD": "20",
         "CMAKE_CXX_STANDARD": "20",
-        "CMAKE_CUDA_ARCHITECTURES": "86;89;90;120",
-        "CMAKE_CUDA_COMPILER": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe"
+        "CMAKE_CUDA_HOST_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "linux-hip-release",
+      "displayName": "Linux Release (HIP/ROCm + Boost.Beast)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/hip-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CXX_STANDARD": "20",
+        "USE_HIP": "ON",
+        "ROCM_PATH": "/opt/rocm",
+        "HIP_ARCH": "gfx900,gfx906,gfx908,gfx90a,gfx940,gfx1030,gfx1031,gfx1032,gfx1100,gfx1101,gfx1102,gfx1200,gfx1201"
+      },
+      "environment": {
+        "ROCM_PATH": "/opt/rocm",
+        "HIP_PATH": "/opt/rocm/hip"
+      }
+    },
+    {
+      "name": "linux-hip-debug",
+      "displayName": "Linux Debug (HIP/ROCm + Boost.Beast)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/hip-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CXX_STANDARD": "20",
+        "USE_HIP": "ON",
+        "ROCM_PATH": "/opt/rocm",
+        "HIP_ARCH": "gfx1030,gfx1100"
+      },
+      "environment": {
+        "ROCM_PATH": "/opt/rocm",
+        "HIP_PATH": "/opt/rocm/hip"
       }
     }
   ],
   "buildPresets": [
     {
-      "name": "release",
+      "name": "windows-release",
+      "displayName": "Windows Release Build",
       "configurePreset": "windows-ninja-release",
+      "jobs": 12,
+      "targets": [
+        "sha1_miner"
+      ]
+    },
+    {
+      "name": "windows-debug",
+      "displayName": "Windows Debug Build",
+      "configurePreset": "windows-ninja-debug",
+      "jobs": 12,
+      "targets": [
+        "sha1_miner"
+      ]
+    },
+    {
+      "name": "windows-release-vs",
+      "displayName": "Windows Release Build (Visual Studio)",
+      "configurePreset": "windows-vs2022-release",
+      "configuration": "Release",
       "jobs": 12
     },
     {
-      "name": "debug",
-      "configurePreset": "windows-ninja-debug",
+      "name": "windows-debug-vs",
+      "displayName": "Windows Debug Build (Visual Studio)",
+      "configurePreset": "windows-vs2022-debug",
+      "configuration": "Debug",
       "jobs": 12
+    },
+    {
+      "name": "linux-release",
+      "displayName": "Linux Release Build",
+      "configurePreset": "linux-gcc-release",
+      "jobs": 12,
+      "targets": [
+        "sha1_miner"
+      ]
+    },
+    {
+      "name": "linux-debug",
+      "displayName": "Linux Debug Build",
+      "configurePreset": "linux-gcc-debug",
+      "jobs": 12,
+      "targets": [
+        "sha1_miner"
+      ]
+    },
+    {
+      "name": "linux-hip-release",
+      "displayName": "Linux HIP/AMD Release Build",
+      "configurePreset": "linux-hip-release",
+      "jobs": 12,
+      "targets": [
+        "sha1_miner"
+      ]
+    },
+    {
+      "name": "linux-hip-debug",
+      "displayName": "Linux HIP/AMD Debug Build",
+      "configurePreset": "linux-hip-debug",
+      "jobs": 12,
+      "targets": [
+        "sha1_miner"
+      ]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "test-windows-release",
+      "displayName": "Test Windows Release",
+      "configurePreset": "windows-ninja-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-linux-release",
+      "displayName": "Test Linux Release",
+      "configurePreset": "linux-gcc-release",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

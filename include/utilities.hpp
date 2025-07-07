@@ -1,4 +1,3 @@
-// utilities.hpp - Utility functions and global declarations
 #ifndef UTILITIES_HPP
 #define UTILITIES_HPP
 

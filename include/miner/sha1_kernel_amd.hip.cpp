@@ -1,7 +1,5 @@
-// sha1_kernel_amd.hip.cpp - AMD HIP optimized SHA-1 near-collision mining kernel
 #include "sha1_miner.cuh"
 #include "gpu_platform.hpp"
-#include "utilities.hpp"
 
 // SHA-1 constants in constant memory
 __constant__ uint32_t K[4] = {
@@ -12,22 +10,27 @@ __constant__ uint32_t H0[5] = {
     0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0
 };
 
+// AMD-specific optimizations
+#define AMD_WAVEFRONT_SIZE 64  // For RDNA, runtime detection is better
+#define LDS_BANK_CONFLICT_FREE_SIZE 33  // Avoid bank conflicts
+
 /**
- * Count leading zero bits between hash and target (XOR distance)
- * Optimized for AMD GCN/RDNA architectures
+ * Count leading zero bits using AMD-specific intrinsics
  */
 __device__ __forceinline__ uint32_t count_leading_zeros_160bit_amd(
     const uint32_t hash[5],
     const uint32_t target[5]
 ) {
     uint32_t total_bits = 0;
+    // Use vector operations where possible
 #pragma unroll
     for (int i = 0; i < 5; i++) {
         uint32_t xor_val = hash[i] ^ target[i];
         if (xor_val == 0) {
             total_bits += 32;
         } else {
-            total_bits += __clz(xor_val);
+            // AMD has native clz instruction
+            total_bits += __builtin_clz(xor_val);
             break;
         }
     }
@@ -35,15 +38,61 @@ __device__ __forceinline__ uint32_t count_leading_zeros_160bit_amd(
 }
 
 /**
+ * SHA-1 F-functions optimized for AMD
+ * Use standard operations that compiler can optimize
+ */
+__device__ __forceinline__ uint32_t amd_f1(uint32_t b, uint32_t c, uint32_t d) {
+    // (b & c) | (~b & d)
+    // This pattern is recognized by the compiler and optimized to V_BFI_B32 on GCN
+    return (b & c) | (~b & d);
+}
+
+__device__ __forceinline__ uint32_t amd_f2(uint32_t b, uint32_t c, uint32_t d) {
+    return b ^ c ^ d;
+}
+
+__device__ __forceinline__ uint32_t amd_f3(uint32_t b, uint32_t c, uint32_t d) {
+    // (b & c) | (b & d) | (c & d) -> majority function
+    // Can be optimized to: (b & c) | (d & (b ^ c))
+    return (b & c) | (d & (b ^ c));
+}
+
+/**
  * AMD-optimized rotation using native rotate instruction
  */
 __device__ __forceinline__ uint32_t amd_rotl32(uint32_t x, uint32_t n) {
-    return __builtin_rotateleft32(x, n);
+    return (x << n) | (x >> (32 - n));
+}
+
+/**
+ * Optimized SHA-1 round function for AMD
+ * Reduces register pressure and improves ILP
+ */
+__device__ __forceinline__ void sha1_round_amd(
+    uint32_t &a, uint32_t &b, uint32_t &c, uint32_t &d, uint32_t &e,
+    uint32_t f, uint32_t k, uint32_t w
+) {
+    uint32_t temp = amd_rotl32(a, 5) + f + e + k + w;
+    e = d;
+    d = c;
+    c = amd_rotl32(b, 30);
+    b = a;
+    a = temp;
+}
+
+/**
+ * Message expansion optimized for AMD
+ * Uses vector operations where possible
+ */
+__device__ __forceinline__ void expand_message_amd(uint32_t W[16], int t) {
+    uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
+                    W[(t - 14) & 15] ^ W[(t - 16) & 15];
+    W[t & 15] = amd_rotl32(temp, 1);
 }
 
 /**
  * Main SHA-1 mining kernel for AMD GPUs
- * Optimized for GCN/RDNA with wavefront-aware operations
+ * Corrected to match NVIDIA kernel hash generation
  */
 __global__ void sha1_mining_kernel_amd(
     const uint8_t * __restrict__ base_message,
@@ -56,74 +105,65 @@ __global__ void sha1_mining_kernel_amd(
     uint32_t nonces_per_thread,
     uint64_t * __restrict__ actual_nonces_processed
 ) {
-    // Thread indices - AMD RDNA uses 32-thread wavefronts, GCN uses 64
+    // Thread indices
     const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const uint32_t warp_size = __builtin_amdgcn_wavefrontsize();
-    const uint32_t lane_id = threadIdx.x & (warp_size - 1);
+    const uint32_t lane_id = threadIdx.x & 63; // Assume 64-thread wavefront
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
 
-    // Track how many nonces this thread actually processes
-    uint32_t nonces_processed = 0;
-
-    // LDS (Local Data Share) for cooperative loading
-    __shared__ uint8_t lds_base_message[32];
-    __shared__ uint32_t lds_target_hash[5];
-
-    // Cooperative load of message and target using first wavefront
-    if (threadIdx.x < 32) {
-        lds_base_message[threadIdx.x] = base_message[threadIdx.x];
-    }
-    if (threadIdx.x < 5) {
-        lds_target_hash[threadIdx.x] = target_hash[threadIdx.x];
-    }
-    __syncthreads();
-
-    // Load into registers
+    // Load the base message as bytes (matching NVIDIA)
     uint8_t base_msg[32];
-    uint32_t target[5];
 #pragma unroll
     for (int i = 0; i < 32; i++) {
-        base_msg[i] = lds_base_message[i];
-    }
-#pragma unroll
-    for (int i = 0; i < 5; i++) {
-        target[i] = lds_target_hash[i];
+        base_msg[i] = base_message[i];
     }
 
-    // Process nonces - AMD prefers less aggressive unrolling
-#pragma unroll 4
+    // Load target (already in correct format)
+    uint32_t target[5];
+#pragma unroll
+    for (int i = 0; i < 5; i++) {
+        target[i] = target_hash[i];
+    }
+
+    // Track processed nonces
+    uint32_t nonces_processed = 0;
+
+    // Main mining loop
     for (uint32_t i = 0; i < nonces_per_thread; i++) {
         uint64_t nonce = thread_nonce_base + i;
         if (nonce == 0) continue;
 
-        // Count this nonce as processed
         nonces_processed++;
 
-        // Create message copy
+        // Create a copy of the message
         uint8_t msg_bytes[32];
 #pragma unroll
         for (int j = 0; j < 32; j++) {
             msg_bytes[j] = base_msg[j];
         }
 
-        // Apply nonce to last 8 bytes (big-endian)
-        uint64_t nonce_be = __builtin_bswap64(nonce);
-        *((uint64_t *) &msg_bytes[24]) ^= nonce_be;
+        // Apply nonce to last 8 bytes by XORing (big-endian) - MATCHING NVIDIA
+#pragma unroll
+        for (int j = 0; j < 8; j++) {
+            msg_bytes[24 + j] ^= (nonce >> (56 - j * 8)) & 0xFF;
+        }
 
-        // Convert message bytes to big-endian words
+        // Convert message bytes to big-endian words for SHA-1 - MATCHING NVIDIA
         uint32_t W[16];
 #pragma unroll
         for (int j = 0; j < 8; j++) {
-            W[j] = __builtin_bswap32(*((uint32_t *) &msg_bytes[j * 4]));
+            W[j] = (static_cast<uint32_t>(msg_bytes[j * 4]) << 24) |
+                   (static_cast<uint32_t>(msg_bytes[j * 4 + 1]) << 16) |
+                   (static_cast<uint32_t>(msg_bytes[j * 4 + 2]) << 8) |
+                   static_cast<uint32_t>(msg_bytes[j * 4 + 3]);
         }
 
         // Apply SHA-1 padding
-        W[8] = 0x80000000;
+        W[8] = 0x80000000; // Padding bit
 #pragma unroll
         for (int j = 9; j < 15; j++) {
             W[j] = 0;
         }
-        W[15] = 0x00000100;
+        W[15] = 0x00000100; // Message length: 256 bits in big-endian
 
         // Initialize hash values
         uint32_t a = H0[0];
@@ -133,10 +173,11 @@ __global__ void sha1_mining_kernel_amd(
         uint32_t e = H0[4];
 
         // SHA-1 rounds 0-19
-#pragma unroll 2
+#pragma unroll
         for (int t = 0; t < 20; t++) {
             if (t >= 16) {
-                uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15];
+                uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
+                                W[(t - 14) & 15] ^ W[(t - 16) & 15];
                 W[t & 15] = amd_rotl32(temp, 1);
             }
             uint32_t f = (b & c) | (~b & d);
@@ -149,9 +190,10 @@ __global__ void sha1_mining_kernel_amd(
         }
 
         // Rounds 20-39
-#pragma unroll 2
+#pragma unroll
         for (int t = 20; t < 40; t++) {
-            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15];
+            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
+                            W[(t - 14) & 15] ^ W[(t - 16) & 15];
             W[t & 15] = amd_rotl32(temp, 1);
             uint32_t f = b ^ c ^ d;
             uint32_t temp2 = amd_rotl32(a, 5) + f + e + K[1] + W[t & 15];
@@ -163,9 +205,10 @@ __global__ void sha1_mining_kernel_amd(
         }
 
         // Rounds 40-59
-#pragma unroll 2
+#pragma unroll
         for (int t = 40; t < 60; t++) {
-            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15];
+            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
+                            W[(t - 14) & 15] ^ W[(t - 16) & 15];
             W[t & 15] = amd_rotl32(temp, 1);
             uint32_t f = (b & c) | (b & d) | (c & d);
             uint32_t temp2 = amd_rotl32(a, 5) + f + e + K[2] + W[t & 15];
@@ -177,9 +220,10 @@ __global__ void sha1_mining_kernel_amd(
         }
 
         // Rounds 60-79
-#pragma unroll 2
+#pragma unroll
         for (int t = 60; t < 80; t++) {
-            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15];
+            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
+                            W[(t - 14) & 15] ^ W[(t - 16) & 15];
             W[t & 15] = amd_rotl32(temp, 1);
             uint32_t f = b ^ c ^ d;
             uint32_t temp2 = amd_rotl32(a, 5) + f + e + K[3] + W[t & 15];
@@ -201,47 +245,94 @@ __global__ void sha1_mining_kernel_amd(
         // Count matching bits
         uint32_t matching_bits = count_leading_zeros_160bit_amd(hash, target);
 
+#ifdef DEBUG_SHA1
+        if (blockIdx.x == 0 && threadIdx.x == 0 && i == 0) {
+            printf("[DEBUG] Thread 0: nonce=%llu, matching_bits=%u, difficulty=%u\n",
+                   nonce, matching_bits, difficulty);
+        }
+#endif
+
         // Check if we found a match
         if (matching_bits >= difficulty) {
-            // AMD wavefront vote operations - handle both 32 and 64 thread wavefronts
+            // Use AMD's wavefront vote operations
             uint64_t mask = __ballot(matching_bits >= difficulty);
 
-            // Only first active lane in wavefront performs atomic
-            if (lane_id == __ffsll(static_cast<long long>(mask)) - 1) {
-                uint32_t idx = atomicAdd(result_count, __popcll(mask));
+            if (mask != 0) {
+                // Count set bits in mask up to our lane
+                uint32_t lane_mask = (1ULL << lane_id) - 1;
+                uint32_t prefix_sum = __builtin_popcountll(mask & lane_mask);
 
-                // Store results for all matching threads in wavefront
-                for (int bit = __ffsll(static_cast<long long>(mask)) - 1; bit >= 0;
-                     bit = __ffsll(static_cast<long long>(mask & ~((1ULL << (bit + 1)) - 1))) - 1) {
+                // First lane does the atomic add
+                uint32_t base_idx;
+                if (lane_id == __builtin_ffsll(mask) - 1) {
+                    base_idx = atomicAdd(result_count, __builtin_popcountll(mask));
+                }
+
+                // Broadcast base index to all lanes
+                base_idx = __shfl(base_idx, __builtin_ffsll(mask) - 1, 64);
+
+                // Each matching lane writes its result
+                if ((mask >> lane_id) & 1) {
+                    uint32_t idx = base_idx + prefix_sum;
                     if (idx < result_capacity) {
-                        uint32_t source_lane = bit;
-
-                        // Use AMD's permute lane operations
-                        uint64_t result_nonce = __shfl(nonce, source_lane, warp_size);
-                        uint32_t result_bits = __shfl(matching_bits, source_lane, warp_size);
-
-                        results[idx].nonce = result_nonce;
-                        results[idx].matching_bits = result_bits;
-                        results[idx].difficulty_score = result_bits;
-
+                        results[idx].nonce = nonce;
+                        results[idx].matching_bits = matching_bits;
+                        results[idx].difficulty_score = matching_bits;
 #pragma unroll
                         for (int j = 0; j < 5; j++) {
-                            results[idx].hash[j] = __shfl(hash[j], source_lane, warp_size);
+                            results[idx].hash[j] = hash[j];
                         }
-                        idx++;
+
+#ifdef DEBUG_SHA1
+                        if (idx == 0) {
+                            printf("[DEBUG] Found collision! nonce=%llu, bits=%u\n",
+                                   nonce, matching_bits);
+                        }
+#endif
                     }
                 }
             }
         }
     }
 
-    // At end of kernel, atomically add the actual count of nonces processed
-    atomicAdd((unsigned long long *) actual_nonces_processed, (unsigned long long) nonces_processed);
+    // Update processed nonce count
+    if (threadIdx.x == 0) {
+        atomicAdd((unsigned long long *) actual_nonces_processed,
+                  (unsigned long long) (blockDim.x * nonces_processed));
+    }
 }
 
 /**
- * Launch the AMD HIP SHA-1 mining kernel
- * Use extern "C" to ensure C linkage for cross-compilation unit calls
+ * AMD-specific kernel configuration
+ */
+struct AMDKernelConfig {
+    int compute_units;
+    int waves_per_cu;
+    int threads_per_block;
+    int blocks;
+
+    static AMDKernelConfig get_optimal_config(hipDeviceProp_t &props) {
+        AMDKernelConfig config;
+
+        // Get compute unit count
+        config.compute_units = props.multiProcessorCount;
+
+        // Optimal threads per block for AMD (multiple of wavefront size)
+        config.threads_per_block = 256; // 4 wavefronts
+
+        // Target 4-8 waves per CU for good occupancy
+        config.waves_per_cu = 6;
+
+        // Calculate blocks
+        int total_waves = config.compute_units * config.waves_per_cu;
+        config.blocks = (total_waves * 64) / config.threads_per_block;
+
+        return config;
+    }
+};
+
+/**
+ * Launch the optimized AMD HIP SHA-1 mining kernel
  */
 extern "C" void launch_mining_kernel_amd(
     const DeviceMiningJob &device_job,
@@ -250,61 +341,70 @@ extern "C" void launch_mining_kernel_amd(
     const ResultPool &pool,
     const KernelConfig &config
 ) {
-    // Validate configuration
-    if (config.blocks <= 0 || config.threads_per_block <= 0) {
-        fprintf(stderr, "Invalid kernel configuration: blocks=%d, threads=%d\n",
-                config.blocks, config.threads_per_block);
-        return;
+    // Get device properties once and cache
+    static thread_local hipDeviceProp_t props_cached;
+    static thread_local bool props_initialized = false;
+    static thread_local int last_device_id = -1;
+
+    int current_device;
+    hipGetDevice(&current_device);
+
+    if (!props_initialized || current_device != last_device_id) {
+        hipError_t err = hipGetDeviceProperties(&props_cached, current_device);
+        if (err != hipSuccess) {
+            fprintf(stderr, "Failed to get device properties: %s\n", hipGetErrorString(err));
+            return;
+        }
+        props_initialized = true;
+        last_device_id = current_device;
     }
 
-    // AMD GPUs prefer fewer nonces per thread due to different memory hierarchy
-    uint32_t nonces_per_thread = NONCES_PER_THREAD;
+    // Use cached properties
+    hipDeviceProp_t &props = props_cached;
 
-    // Reset result count
+    // Optimize configuration for AMD
+    int blocks = config.blocks;
+    int threads = config.threads_per_block;
+
+    // AMD-specific optimizations
+    if (blocks <= 0) {
+        // Calculate optimal blocks based on architecture
+        int compute_units = props.multiProcessorCount;
+        int waves_per_cu = 4; // Reduced for better scheduling
+        int total_waves = compute_units * waves_per_cu;
+        blocks = (total_waves * props.warpSize) / threads;
+    }
+
+    // Increase nonces per thread for AMD to reduce kernel launch overhead
+    uint32_t nonces_per_thread = 128; // Increased from 32
+
+    // Reset result count asynchronously
     hipError_t err = hipMemsetAsync(pool.count, 0, sizeof(uint32_t), config.stream);
     if (err != hipSuccess) {
         fprintf(stderr, "Failed to reset result count: %s\n", hipGetErrorString(err));
         return;
     }
 
-    // Clear previous errors
-    (void) hipGetLastError();
-
     // Launch configuration
-    dim3 gridDim(config.blocks, 1, 1);
-    dim3 blockDim(config.threads_per_block, 1, 1);
+    dim3 gridDim(blocks);
+    dim3 blockDim(threads);
+    size_t lds_size = 0;
 
-#ifdef DEBUG_SHA1
-    printf("[DEBUG] Launching AMD kernel: blocks=%d, threads=%d\n",
-           config.blocks, config.threads_per_block);
-    printf("[DEBUG] Mining parameters: difficulty=%u, nonce_offset=%llu, nonces_per_thread=%u\n",
-           difficulty, nonce_offset, nonces_per_thread);
-#endif
-
-    // Launch kernel using HIP
-    hipLaunchKernelGGL(sha1_mining_kernel_amd, gridDim, blockDim, 0, config.stream,
-                       device_job.base_message,
-                       device_job.target_hash,
-                       difficulty,
-                       pool.results,
-                       pool.count,
-                       pool.capacity,
-                       nonce_offset,
-                       nonces_per_thread,
-                       pool.nonces_processed
+    // Launch kernel with larger work per thread
+    hipLaunchKernelGGL(
+        sha1_mining_kernel_amd,
+        gridDim,
+        blockDim,
+        lds_size,
+        config.stream,
+        device_job.base_message,
+        device_job.target_hash,
+        difficulty,
+        pool.results,
+        pool.count,
+        pool.capacity,
+        nonce_offset,
+        nonces_per_thread,
+        pool.nonces_processed
     );
-
-    // Check for launch errors
-    err = hipGetLastError();
-    if (err != hipSuccess) {
-        fprintf(stderr, "AMD kernel launch failed: %s\n", hipGetErrorString(err));
-    }
-
-#ifdef DEBUG_SHA1
-    // Synchronize and check results in debug mode
-    hipStreamSynchronize(config.stream);
-    uint32_t result_count_host;
-    hipMemcpy(&result_count_host, pool.count, sizeof(uint32_t), hipMemcpyDeviceToHost);
-    printf("[DEBUG] AMD kernel completed. Results found: %u\n", result_count_host);
-#endif
 }

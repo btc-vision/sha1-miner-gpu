@@ -4,7 +4,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <cstring>
-
+#include "gpu_architecture.hpp"
 #include "utilities.hpp"
 
 // Global system instance
@@ -104,42 +104,66 @@ void MiningSystem::autoTuneParameters() {
             break;
     }
 
-    // Calculate optimal blocks based on architecture and vendor
+    // Special handling for RDNA4 (gfx1200)
+    if (device_props_.major == 12) {
+        std::cout << "Detected RDNA4 GPU - applying conservative settings\n";
+        config_.blocks_per_stream = 64;
+        config_.threads_per_block = 64;
+        config_.num_streams = 1;
+        config_.result_buffer_size = 32;
+        return;
+    }
+
     int blocks_per_sm;
     int optimal_threads;
 
     if (gpu_vendor_ == GPUVendor::AMD) {
-        // AMD-specific tuning
-        optimal_threads = 256; // AMD typically prefers 256
-        // For RDNA (RX 5700 XT), multiProcessorCount may report half the actual CUs
-        int actual_cus = device_props_.multiProcessorCount;
-        // Check if this is RDNA by wavefront size
-        if (device_props_.warpSize == 32) {
-            // RDNA has 32-thread wavefronts instead of 64
-            // ROCm might report WGPs (Workgroup Processors) instead of CUs
-            // Each WGP has 2 CUs in RDNA
-            actual_cus *= 2;
-            std::cout << "Detected RDNA architecture, adjusting CU count to: " << actual_cus << "\n";
-        }
-        // AMD GPU architectures
-        if (device_props_.major >= 10) {
-            // RDNA/RDNA2/RDNA3 (gfx10xx/gfx11xx)
-            blocks_per_sm = 32; // Much higher for RDNA
-            config_.num_streams = 8;
-        } else if (device_props_.major == 9) {
-            // GCN5/Vega (gfx900/gfx906)
-            blocks_per_sm = 16;
-            config_.num_streams = 4;
-        } else {
-            // Older GCN
-            blocks_per_sm = 8;
-            config_.num_streams = 2;
+#ifdef USE_HIP
+        // Use enhanced AMD detection
+        AMDArchitecture arch = AMDGPUDetector::detectArchitecture(device_props_);
+        AMDArchParams arch_params = AMDGPUDetector::getArchitectureParams(arch);
+
+        // Print detailed architecture info
+        printAMDArchitectureInfo(device_props_);
+
+        // Check for known issues
+        if (AMDGPUDetector::hasKnownIssues(arch, device_props_.name)) {
+            std::cout << "\nWARNING: This GPU may have compatibility issues.\n";
+            std::cout << "Consider updating ROCm/drivers or using reduced settings.\n\n";
         }
 
-        // Use actual CU count for calculations
-        config_.blocks_per_stream = actual_cus * blocks_per_sm;
+        // Use architecture-specific configuration
+        AMDGPUDetector::configureForArchitecture(config_, device_props_, arch);
+
+        // Override threads per block based on architecture
+        if (arch == AMDArchitecture::RDNA3 || arch == AMDArchitecture::RDNA2) {
+            // RDNA prefers 128 or 256 threads
+            config_.threads_per_block = 256;
+        } else if (arch == AMDArchitecture::GCN5 || arch == AMDArchitecture::GCN4) {
+            // GCN works well with 256
+            config_.threads_per_block = 256;
+        }
+
+        // Special handling for specific GPUs
+        std::string gpu_name = device_props_.name;
+        if (gpu_name.find("7900") != std::string::npos) {
+            // RX 7900 XTX/XT specific tuning
+            std::cout << "Applying RX 7900 series optimizations\n";
+            config_.threads_per_block = 256;
+            if (config_.blocks_per_stream > 1536) {
+                config_.blocks_per_stream = 1536;
+            }
+        }
+#else
+        // Fallback for non-HIP builds
+        optimal_threads = 256;
+        blocks_per_sm = 8;
+        config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
+        config_.threads_per_block = optimal_threads;
+        config_.num_streams = 4;
+#endif
     } else if (gpu_vendor_ == GPUVendor::NVIDIA) {
-        // NVIDIA-specific tuning
+        // NVIDIA-specific tuning (existing code)
         if (device_props_.major >= 8) {
             // Ampere and newer (RTX 30xx, 40xx, A100, etc.)
             blocks_per_sm = 16;
@@ -168,40 +192,30 @@ void MiningSystem::autoTuneParameters() {
             optimal_threads = 128;
             config_.num_streams = 2;
         }
+
+        // Set configuration for NVIDIA
+        config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
+        config_.threads_per_block = optimal_threads;
     } else {
         // Unknown vendor - use conservative defaults
         blocks_per_sm = 4;
         optimal_threads = 256;
         config_.num_streams = 4;
+        config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
+        config_.threads_per_block = optimal_threads;
     }
 
-    // Adjust based on register and shared memory limits
-    int max_threads_per_sm = device_props_.maxThreadsPerMultiProcessor;
-    int max_blocks_per_sm = max_threads_per_sm / optimal_threads;
-    if (blocks_per_sm > max_blocks_per_sm) {
-        blocks_per_sm = max_blocks_per_sm;
-    }
+    // Common adjustments for all vendors
 
-    // Set configuration
-    config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
-    config_.threads_per_block = optimal_threads;
+    // Ensure we don't exceed device limits
+    if (config_.threads_per_block > device_props_.maxThreadsPerBlock) {
+        config_.threads_per_block = device_props_.maxThreadsPerBlock;
+    }
 
     // For very large GPUs, limit total blocks to avoid scheduling overhead
-    int max_total_blocks = (gpu_vendor_ == GPUVendor::AMD) ? 2048 : 2048; // Same for both now
+    int max_total_blocks = (gpu_vendor_ == GPUVendor::AMD) ? 2048 : 2048;
     if (config_.blocks_per_stream > max_total_blocks) {
         config_.blocks_per_stream = max_total_blocks;
-    }
-
-    // Adjust number of streams based on SM/CU count for both vendors
-    if (device_props_.multiProcessorCount >= 80) {
-        // High-end GPUs (RTX 4090, RX 7900 XTX, etc.)
-        config_.num_streams = 16;
-    } else if (device_props_.multiProcessorCount >= 40) {
-        // Mid-high GPUs (RTX 3070, RX 6800, etc.)
-        config_.num_streams = 8;
-    } else if (device_props_.multiProcessorCount >= 20) {
-        // Mid-range GPUs
-        config_.num_streams = 4;
     }
 
     // Adjust streams based on available memory
@@ -209,7 +223,7 @@ void MiningSystem::autoTuneParameters() {
     gpuMemGetInfo(&free_mem, &total_mem);
     size_t mem_per_stream = sizeof(MiningResult) * config_.result_buffer_size +
                             (config_.blocks_per_stream * config_.threads_per_block * sizeof(uint32_t) * 5);
-    int max_streams_by_memory = free_mem / (mem_per_stream * 2); // Use at most 50% of free memory
+    int max_streams_by_memory = free_mem / (mem_per_stream * 2);
     if (config_.num_streams > max_streams_by_memory && max_streams_by_memory > 0) {
         config_.num_streams = max_streams_by_memory;
     }
@@ -222,45 +236,13 @@ void MiningSystem::autoTuneParameters() {
     // Result buffer size
     config_.result_buffer_size = 128;
 
-    // Special optimizations for specific GPUs
-    std::string gpu_name = device_props_.name;
-
-    // NVIDIA specific models
-    if (gpu_name.find("4090") != std::string::npos || gpu_name.find("4080") != std::string::npos) {
-        // RTX 4090/4080 specific
-        config_.threads_per_block = 512; // These GPUs love high thread counts
-        blocks_per_sm = 16;
-        config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
-    } else if (gpu_name.find("A100") != std::string::npos || gpu_name.find("H100") != std::string::npos) {
-        // Data center GPUs
-        config_.threads_per_block = 512;
-        blocks_per_sm = 32; // These can handle extreme occupancy
-        config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
-        config_.num_streams = 32;
-    }
-    // AMD specific models
-    else if (gpu_name.find("7900") != std::string::npos) {
-        // RX 7900 XTX/XT (RDNA3)
-        config_.threads_per_block = 256;
-        blocks_per_sm = 16;
-        config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
-        config_.num_streams = 16;
-    } else if (gpu_name.find("6900") != std::string::npos || gpu_name.find("6800") != std::string::npos) {
-        // RX 6900/6800 (RDNA2)
-        config_.threads_per_block = 256;
-        blocks_per_sm = 12;
-        config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
-    }
-
-    // Ensure we don't exceed device limits
-    if (config_.threads_per_block > device_props_.maxThreadsPerBlock) {
-        config_.threads_per_block = device_props_.maxThreadsPerBlock;
-    }
-
+    // Print final configuration
     std::cout << "Auto-tuned configuration for " << device_props_.name << ":\n";
     std::cout << "  Compute Capability: " << device_props_.major << "." << device_props_.minor << "\n";
     std::cout << "  SMs/CUs: " << device_props_.multiProcessorCount << "\n";
-    std::cout << "  Blocks per SM/CU: " << blocks_per_sm << "\n";
+    if (gpu_vendor_ == GPUVendor::NVIDIA) {
+        std::cout << "  Blocks per SM: " << (config_.blocks_per_stream / device_props_.multiProcessorCount) << "\n";
+    }
     std::cout << "  Blocks per stream: " << config_.blocks_per_stream << "\n";
     std::cout << "  Threads per block: " << config_.threads_per_block << "\n";
     std::cout << "  Number of streams: " << config_.num_streams << "\n";
@@ -336,8 +318,8 @@ bool MiningSystem::initialize() {
     return true;
 }
 
-void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds) {
-    std::cout << "Starting mining for " << duration_seconds << " seconds...\n";
+void MiningSystem::runMiningLoopInterruptible(const MiningJob &job, std::function<bool()> should_continue) {
+    std::cout << "Starting interruptible mining...\n";
     std::cout << "Target difficulty: " << job.difficulty << " bits\n";
     std::cout << "Target hash: ";
     for (int i = 0; i < 5; i++) {
@@ -345,7 +327,7 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
                 << job.target_hash[i] << " ";
     }
     std::cout << "\n" << std::dec;
-    std::cout << "Only new best matches will be reported.\n";
+    std::cout << "Mining will stop when connection is lost.\n";
     std::cout << "=====================================\n\n";
 
     // Copy job to device
@@ -353,32 +335,32 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
         device_jobs_[i].copyFromHost(job);
     }
 
-    // Reset shutdown flag and best tracker
+    // Reset flags and counters
+    stop_mining_ = false;
     g_shutdown = false;
     best_tracker_.reset();
-    // Reset actual hash counter
     total_hashes_ = 0;
+    clearResults();
 
-    // Start performance monitor
-    monitor_thread_ = std::make_unique<std::thread>(
-        &MiningSystem::performanceMonitor, this
-    );
-
-    auto end_time = std::chrono::steady_clock::now() +
-                    std::chrono::seconds(duration_seconds);
+    // Start performance monitor with connection check
+    monitor_thread_ = std::make_unique<std::thread>([this, should_continue]() {
+        if (!should_continue()) {
+            std::cout << "\n[STOPPED] Pool connection lost - mining halted.\n";
+        }
+    });
 
     // Initialize per-stream data
     struct StreamData {
         uint64_t nonce_offset;
         bool busy;
         std::chrono::high_resolution_clock::time_point launch_time;
-        uint64_t last_nonces_processed; // Add tracking per stream
+        uint64_t last_nonces_processed;
     };
     std::vector<StreamData> stream_data(config_.num_streams);
+
     // Initialize stream tracking
     for (int i = 0; i < config_.num_streams; i++) {
         stream_data[i].last_nonces_processed = 0;
-        // Reset the actual nonces counter for each stream
         gpuMemsetAsync(gpu_pools_[i].nonces_processed, 0, sizeof(uint64_t), streams_[i]);
     }
 
@@ -386,11 +368,11 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
     uint64_t nonce_stride = getHashesPerKernel();
     uint64_t global_nonce_offset = 1; // Start from 1
 
-    // Mining loop
+    // Mining loop - runs until shutdown OR connection lost
     int current_stream = 0;
     uint64_t kernels_launched = 0;
 
-    while (std::chrono::steady_clock::now() < end_time && !g_shutdown) {
+    while (!g_shutdown && !stop_mining_ && should_continue()) {
         // Find next available stream
         int attempts = 0;
         while (stream_data[current_stream].busy && attempts < config_.num_streams) {
@@ -401,10 +383,12 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
                 gpuMemcpyAsync(&actual_nonces, gpu_pools_[current_stream].nonces_processed, sizeof(uint64_t),
                                gpuMemcpyDeviceToHost, streams_[current_stream]);
                 gpuStreamSynchronize(streams_[current_stream]);
+
                 // Update total with actual work done
                 uint64_t nonces_this_kernel = actual_nonces - stream_data[current_stream].last_nonces_processed;
                 total_hashes_ += nonces_this_kernel;
                 stream_data[current_stream].last_nonces_processed = actual_nonces;
+
                 // Process results
                 processResultsOptimized(current_stream);
                 stream_data[current_stream].busy = false;
@@ -424,8 +408,14 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
             attempts++;
         }
 
+        // Check if we should stop before launching new work
+        if (!should_continue()) {
+            std::cout << "\n[MINING] Connection lost, stopping work generation...\n";
+            break;
+        }
+
         if (stream_data[current_stream].busy) {
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
             continue;
         }
 
@@ -451,7 +441,6 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
         stream_data[current_stream].busy = true;
         stream_data[current_stream].nonce_offset = global_nonce_offset;
 
-        // Don't update total_hashes_ here - wait for actual count
         kernels_launched++;
         global_nonce_offset += nonce_stride;
 
@@ -459,16 +448,18 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
         current_stream = (current_stream + 1) % config_.num_streams;
     }
 
-    // Wait for all streams to complete and get final counts
+    // Stop flag was set - wait for all streams to complete
+    std::cout << "\n[MINING] Waiting for active streams to complete...\n";
     for (int i = 0; i < config_.num_streams; i++) {
         gpuStreamSynchronize(streams_[i]);
-        // Get final actual nonces processed
+
+        // Get final nonce counts
         uint64_t actual_nonces = 0;
         gpuMemcpy(&actual_nonces, gpu_pools_[i].nonces_processed, sizeof(uint64_t), gpuMemcpyDeviceToHost);
-        // Update total with any remaining work
         uint64_t nonces_this_kernel = actual_nonces - stream_data[i].last_nonces_processed;
         total_hashes_ += nonces_this_kernel;
 
+        // Process any remaining results
         processResultsOptimized(i);
     }
 
@@ -478,9 +469,191 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
         monitor_thread_->join();
     }
 
-    std::cout << "\n\nMining completed. Kernels launched: " << kernels_launched << "\n";
+    std::cout << "\n\nMining stopped. Kernels launched: " << kernels_launched << "\n";
     std::cout << "Actual hashes computed: " << static_cast<double>(total_hashes_) / 1e9 << " GH\n";
     std::cout << "Final best match: " << best_tracker_.getBestBits() << " bits\n";
+
+    if (!should_continue()) {
+        std::cout << "Mining stopped due to lost pool connection.\n";
+    }
+}
+
+void MiningSystem::runMiningLoop(const MiningJob &job) {
+    std::cout << "Starting infinite mining...\n";
+    std::cout << "Target difficulty: " << job.difficulty << " bits\n";
+    std::cout << "Target hash: ";
+    for (int i = 0; i < 5; i++) {
+        std::cout << std::hex << std::setw(8) << std::setfill('0')
+                << job.target_hash[i] << " ";
+    }
+    std::cout << "\n" << std::dec;
+    std::cout << "Only new best matches will be reported.\n";
+    std::cout << "Press Ctrl+C to stop mining.\n";
+    std::cout << "=====================================\n\n";
+
+    // Copy job to device
+    for (int i = 0; i < config_.num_streams; i++) {
+        device_jobs_[i].copyFromHost(job);
+    }
+
+    // Reset shutdown flag and best tracker
+    g_shutdown = false;
+    best_tracker_.reset();
+    // Reset actual hash counter
+    total_hashes_ = 0;
+    // Clear accumulated results
+    clearResults();
+
+    // Start performance monitor
+    monitor_thread_ = std::make_unique<std::thread>(
+        &MiningSystem::performanceMonitor, this
+    );
+
+    // Initialize per-stream data
+    std::vector<StreamData> stream_data(config_.num_streams);
+
+    // Create events for each stream
+    kernel_complete_events_.resize(config_.num_streams);
+    kernel_launch_times_.resize(config_.num_streams);
+
+    for (int i = 0; i < config_.num_streams; i++) {
+        gpuEventCreateWithFlags(&kernel_complete_events_[i], gpuEventDisableTiming);
+        stream_data[i].last_nonces_processed = 0;
+        stream_data[i].busy = false;
+        gpuMemsetAsync(gpu_pools_[i].nonces_processed, 0, sizeof(uint64_t), streams_[i]);
+    }
+
+    // Nonce distribution
+    uint64_t nonce_stride = getHashesPerKernel();
+    uint64_t global_nonce_offset = 1; // Start from 1
+
+    // Mining loop - runs until g_shutdown is set
+    uint64_t kernels_launched = 0;
+
+    // Launch initial kernels on all streams to maximize GPU utilization
+    for (int i = 0; i < config_.num_streams; i++) {
+        launchKernelOnStream(i, global_nonce_offset, job);
+        stream_data[i].nonce_offset = global_nonce_offset;
+        stream_data[i].busy = true;
+        global_nonce_offset += nonce_stride;
+        kernels_launched++;
+    }
+
+    // Main mining loop
+    while (!g_shutdown) {
+        // Check for completed kernels using events
+        bool found_completed = false;
+        int completed_stream = -1;
+
+        // First, do a quick non-blocking check of all events
+        for (int i = 0; i < config_.num_streams; i++) {
+            if (!stream_data[i].busy) continue;
+
+            gpuError_t status = gpuEventQuery(kernel_complete_events_[i]);
+            if (status == gpuSuccess) {
+                completed_stream = i;
+                found_completed = true;
+                break;
+            } else if (status != gpuErrorNotReady) {
+                std::cerr << "Event query error: " << gpuGetErrorString(status) << "\n";
+            }
+        }
+
+        if (!found_completed) {
+            // No kernels completed yet, sleep briefly to avoid burning CPU
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            continue;
+        }
+
+        // Process the completed stream
+        processStreamResults(completed_stream, stream_data[completed_stream]);
+        stream_data[completed_stream].busy = false;
+
+        // Launch new work on this stream
+        if (!g_shutdown) {
+            launchKernelOnStream(completed_stream, global_nonce_offset, job);
+            stream_data[completed_stream].nonce_offset = global_nonce_offset;
+            stream_data[completed_stream].busy = true;
+            global_nonce_offset += nonce_stride;
+            kernels_launched++;
+        }
+    }
+
+    // Wait for all remaining kernels to complete
+    for (int i = 0; i < config_.num_streams; i++) {
+        if (stream_data[i].busy) {
+            gpuEventSynchronize(kernel_complete_events_[i]);
+            processStreamResults(i, stream_data[i]);
+        }
+    }
+
+    // Cleanup events
+    for (int i = 0; i < config_.num_streams; i++) {
+        gpuEventDestroy(kernel_complete_events_[i]);
+    }
+
+    // Stop monitor thread
+    g_shutdown = true;
+    if (monitor_thread_ && monitor_thread_->joinable()) {
+        monitor_thread_->join();
+    }
+
+    std::cout << "\n\nMining stopped. Kernels launched: " << kernels_launched << "\n";
+    std::cout << "Actual hashes computed: " << static_cast<double>(total_hashes_) / 1e9 << " GH\n";
+    std::cout << "Final best match: " << best_tracker_.getBestBits() << " bits\n";
+}
+
+void MiningSystem::launchKernelOnStream(int stream_idx, uint64_t nonce_offset, const MiningJob &job) {
+    // Configure kernel
+    KernelConfig config;
+    config.blocks = config_.blocks_per_stream;
+    config.threads_per_block = config_.threads_per_block;
+    config.stream = streams_[stream_idx];
+    config.shared_memory_size = 0;
+
+    // Record launch time for performance tracking
+    kernel_launch_times_[stream_idx] = std::chrono::high_resolution_clock::now();
+
+    // Launch the mining kernel
+    launch_mining_kernel(
+        device_jobs_[stream_idx],
+        job.difficulty,
+        nonce_offset,
+        gpu_pools_[stream_idx],
+        config
+    );
+
+    // Record event when kernel completes
+    gpuEventRecord(kernel_complete_events_[stream_idx], streams_[stream_idx]);
+}
+
+void MiningSystem::processStreamResults(int stream_idx, StreamData &stream_data) {
+    // Get actual nonces processed
+    uint64_t actual_nonces = 0;
+    gpuMemcpyAsync(&actual_nonces, gpu_pools_[stream_idx].nonces_processed,
+                   sizeof(uint64_t), gpuMemcpyDeviceToHost, streams_[stream_idx]);
+
+    // Ensure the copy is complete
+    gpuStreamSynchronize(streams_[stream_idx]);
+
+    // Update hash count
+    uint64_t nonces_this_kernel = actual_nonces - stream_data.last_nonces_processed;
+    total_hashes_ += nonces_this_kernel;
+    stream_data.last_nonces_processed = actual_nonces;
+
+    // Process mining results
+    processResultsOptimized(stream_idx);
+
+    // Update timing statistics
+    auto kernel_time = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::high_resolution_clock::now() - kernel_launch_times_[stream_idx]
+    ).count() / 1000.0;
+
+    {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        timing_stats_.kernel_execution_time_ms += kernel_time;
+        timing_stats_.kernel_count++;
+    }
 }
 
 void MiningSystem::processResultsOptimized(int stream_idx) {
@@ -512,11 +685,17 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
     std::lock_guard<std::mutex> lock(timing_mutex_);
     timing_stats_.result_copy_time_ms += copy_time;
 
-    // Process results - only report new bests
+    // Process results
+    std::vector<MiningResult> valid_results;
+
     for (uint32_t i = 0; i < count; i++) {
         if (results[i].nonce == 0) continue;
 
-        if (best_tracker_.isNewBest(results[i].matching_bits)) {
+        // Store all valid results
+        valid_results.push_back(results[i]);
+
+        // Track best result
+        /*if (best_tracker_.isNewBest(results[i].matching_bits)) {
             // Calculate elapsed time
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - start_time_
@@ -536,9 +715,25 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
             std::cout << "  Rate: " << std::fixed << std::setprecision(2)
                     << static_cast<double>(total_hashes_.load()) / elapsed.count() / 1e9
                     << " GH/s\n";
-        }
+        }*/
 
         total_candidates_++;
+    }
+
+    // Store results for batch processing
+    if (!valid_results.empty()) {
+        {
+            std::lock_guard<std::mutex> results_lock(all_results_mutex_);
+            all_results_.insert(all_results_.end(), valid_results.begin(), valid_results.end());
+        }
+
+        // Call the callback if set
+        {
+            std::lock_guard<std::mutex> callback_lock(callback_mutex_);
+            if (result_callback_) {
+                result_callback_(valid_results);
+            }
+        }
     }
 
     // Reset pool count
@@ -676,6 +871,8 @@ void MiningSystem::cleanup() {
             gpuFree(pool.results);
         if (pool.count)
             gpuFree(pool.count);
+        if (pool.nonces_processed)
+            gpuFree(pool.nonces_processed);
     }
 
     for (auto &job: device_jobs_) {
@@ -766,8 +963,6 @@ uint64_t MiningSystem::getHashesPerKernel() const {
     return static_cast<uint64_t>(config_.blocks_per_stream) *
            static_cast<uint64_t>(config_.threads_per_block) *
            static_cast<uint64_t>(NONCES_PER_THREAD);
-
-    return config_.blocks_per_stream * config_.threads_per_block * NONCES_PER_THREAD;
 }
 
 void MiningSystem::optimizeForGPU() {
@@ -823,11 +1018,11 @@ extern "C" MiningJob create_mining_job(
     return job;
 }
 
-extern "C" void run_mining_loop(MiningJob job, uint32_t duration_seconds) {
+extern "C" void run_mining_loop(MiningJob job) {
     if (!g_mining_system) {
         std::cerr << "Mining system not initialized\n";
         return;
     }
 
-    g_mining_system->runMiningLoop(job, duration_seconds);
+    g_mining_system->runMiningLoop(job);
 }

@@ -3,82 +3,104 @@
 
 #include <vector>
 #include <thread>
-#include <mutex>
 #include <atomic>
 #include <memory>
 #include <chrono>
+#include <mutex>
+#include <functional>
+#include "sha1_miner.cuh"
 #include "../src/mining_system.hpp"
 
+// Callback type for multi-GPU results
+using MiningResultCallback = std::function<void(const std::vector<MiningResult> &)>;
+
+// Global batch size for nonce distribution across GPUs
+constexpr uint64_t NONCE_BATCH_SIZE = 1ULL << 32; // 4B nonces per batch
+
+struct GPUWorker {
+    int device_id;
+    std::unique_ptr<MiningSystem> mining_system;
+    std::unique_ptr<std::thread> worker_thread;
+    std::atomic<uint64_t> hashes_computed{0};
+    std::atomic<uint64_t> candidates_found{0};
+    std::atomic<uint32_t> best_match_bits{0};
+};
+
 /**
- * Manages mining across multiple GPUs
- * Each GPU runs in its own thread with independent nonce ranges
+ * Multi-GPU mining manager that coordinates mining across multiple GPUs
+ * Each GPU runs independently with its own nonce range
  */
 class MultiGPUManager {
 public:
-    /**
-     * Worker structure for each GPU
-     */
-    struct GPUWorker {
-        int device_id;
-        std::unique_ptr<MiningSystem> mining_system;
-        std::unique_ptr<std::thread> worker_thread;
-        std::atomic<uint64_t> hashes_computed{0};
-        std::atomic<uint64_t> candidates_found{0};
-        std::atomic<uint32_t> best_match_bits{0};
-    };
-
     MultiGPUManager();
 
-    ~MultiGPUManager();
+    virtual ~MultiGPUManager();
 
     /**
-     * Initialize the manager with specified GPU IDs
+     * Initialize mining on specified GPUs
      * @param gpu_ids List of GPU device IDs to use
      * @return true if at least one GPU was initialized successfully
      */
     bool initialize(const std::vector<int> &gpu_ids);
 
     /**
-     * Run mining on all initialized GPUs
-     * @param job Mining job to execute
-     * @param duration_seconds How long to mine
+     * Set a callback to be called whenever any GPU finds results
+     * @param callback Function to call with new results
      */
-    void runMining(const MiningJob &job, uint32_t duration_seconds);
+    void setResultCallback(const MiningResultCallback &callback) {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        result_callback_ = callback;
+    }
 
     /**
-     * Print combined statistics from all GPUs
+     * Run mining on all initialized GPUs
+     * @param job Mining job configuration
+     */
+    void runMining(const MiningJob &job);
+
+    /**
+     * Get combined statistics from all GPUs
      */
     void printCombinedStats();
 
-    /**
-     * Get the number of active GPUs
-     */
-    size_t getNumGPUs() const { return workers_.size(); }
+    void stopMining() {
+        shutdown_ = true;
+
+        // Signal all workers to stop
+        for (auto &worker: workers_) {
+            if (worker->mining_system) {
+                worker->mining_system->stopMining();
+            }
+        }
+    }
+
+    // Add interruptible mining method
+    void runMiningInterruptible(const MiningJob &job, std::function<bool()> should_continue);
 
 private:
+    void workerThreadInterruptible(GPUWorker *worker, const MiningJob &job, std::function<bool()> should_continue);
+
+protected:
     std::vector<std::unique_ptr<GPUWorker> > workers_;
-    std::mutex stats_mutex_;
     std::atomic<bool> shutdown_{false};
-    std::chrono::steady_clock::time_point start_time_;
 
-    // Global best result tracking
-    BestResultTracker global_best_tracker_;
-
-    // Nonce distribution
+    // Global nonce distribution
     std::atomic<uint64_t> global_nonce_counter_{1};
 
-    // Each GPU gets a batch of 2^40 nonces (about 1 trillion)
-    // This ensures GPUs don't overlap even in very long runs
-    static constexpr uint64_t NONCE_BATCH_SIZE = 1ULL << 40;
+    // Performance tracking
+    std::chrono::steady_clock::time_point start_time_;
+    BestResultTracker global_best_tracker_;
+    std::mutex stats_mutex_;
+    uint32_t current_difficulty_;
 
-    /**
-     * Worker thread function for each GPU
-     */
-    void workerThread(GPUWorker *worker, const MiningJob &job, uint32_t duration_seconds);
+    // Callback management
+    mutable std::mutex callback_mutex_;
+    MiningResultCallback result_callback_;
 
-    /**
-     * Get the next batch of nonces for a GPU
-     */
+    // Worker thread function
+    virtual void workerThread(GPUWorker *worker, const MiningJob &job);
+
+    // Get next batch of nonces for a worker
     uint64_t getNextNonceBatch();
 };
 

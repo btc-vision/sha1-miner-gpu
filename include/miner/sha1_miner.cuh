@@ -6,7 +6,15 @@
 #include <vector>
 #include <string>
 
-#include "cxxsha1.hpp"
+// Only include OpenSSL for host code
+#if !defined(__CUDACC__) && !defined(__HIPCC__)
+#include <openssl/sha.h>
+#else
+// Define SHA_DIGEST_LENGTH for device code if not already defined
+#ifndef SHA_DIGEST_LENGTH
+#define SHA_DIGEST_LENGTH 20
+#endif
+#endif
 
 // SHA-1 constants
 #define SHA1_BLOCK_SIZE 64
@@ -20,8 +28,8 @@
     #define NONCES_PER_THREAD 4096  // Reasonable for AMD
     #define DEFAULT_THREADS_PER_BLOCK 256
 #else
-#define NONCES_PER_THREAD 64  // NVIDIA can handle more
-#define DEFAULT_THREADS_PER_BLOCK 1024
+#define NONCES_PER_THREAD 8192
+#define DEFAULT_THREADS_PER_BLOCK 512
 #endif
 
 // Debug mode flag
@@ -135,7 +143,7 @@ MiningJob create_mining_job(const uint8_t *message, const uint8_t *target_hash, 
 void cleanup_mining_system();
 
 // Mining loop function
-void run_mining_loop(MiningJob job, uint32_t duration_seconds);
+void run_mining_loop(MiningJob job);
 
 #ifdef __cplusplus
 }
@@ -229,20 +237,13 @@ __gpu_device__ __gpu_forceinline__ void prefetch_data(const void* ptr) {
 
 #endif // __CUDACC__ || __HIPCC__
 
-// Helper functions for SHA-1 computation (host side)
+// Helper functions for SHA-1 computation (host side) using OpenSSL
 #if !defined(__CUDACC__) && !defined(__HIPCC__)
 
 // Helper function to compute SHA-1 of binary data and return binary result
 inline std::vector<uint8_t> sha1_binary(const uint8_t *data, size_t len) {
-    SHA1 sha1;
-    sha1.update(std::string(reinterpret_cast<const char *>(data), len));
-    std::string hex = sha1.final();
-
-    std::vector<uint8_t> result(20);
-    for (int i = 0; i < 20; i++) {
-        result[i] = static_cast<uint8_t>(std::stoi(hex.substr(i * 2, 2), nullptr, 16));
-    }
-
+    std::vector<uint8_t> result(SHA_DIGEST_LENGTH);
+    SHA1(data, len, result.data());
     return result;
 }
 
@@ -254,7 +255,7 @@ inline std::vector<uint8_t> sha1_binary(const std::vector<uint8_t> &data) {
 // Helper to convert binary hash to hex string
 inline std::string sha1_hex(const uint8_t *hash) {
     std::ostringstream oss;
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < SHA_DIGEST_LENGTH; i++) {
         oss << std::hex << std::setfill('0') << std::setw(2)
                 << static_cast<int>(hash[i]);
     }
