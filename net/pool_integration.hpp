@@ -2,7 +2,7 @@
 #pragma once
 
 #include "pool_client.hpp"
-#include "mining_system.hpp"
+#include "../src/mining_system.hpp"
 #include "sha1_miner.cuh"
 #include <memory>
 #include <thread>
@@ -160,6 +160,8 @@ namespace MiningPool {
         void update_stats();
 
         void handle_reconnect();
+
+        void cleanup_mining_system();
     };
 
     // Multi-pool manager with failover
@@ -215,9 +217,9 @@ namespace MiningPool {
 
     // Example pool configurations
     namespace PoolPresets {
-        PoolConfig create_default_pool(const std::string &url,
-                                       const std::string &wallet,
-                                       const std::string &worker_name) {
+        inline PoolConfig create_default_pool(const std::string &url,
+                                              const std::string &wallet,
+                                              const std::string &worker_name) {
             PoolConfig config;
             config.url = url;
             config.username = wallet;
@@ -237,15 +239,15 @@ namespace MiningPool {
         }
 
         // Common pool configurations
-        PoolConfig create_local_pool(const std::string &worker_name) {
+        inline PoolConfig create_local_pool(const std::string &worker_name) {
             return create_default_pool("ws://localhost:3333", "local", worker_name);
         }
 
-        PoolConfig create_ssl_pool(const std::string &url,
-                                   const std::string &wallet,
-                                   const std::string &worker_name,
-                                   const std::string &cert_file = "",
-                                   const std::string &key_file = "") {
+        inline PoolConfig create_ssl_pool(const std::string &url,
+                                          const std::string &wallet,
+                                          const std::string &worker_name,
+                                          const std::string &cert_file = "",
+                                          const std::string &key_file = "") {
             auto config = create_default_pool(url, wallet, worker_name);
             config.use_tls = true;
             config.verify_server_cert = true;
@@ -260,3 +262,4 @@ namespace MiningPool {
         }
     }
 } // namespace MiningPool
+

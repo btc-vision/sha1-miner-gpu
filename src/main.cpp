@@ -10,6 +10,7 @@
 #include <chrono>
 #include <thread>
 #include <sstream>
+#include <boost/program_options.hpp>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -19,6 +20,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #endif
+
+namespace po = boost::program_options;
 
 // Advanced configuration for production mining
 struct MiningConfig {
@@ -42,7 +45,7 @@ struct MiningConfig {
     std::string pool_url;
     std::string pool_wallet;
     std::string worker_name;
-    std::string pool_password;
+    std::string pool_password = "x";
     std::vector<std::string> backup_pools;
     bool enable_pool_failover = true;
 
@@ -65,7 +68,7 @@ void signal_handler(int sig) {
         case SIGBREAK: sig_name = "SIGBREAK";
             break;
 #else
-        case SIGHUP:  sig_name = "SIGHUP"; break;
+        case SIGHUP: sig_name = "SIGHUP"; break;
         case SIGQUIT: sig_name = "SIGQUIT"; break;
 #endif
     }
@@ -85,44 +88,6 @@ void setup_signal_handlers() {
 #endif
 }
 
-void print_usage(const char *program_name) {
-    std::cout << "SHA-1 OP_NET Miner\n\n";
-    std::cout << "Usage: " << program_name << " [options]\n\n";
-    std::cout << "GPU Options:\n";
-    std::cout << "  --gpu <id>          GPU device ID (default: 0)\n";
-    std::cout << "  --all-gpus          Use all available GPUs\n";
-    std::cout << "  --gpus <list>       Use specific GPUs (e.g., --gpus 0,1,2)\n";
-    std::cout << "\nSolo Mining Options:\n";
-    std::cout << "  --difficulty <bits> Number of bits that must match (default: 50)\n";
-    std::cout << "  --duration <sec>    Mining duration in seconds (default: 300)\n";
-    std::cout << "  --target <hex>      Target hash in hex (40 chars)\n";
-    std::cout << "  --message <hex>     Base message in hex (64 chars)\n";
-    std::cout << "\nPool Mining Options:\n";
-    std::cout << "  --pool <url>        Pool URL (ws://host:port or wss://host:port)\n";
-    std::cout << "  --wallet <addr>     Wallet address for pool mining\n";
-    std::cout << "  --worker <name>     Worker name (default: hostname)\n";
-    std::cout << "  --pool-pass <pass>  Pool password (if required)\n";
-    std::cout << "  --backup-pool <url> Add backup pool for failover\n";
-    std::cout << "  --no-failover       Disable automatic pool failover\n";
-    std::cout << "\nPerformance Options:\n";
-    std::cout << "  --streams <n>       Number of CUDA streams (default: 4)\n";
-    std::cout << "  --threads <n>       Threads per block (default: 256)\n";
-    std::cout << "  --auto-tune         Auto-tune for optimal performance\n";
-    std::cout << "\nOther Options:\n";
-    std::cout << "  --benchmark         Run performance benchmark\n";
-    std::cout << "  --test-sha1         Test SHA-1 implementation\n";
-    std::cout << "  --test-bits         Test bit matching\n";
-    std::cout << "  --debug             Enable debug mode\n";
-    std::cout << "  --help              Show this help\n\n";
-    std::cout << "Examples:\n";
-    std::cout << "  Solo mining: " << program_name << " --gpu 0 --difficulty 45 --duration 600\n";
-    std::cout << "  Pool mining: " << program_name <<
-            " --pool ws://pool.example.com:3333 --wallet YOUR_WALLET --worker rig1\n";
-    std::cout << "  Multi-GPU:   " << program_name <<
-            " --all-gpus --pool wss://secure.pool.com:443 --wallet YOUR_WALLET\n";
-    std::cout << "  Benchmark:   " << program_name << " --benchmark --auto-tune\n";
-}
-
 MiningConfig parse_args(int argc, char *argv[]) {
     MiningConfig config;
 
@@ -134,72 +99,86 @@ MiningConfig parse_args(int argc, char *argv[]) {
         config.worker_name = "default_worker";
     }
 
-    for (int i = 1; i < argc; i++) {
-        std::string arg = argv[i];
+    po::options_description desc("SHA-1 OP_NET Miner Options");
+    desc.add_options()
+            ("help,h", "Show this help message")
+            // GPU options
+            ("gpu", po::value<int>(&config.gpu_id)->default_value(0), "GPU device ID")
+            ("all-gpus", po::bool_switch(&config.use_all_gpus), "Use all available GPUs")
+            ("gpus", po::value<std::string>(), "Use specific GPUs (e.g., 0,1,2)")
+            // Solo mining options
+            ("difficulty", po::value<uint32_t>(&config.difficulty)->default_value(50),
+             "Number of bits that must match")
+            ("duration", po::value<uint32_t>(&config.duration)->default_value(300),
+             "Mining duration in seconds")
+            ("target", po::value<std::string>(&config.target_hex), "Target hash in hex (40 chars)")
+            ("message", po::value<std::string>(&config.message_hex), "Base message in hex (64 chars)")
+            // Pool mining options
+            ("pool", po::value<std::string>(&config.pool_url),
+             "Pool URL (ws://host:port or wss://host:port)")
+            ("wallet", po::value<std::string>(&config.pool_wallet),
+             "Wallet address for pool mining")
+            ("worker", po::value<std::string>(&config.worker_name),
+             "Worker name (default: hostname)")
+            ("pool-pass", po::value<std::string>(&config.pool_password)->default_value("x"),
+             "Pool password")
+            ("backup-pool", po::value<std::vector<std::string> >(&config.backup_pools)->multitoken(),
+             "Backup pool URLs for failover")
+            ("no-failover", po::bool_switch(), "Disable automatic pool failover")
+            // Performance options
+            ("streams", po::value<int>(&config.num_streams)->default_value(4),
+             "Number of CUDA streams")
+            ("threads", po::value<int>(&config.threads_per_block)->default_value(256),
+             "Threads per block")
+            ("auto-tune", po::bool_switch(&config.auto_tune),
+             "Auto-tune for optimal performance")
+            // Other options
+            ("benchmark", po::bool_switch(&config.benchmark), "Run performance benchmark")
+            ("test-sha1", po::bool_switch(&config.test_sha1), "Test SHA-1 implementation")
+            ("test-bits", po::bool_switch(&config.test_bits), "Test bit matching")
+            ("debug", po::bool_switch(&config.debug_mode), "Enable debug mode");
 
-        // GPU options
-        if (arg == "--gpu" && i + 1 < argc) {
-            config.gpu_id = std::stoi(argv[++i]);
-        } else if (arg == "--all-gpus") {
-            config.use_all_gpus = true;
-        } else if (arg == "--gpus" && i + 1 < argc) {
-            std::string gpu_list = argv[++i];
-            std::stringstream ss(gpu_list);
-            std::string token;
-            while (std::getline(ss, token, ',')) {
-                config.gpu_ids.push_back(std::stoi(token));
-            }
+    po::variables_map vm;
+    try {
+        po::store(po::parse_command_line(argc, argv, desc), vm);
+        po::notify(vm);
+    } catch (const po::error &e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        std::cerr << desc << "\n";
+        std::exit(1);
+    }
+
+    if (vm.count("help")) {
+        std::cout << "SHA-1 OP_NET Miner\n\n";
+        std::cout << desc << "\n";
+        std::cout << "Examples:\n";
+        std::cout << "  Solo mining: " << argv[0] << " --gpu 0 --difficulty 45 --duration 600\n";
+        std::cout << "  Pool mining: " << argv[0] <<
+                " --pool ws://pool.example.com:3333 --wallet YOUR_WALLET --worker rig1\n";
+        std::cout << "  Multi-GPU:   " << argv[0] <<
+                " --all-gpus --pool wss://secure.pool.com:443 --wallet YOUR_WALLET\n";
+        std::cout << "  Benchmark:   " << argv[0] << " --benchmark --auto-tune\n";
+        std::exit(0);
+    }
+
+    // Parse GPU list
+    if (vm.count("gpus")) {
+        std::string gpu_list = vm["gpus"].as<std::string>();
+        std::stringstream ss(gpu_list);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            config.gpu_ids.push_back(std::stoi(token));
         }
-        // Solo mining options
-        else if (arg == "--difficulty" && i + 1 < argc) {
-            config.difficulty = std::stoi(argv[++i]);
-        } else if (arg == "--duration" && i + 1 < argc) {
-            config.duration = std::stoi(argv[++i]);
-        } else if (arg == "--target" && i + 1 < argc) {
-            config.target_hex = argv[++i];
-        } else if (arg == "--message" && i + 1 < argc) {
-            config.message_hex = argv[++i];
-        }
-        // Pool mining options
-        else if (arg == "--pool" && i + 1 < argc) {
-            config.use_pool = true;
-            config.pool_url = argv[++i];
-        } else if (arg == "--wallet" && i + 1 < argc) {
-            config.pool_wallet = argv[++i];
-        } else if (arg == "--worker" && i + 1 < argc) {
-            config.worker_name = argv[++i];
-        } else if (arg == "--pool-pass" && i + 1 < argc) {
-            config.pool_password = argv[++i];
-        } else if (arg == "--backup-pool" && i + 1 < argc) {
-            config.backup_pools.push_back(argv[++i]);
-        } else if (arg == "--no-failover") {
-            config.enable_pool_failover = false;
-        }
-        // Performance options
-        else if (arg == "--streams" && i + 1 < argc) {
-            config.num_streams = std::stoi(argv[++i]);
-        } else if (arg == "--threads" && i + 1 < argc) {
-            config.threads_per_block = std::stoi(argv[++i]);
-        } else if (arg == "--auto-tune") {
-            config.auto_tune = true;
-        }
-        // Other options
-        else if (arg == "--benchmark") {
-            config.benchmark = true;
-        } else if (arg == "--test-sha1") {
-            config.test_sha1 = true;
-        } else if (arg == "--test-bits") {
-            config.test_bits = true;
-        } else if (arg == "--debug") {
-            config.debug_mode = true;
-        } else if (arg == "--help" || arg == "-h") {
-            print_usage(argv[0]);
-            std::exit(0);
-        } else {
-            std::cerr << "Unknown option: " << arg << "\n";
-            std::cerr << "Use --help for usage information\n";
-            std::exit(1);
-        }
+    }
+
+    // Disable failover if requested
+    if (vm.count("no-failover")) {
+        config.enable_pool_failover = false;
+    }
+
+    // Enable pool mode if pool URL is specified
+    if (!config.pool_url.empty()) {
+        config.use_pool = true;
     }
 
     // Validate pool configuration

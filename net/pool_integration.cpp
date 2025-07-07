@@ -293,6 +293,100 @@ namespace MiningPool {
         return stats;
     }
 
+    void PoolMiningSystem::cleanup_mining_system() {
+        if (mining_system_) {
+            // The mining system will clean up in its destructor
+            mining_system_.reset();
+        }
+    }
+
+    void PoolMiningSystem::update_stats() {
+        if (!mining_system_) return;
+
+        auto mining_stats = mining_system_->getStats();
+
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.hashrate = mining_stats.hash_rate;
+        stats_.total_hashes = mining_stats.hashes_computed;
+    }
+
+    void PoolMiningSystem::handle_reconnect() {
+        std::cout << "Handling reconnection..." << std::endl;
+
+        // Stop mining temporarily
+        mining_active_ = false;
+
+        // Clear current job
+        {
+            std::lock_guard<std::mutex> lock(job_mutex_);
+            current_job_.reset();
+            current_mining_job_.reset();
+        }
+
+        // Pool client will handle the actual reconnection
+        // We just need to wait for a new job
+    }
+
+    void PoolMiningSystem::adjust_local_difficulty() {
+        // Calculate share submission rate
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_).count();
+
+        if (elapsed > 0 && stats_.shares_submitted > 10) {
+            double shares_per_second = static_cast<double>(stats_.shares_submitted) / elapsed;
+            double seconds_per_share = 1.0 / shares_per_second;
+
+            // Adjust difficulty to target share time
+            if (seconds_per_share < config_.target_share_time * 0.5) {
+                // Too many shares, increase difficulty
+                uint32_t new_diff = current_difficulty_ + 1;
+                if (new_diff <= 60) {
+                    // Reasonable upper limit
+                    current_difficulty_ = new_diff;
+                    std::cout << "Adjusting local difficulty up to " << new_diff << std::endl;
+                }
+            } else if (seconds_per_share > config_.target_share_time * 2.0) {
+                // Too few shares, decrease difficulty
+                uint32_t new_diff = current_difficulty_ - 1;
+                if (new_diff >= config_.min_share_difficulty) {
+                    current_difficulty_ = new_diff;
+                    std::cout << "Adjusting local difficulty down to " << new_diff << std::endl;
+                }
+            }
+        }
+    }
+
+    uint32_t PoolMiningSystem::calculate_optimal_scan_difficulty() {
+        // Based on hashrate and target share time
+        if (stats_.hashrate > 0) {
+            // Calculate expected time to find a share at various difficulties
+            double hashes_for_target_time = stats_.hashrate * config_.target_share_time;
+
+            // Find difficulty that gives us approximately target_share_time
+            uint32_t optimal_diff = config_.min_share_difficulty;
+
+            while (optimal_diff < 60) {
+                double expected_hashes = std::pow(2.0, optimal_diff);
+                if (expected_hashes > hashes_for_target_time) {
+                    break;
+                }
+                optimal_diff++;
+            }
+
+            return optimal_diff;
+        }
+
+        return current_difficulty_;
+    }
+
+    void PoolMiningSystem::process_mining_results(const std::vector<MiningResult> &results) {
+        for (const auto &result: results) {
+            if (result.matching_bits >= current_difficulty_) {
+                submit_share(result);
+            }
+        }
+    }
+
     // IPoolEventHandler implementations
     void PoolMiningSystem::on_connected() {
         std::cout << "Connected to mining pool" << std::endl;
@@ -396,7 +490,7 @@ namespace MiningPool {
                 << ", Hashrate: " << status.pool_hashrate / 1e9 << " GH/s" << std::endl;
 
         std::lock_guard<std::mutex> lock(stats_mutex_);
-        stats_.pool_name = status.network_info["pool_name"];
+        stats_.pool_name = status.network_info.count("pool_name") ? status.network_info.at("pool_name") : "";
     }
 
     // MultiPoolManager implementation

@@ -197,7 +197,7 @@ namespace MiningPool {
         uint64_t blocks_found;
         uint64_t total_shares;
         double average_difficulty;
-        std::map<std::string, double> network_info; // Additional network stats
+        std::map<std::string, std::string> network_info; // Additional network stats
 
         json to_json() const;
 
@@ -215,7 +215,7 @@ namespace MiningPool {
         // Reconnection settings
         uint32_t reconnect_delay_ms = 5000;
         uint32_t max_reconnect_delay_ms = 60000;
-        uint32_t reconnect_attempts = -1; // -1 = infinite
+        int reconnect_attempts = -1; // -1 = infinite
 
         // Performance settings
         uint32_t keepalive_interval_s = 30;
@@ -227,6 +227,7 @@ namespace MiningPool {
         std::string password;
         std::string worker_name;
         AuthMethod auth_method = AuthMethod::WORKER_PASS;
+        bool debug_mode = false;
     };
 
     // Worker statistics

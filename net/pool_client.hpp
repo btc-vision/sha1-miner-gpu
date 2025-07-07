@@ -1,14 +1,20 @@
-// pool_client_uws.hpp - High-performance pool client using uWebSockets
+// pool_client.hpp - High-performance pool client using uWebSockets
 #pragma once
 
 #include "pool_protocol.hpp"
-#include <uwebsockets/App.h>
 #include <thread>
 #include <queue>
 #include <condition_variable>
 #include <atomic>
 #include <unordered_map>
 #include <memory>
+
+// Forward declarations for uWebSockets
+namespace uWS {
+    template<bool SSL, bool isServer, typename USERDATA>
+    struct WebSocket;
+    struct Loop;
+}
 
 namespace MiningPool {
     class PoolClient {
@@ -64,10 +70,7 @@ namespace MiningPool {
 
         std::unique_ptr<std::thread> io_thread_;
         uWS::Loop *loop_ = nullptr;
-        uWS::WebSocket<config_.use_tls, true, WebSocketData> *ws_ = nullptr;
-
-        // For TLS
-        us_socket_context_options_t tls_options_ = {};
+        void *ws_ = nullptr; // Changed to void* to avoid template issues
 
         // Threading
         std::thread keepalive_thread_;
@@ -140,7 +143,7 @@ namespace MiningPool {
         ParsedUrl parse_url(const std::string &url);
     };
 
-    // Thread-safe pool client wrapper remains the same
+    // Thread-safe pool client wrapper
     class PoolClientManager {
     public:
         PoolClientManager();
