@@ -104,7 +104,16 @@ void MiningSystem::autoTuneParameters() {
             break;
     }
 
-    // Calculate optimal blocks based on architecture and vendor
+    // Special handling for RDNA4 (gfx1200)
+    if (device_props_.major == 12) {
+        std::cout << "Detected RDNA4 GPU - applying conservative settings\n";
+        config_.blocks_per_stream = 64;
+        config_.threads_per_block = 64;
+        config_.num_streams = 1;
+        config_.result_buffer_size = 32;
+        return;
+    }
+
     int blocks_per_sm;
     int optimal_threads;
 
