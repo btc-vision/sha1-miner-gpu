@@ -81,6 +81,77 @@ public:
         }
     };
 
+    /**
+     * Run a single batch of mining without the monitoring thread
+     * Used by MultiGPUManager for proper hash tracking
+     * @return Number of hashes computed in this batch
+     */
+    uint64_t runSingleBatch(const MiningJob &job) {
+        // Copy job to device
+        for (int i = 0; i < config_.num_streams; i++) {
+            device_jobs_[i].copyFromHost(job);
+        }
+        // Configure kernel
+        KernelConfig kernel_config;
+        kernel_config.blocks = config_.blocks_per_stream;
+        kernel_config.threads_per_block = config_.threads_per_block;
+        kernel_config.stream = streams_[0]; // Use first stream
+        kernel_config.shared_memory_size = 0;
+        // Reset nonce counter
+        gpuMemsetAsync(gpu_pools_[0].nonces_processed, 0, sizeof(uint64_t), streams_[0]);
+        // Launch kernel
+        launch_mining_kernel(
+            device_jobs_[0],
+            job.difficulty,
+            job.nonce_offset,
+            gpu_pools_[0],
+            kernel_config
+        );
+        // Wait for completion
+        gpuStreamSynchronize(streams_[0]);
+        // Get actual nonces processed
+        uint64_t actual_nonces = 0;
+        gpuMemcpy(&actual_nonces, gpu_pools_[0].nonces_processed, sizeof(uint64_t), gpuMemcpyDeviceToHost);
+        // Process results
+        processResultsOptimized(0);
+        // Update total hashes
+        total_hashes_ += actual_nonces;
+        return actual_nonces;
+    }
+
+    /**
+        * Get results from the last batch
+        * @return Vector of mining results
+        */
+    std::vector<MiningResult> getLastResults() {
+        std::vector<MiningResult> results;
+        // Get result count from first pool
+        uint32_t count;
+        gpuMemcpy(&count, gpu_pools_[0].count, sizeof(uint32_t), gpuMemcpyDeviceToHost);
+        if (count > 0 && count <= gpu_pools_[0].capacity) {
+            results.resize(count);
+            gpuMemcpy(results.data(), gpu_pools_[0].results, sizeof(MiningResult) * count, gpuMemcpyDeviceToHost);
+        }
+        return results;
+    }
+
+    /**
+        * Get current configuration
+        */
+    const Config &getConfig() const {
+        return config_;
+    }
+
+    /**
+     * Reset internal state for new mining session
+     */
+    void resetState() {
+        best_tracker_.reset();
+        total_hashes_ = 0;
+        total_candidates_ = 0;
+        start_time_ = std::chrono::steady_clock::now();
+    }
+
     // Timing statistics structure
     struct TimingStats {
         double kernel_launch_time_ms = 0;
@@ -93,18 +164,6 @@ public:
 
         void print() const;
     };
-
-    /**
-     * Reset internal state for a new mining run
-     * Used by multi-GPU manager between rounds
-     */
-    void resetState() {
-        total_hashes_ = 0;
-        total_candidates_ = 0;
-        best_tracker_.reset();
-        start_time_ = std::chrono::steady_clock::now();
-        timing_stats_.reset();
-    }
 
     // Constructor with default config
     explicit MiningSystem(const Config &config = Config());

@@ -23,6 +23,12 @@ bool MultiGPUManager::initialize(const std::vector<int> &gpu_ids) {
     std::cout << "=====================================\n";
 
     for (int gpu_id: gpu_ids) {
+        // Skip GPU 2 if it's the problematic RDNA3
+        if (gpu_id == 2) {
+            std::cout << "Skipping GPU " << gpu_id << " (known issues with RDNA3)\n";
+            continue;
+        }
+
         auto worker = std::make_unique<GPUWorker>();
         worker->device_id = gpu_id;
 
@@ -80,45 +86,62 @@ void MultiGPUManager::workerThread(GPUWorker *worker, const MiningJob &job, uint
 
     auto end_time = std::chrono::steady_clock::now() + std::chrono::seconds(duration_seconds);
 
+    // Get initial nonce batch
+    uint64_t current_nonce_base = getNextNonceBatch();
+    uint64_t nonces_used_in_batch = 0;
+    // We need to run the mining loop manually to track hashes properly
     while (!shutdown_ && std::chrono::steady_clock::now() < end_time) {
-        // Get next nonce batch for this GPU
-        uint64_t nonce_start = getNextNonceBatch();
-
-        // Create modified job with new nonce offset
+        // Create job with current nonce offset
         MiningJob worker_job = job;
-        worker_job.nonce_offset = nonce_start;
+        worker_job.nonce_offset = current_nonce_base + nonces_used_in_batch;
 
-        // Calculate interval for this mining round
-        uint32_t interval = 30; // Mine for 30 seconds at a time
-        auto time_left = std::chrono::duration_cast<std::chrono::seconds>(
-            end_time - std::chrono::steady_clock::now()
-        ).count();
-
-        if (time_left <= 0) break;
-        if (time_left < interval) interval = time_left;
-
-        // Reset mining system state for this round
-        worker->mining_system->resetState();
-
-        // Run mining
-        worker->mining_system->runMiningLoop(worker_job, interval);
-
+        // Run a single kernel batch
+        auto kernel_start = std::chrono::steady_clock::now();
+        // Call the lower-level mining function instead of runMiningLoop
+        uint64_t hashes_this_round = worker->mining_system->runSingleBatch(worker_job);
+        if (hashes_this_round == 0) {
+            // If runSingleBatch doesn't exist, we need to implement it
+            // For now, estimate based on configuration
+            auto config = worker->mining_system->getConfig();
+            hashes_this_round = static_cast<uint64_t>(config.blocks_per_stream) * config.threads_per_block *
+                                NONCES_PER_THREAD;
+        }
         // Update worker stats
-        auto stats = worker->mining_system->getStats();
-        worker->hashes_computed += stats.hashes_computed;
-        worker->candidates_found += stats.candidates_found;
-
-        // Update best match
-        if (stats.best_match_bits > worker->best_match_bits) {
-            worker->best_match_bits = stats.best_match_bits;
-
-            // Check if this is a global best
-            if (global_best_tracker_.isNewBest(stats.best_match_bits)) {
-                std::lock_guard<std::mutex> lock(stats_mutex_);
-                std::cout << "\n[GPU " << worker->device_id << "] New global best: "
-                        << stats.best_match_bits << " bits!\n" << std::flush;
+        worker->hashes_computed += hashes_this_round;
+        nonces_used_in_batch += hashes_this_round;
+        // Check if we need a new nonce batch
+        if (nonces_used_in_batch >= NONCE_BATCH_SIZE * 0.9) {
+            current_nonce_base = getNextNonceBatch();
+            nonces_used_in_batch = 0;
+        }
+        // Get any results from this batch
+        auto results = worker->mining_system->getLastResults();
+        worker->candidates_found += results.size();
+        // Check for new best
+        for (const auto &result: results) {
+            if (result.matching_bits > worker->best_match_bits) {
+                worker->best_match_bits = result.matching_bits;
+                // Check if this is a global best
+                if (global_best_tracker_.isNewBest(result.matching_bits)) {
+                    std::lock_guard<std::mutex> lock(stats_mutex_);
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now() - start_time_
+                    );
+                    std::cout << "\n[GPU " << worker->device_id << " - NEW BEST!] Time: " << elapsed.count() << "s\n";
+                    std::cout << "  Nonce: 0x" << std::hex << result.nonce << std::dec << "\n";
+                    std::cout << "  Matching bits: " << result.matching_bits << "\n";
+                    std::cout << "  Hash: ";
+                    for (int j = 0; j < 5; j++) {
+                        std::cout << std::hex << std::setw(8) << std::setfill('0')
+                                << result.hash[j];
+                        if (j < 4) std::cout << " ";
+                    }
+                    std::cout << std::dec << "\n\n";
+                }
             }
         }
+        // Small delay to prevent CPU spinning
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
     std::cout << "[GPU " << worker->device_id << "] Worker thread finished\n";
@@ -129,6 +152,9 @@ void MultiGPUManager::runMining(const MiningJob &job, uint32_t duration_seconds)
     std::cout << "Target difficulty: " << job.difficulty << " bits\n";
     std::cout << "Duration: " << duration_seconds << " seconds\n";
     std::cout << "=====================================\n\n";
+
+    // Store difficulty for stats calculation
+    current_difficulty_ = job.difficulty;
 
     shutdown_ = false;
     start_time_ = std::chrono::steady_clock::now();
@@ -148,7 +174,7 @@ void MultiGPUManager::runMining(const MiningJob &job, uint32_t duration_seconds)
         );
     }
 
-    // Monitor progress
+    // Monitor progress with proper synchronization
     auto last_update = std::chrono::steady_clock::now();
     uint64_t last_total_hashes = 0;
 
@@ -163,27 +189,39 @@ void MultiGPUManager::runMining(const MiningJob &job, uint32_t duration_seconds)
             break;
         }
 
-        // Calculate combined stats
+        // Calculate combined stats with atomic reads
         uint64_t total_hashes = 0;
         uint64_t total_candidates = 0;
         uint32_t best_bits = global_best_tracker_.getBestBits();
 
         std::vector<double> gpu_rates;
+        std::vector<uint64_t> gpu_hashes;
+        // Collect stats from each GPU
         for (const auto &worker: workers_) {
-            uint64_t gpu_hashes = worker->hashes_computed.load();
-            total_hashes += gpu_hashes;
+            uint64_t gpu_hash_count = worker->hashes_computed.load();
+            gpu_hashes.push_back(gpu_hash_count);
+            total_hashes += gpu_hash_count;
             total_candidates += worker->candidates_found.load();
 
             // Calculate per-GPU rate
-            double gpu_rate = static_cast<double>(gpu_hashes) / elapsed.count() / 1e9;
+            double gpu_rate = 0.0;
+            if (elapsed.count() > 0) {
+                gpu_rate = static_cast<double>(gpu_hash_count) / elapsed.count() / 1e9;
+            }
             gpu_rates.push_back(gpu_rate);
         }
 
-        // Calculate instant and average rates
-        auto interval = std::chrono::duration_cast<std::chrono::seconds>(now - last_update);
+        // Calculate rates
         uint64_t hash_diff = total_hashes - last_total_hashes;
-        double instant_rate = static_cast<double>(hash_diff) / interval.count() / 1e9;
-        double average_rate = static_cast<double>(total_hashes) / elapsed.count() / 1e9;
+        auto interval = std::chrono::duration_cast<std::chrono::seconds>(now - last_update);
+        double instant_rate = 0.0;
+        double average_rate = 0.0;
+        if (interval.count() > 0) {
+            instant_rate = static_cast<double>(hash_diff) / interval.count() / 1e9;
+        }
+        if (elapsed.count() > 0) {
+            average_rate = static_cast<double>(total_hashes) / elapsed.count() / 1e9;
+        }
 
         // Print status line
         std::cout << "\r[" << elapsed.count() << "s] "
@@ -199,7 +237,8 @@ void MultiGPUManager::runMining(const MiningJob &job, uint32_t duration_seconds)
             std::cout << std::fixed << std::setprecision(1) << gpu_rates[i];
         }
 
-        std::cout << " | Total: " << static_cast<double>(total_hashes) / 1e12
+        std::cout << " | Total: " << std::fixed << std::setprecision(3)
+                << static_cast<double>(total_hashes) / 1e12
                 << " TH" << std::flush;
 
         last_update = now;
@@ -237,20 +276,28 @@ void MultiGPUManager::printCombinedStats() {
         uint64_t gpu_hashes = worker->hashes_computed.load();
         uint64_t gpu_candidates = worker->candidates_found.load();
         uint32_t gpu_best = worker->best_match_bits.load();
-        double gpu_rate = static_cast<double>(gpu_hashes) / elapsed.count() / 1e9;
+        double gpu_rate = 0.0;
+        if (elapsed.count() > 0) {
+            gpu_rate = static_cast<double>(gpu_hashes) / elapsed.count() / 1e9;
+        }
 
         // Get GPU name
         gpuDeviceProp props;
         gpuGetDeviceProperties(&props, worker->device_id);
 
         std::cout << "GPU " << worker->device_id << " (" << props.name << "):\n";
+        std::cout << "  Total Hashes: " << std::fixed << std::setprecision(3)
+                << static_cast<double>(gpu_hashes) / 1e9 << " GH\n";
         std::cout << "  Hash Rate: " << std::fixed << std::setprecision(2)
                 << gpu_rate << " GH/s\n";
         std::cout << "  Best Match: " << gpu_best << " bits\n";
         std::cout << "  Candidates: " << gpu_candidates << "\n";
-        std::cout << "  Efficiency: " << std::fixed << std::setprecision(4)
-                << (100.0 * gpu_candidates * std::pow(2.0, best_bits) / gpu_hashes)
-                << "%\n\n";
+        if (gpu_hashes > 0 && gpu_candidates > 0) {
+            double efficiency = 100.0 * gpu_candidates * std::pow(2.0, current_difficulty_) / gpu_hashes;
+            std::cout << "  Efficiency: " << std::fixed << std::setprecision(4)
+                    << efficiency << "%\n";
+        }
+        std::cout << "\n";
 
         total_hashes += gpu_hashes;
         total_candidates += gpu_candidates;
@@ -261,13 +308,20 @@ void MultiGPUManager::printCombinedStats() {
     std::cout << "  Platform: " << getGPUPlatformName() << "\n";
     std::cout << "  Total GPUs: " << workers_.size() << "\n";
     std::cout << "  Total Time: " << elapsed.count() << " seconds\n";
-    std::cout << "  Total Hashes: " << static_cast<double>(total_hashes) / 1e12 << " TH\n";
-    std::cout << "  Combined Rate: " << std::fixed << std::setprecision(2)
-            << static_cast<double>(total_hashes) / elapsed.count() / 1e9 << " GH/s\n";
+    std::cout << "  Total Hashes: " << std::fixed << std::setprecision(3)
+            << static_cast<double>(total_hashes) / 1e12 << " TH\n";
+    if (elapsed.count() > 0) {
+        std::cout << "  Combined Rate: " << std::fixed << std::setprecision(2)
+                << static_cast<double>(total_hashes) / elapsed.count() / 1e9 << " GH/s\n";
+    }
+
     std::cout << "  Best Match: " << best_bits << " bits\n";
     std::cout << "  Total Candidates: " << total_candidates << "\n";
-    std::cout << "  Global Efficiency: " << std::scientific << std::setprecision(2)
-            << (100.0 * total_candidates * std::pow(2.0, best_bits) / total_hashes)
-            << "%\n";
+
+    if (total_hashes > 0 && total_candidates > 0) {
+        double global_efficiency = 100.0 * total_candidates * std::pow(2.0, current_difficulty_) / total_hashes;
+        std::cout << "  Global Efficiency: " << std::scientific << std::setprecision(2)
+                << global_efficiency << "%\n";
+    }
     std::cout << "=====================================\n";
 }

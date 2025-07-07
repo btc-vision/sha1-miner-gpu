@@ -71,6 +71,9 @@ private:
     // This ensures GPUs don't overlap even in very long runs
     static constexpr uint64_t NONCE_BATCH_SIZE = 1ULL << 40;
 
+    // Store job difficulty for stats calculation
+    uint32_t current_difficulty_ = 0;
+
     /**
      * Worker thread function for each GPU
      */
