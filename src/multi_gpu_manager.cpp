@@ -219,7 +219,7 @@ void MultiGPUManager::workerThread(GPUWorker *worker, const MiningJob &job, uint
         }
 
         // Small delay to prevent CPU spinning
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     if (has_errors) {

@@ -398,7 +398,7 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
         }
 
         if (stream_data[current_stream].busy) {
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
             continue;
         }
 
