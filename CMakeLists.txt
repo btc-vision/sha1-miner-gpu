@@ -43,7 +43,7 @@ if (GPU_BACKEND STREQUAL "HIP")
 
     # Get HIP architectures
     if (NOT HIP_ARCH)
-        set(HIP_ARCH "gfx1010;gfx1030;gfx1100")
+        set(HIP_ARCH "gfx1010;gfx1030;gfx1100;gfx1101;gfx1102;gfx1012;gfx906;gfx900")
     endif ()
     string(REPLACE ";" "," HIP_ARCH_FLAGS "${HIP_ARCH}")
 

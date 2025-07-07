@@ -20,8 +20,8 @@
     #define NONCES_PER_THREAD 4096  // Reasonable for AMD
     #define DEFAULT_THREADS_PER_BLOCK 256
 #else
-#define NONCES_PER_THREAD 8192  // NVIDIA can handle more
-#define DEFAULT_THREADS_PER_BLOCK 256
+#define NONCES_PER_THREAD 64  // NVIDIA can handle more
+#define DEFAULT_THREADS_PER_BLOCK 1024
 #endif
 
 // Debug mode flag
