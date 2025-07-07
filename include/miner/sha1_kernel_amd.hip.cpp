@@ -43,7 +43,7 @@ __device__ __forceinline__ uint32_t amd_rotl32(uint32_t x, uint32_t n) {
 
 /**
  * Main SHA-1 mining kernel for AMD GPUs
- * Optimized for GCN/RDNA with 64-thread wavefronts
+ * Optimized for GCN/RDNA with wavefront-aware operations
  */
 __global__ void sha1_mining_kernel_amd(
     const uint8_t * __restrict__ base_message,
@@ -53,12 +53,17 @@ __global__ void sha1_mining_kernel_amd(
     uint32_t * __restrict__ result_count,
     uint32_t result_capacity,
     uint64_t nonce_base,
-    uint32_t nonces_per_thread
+    uint32_t nonces_per_thread,
+    uint64_t * __restrict__ actual_nonces_processed
 ) {
-    // Thread indices - AMD uses 64-thread wavefronts
+    // Thread indices - AMD RDNA uses 32-thread wavefronts, GCN uses 64
     const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const uint32_t lane_id = threadIdx.x & 63; // Lane within wavefront
+    const uint32_t warp_size = __builtin_amdgcn_wavefrontsize();
+    const uint32_t lane_id = threadIdx.x & (warp_size - 1);
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
+
+    // Track how many nonces this thread actually processes
+    uint32_t nonces_processed = 0;
 
     // LDS (Local Data Share) for cooperative loading
     __shared__ uint8_t lds_base_message[32];
@@ -90,6 +95,9 @@ __global__ void sha1_mining_kernel_amd(
     for (uint32_t i = 0; i < nonces_per_thread; i++) {
         uint64_t nonce = thread_nonce_base + i;
         if (nonce == 0) continue;
+
+        // Count this nonce as processed
+        nonces_processed++;
 
         // Create message copy
         uint8_t msg_bytes[32];
@@ -195,7 +203,7 @@ __global__ void sha1_mining_kernel_amd(
 
         // Check if we found a match
         if (matching_bits >= difficulty) {
-            // AMD wavefront vote operations
+            // AMD wavefront vote operations - handle both 32 and 64 thread wavefronts
             uint64_t mask = __ballot(matching_bits >= difficulty);
 
             // Only first active lane in wavefront performs atomic
@@ -209,8 +217,8 @@ __global__ void sha1_mining_kernel_amd(
                         uint32_t source_lane = bit;
 
                         // Use AMD's permute lane operations
-                        uint64_t result_nonce = __shfl(nonce, source_lane, 64);
-                        uint32_t result_bits = __shfl(matching_bits, source_lane, 64);
+                        uint64_t result_nonce = __shfl(nonce, source_lane, warp_size);
+                        uint32_t result_bits = __shfl(matching_bits, source_lane, warp_size);
 
                         results[idx].nonce = result_nonce;
                         results[idx].matching_bits = result_bits;
@@ -218,7 +226,7 @@ __global__ void sha1_mining_kernel_amd(
 
 #pragma unroll
                         for (int j = 0; j < 5; j++) {
-                            results[idx].hash[j] = __shfl(hash[j], source_lane, 64);
+                            results[idx].hash[j] = __shfl(hash[j], source_lane, warp_size);
                         }
                         idx++;
                     }
@@ -226,6 +234,9 @@ __global__ void sha1_mining_kernel_amd(
             }
         }
     }
+
+    // At end of kernel, atomically add the actual count of nonces processed
+    atomicAdd((unsigned long long *) actual_nonces_processed, (unsigned long long) nonces_processed);
 }
 
 /**
@@ -279,7 +290,8 @@ extern "C" void launch_mining_kernel_amd(
                        pool.count,
                        pool.capacity,
                        nonce_offset,
-                       nonces_per_thread
+                       nonces_per_thread,
+                       pool.nonces_processed
     );
 
     // Check for launch errors

@@ -356,6 +356,8 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
     // Reset shutdown flag and best tracker
     g_shutdown = false;
     best_tracker_.reset();
+    // Reset actual hash counter
+    total_hashes_ = 0;
 
     // Start performance monitor
     monitor_thread_ = std::make_unique<std::thread>(
@@ -370,8 +372,15 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
         uint64_t nonce_offset;
         bool busy;
         std::chrono::high_resolution_clock::time_point launch_time;
+        uint64_t last_nonces_processed; // Add tracking per stream
     };
     std::vector<StreamData> stream_data(config_.num_streams);
+    // Initialize stream tracking
+    for (int i = 0; i < config_.num_streams; i++) {
+        stream_data[i].last_nonces_processed = 0;
+        // Reset the actual nonces counter for each stream
+        gpuMemsetAsync(gpu_pools_[i].nonces_processed, 0, sizeof(uint64_t), streams_[i]);
+    }
 
     // Nonce distribution
     uint64_t nonce_stride = getHashesPerKernel();
@@ -387,7 +396,16 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
         while (stream_data[current_stream].busy && attempts < config_.num_streams) {
             gpuError_t status = gpuStreamQuery(streams_[current_stream]);
             if (status == gpuSuccess) {
-                // Stream completed - process results
+                // Stream completed - get actual nonces processed
+                uint64_t actual_nonces = 0;
+                gpuMemcpyAsync(&actual_nonces, gpu_pools_[current_stream].nonces_processed, sizeof(uint64_t),
+                               gpuMemcpyDeviceToHost, streams_[current_stream]);
+                gpuStreamSynchronize(streams_[current_stream]);
+                // Update total with actual work done
+                uint64_t nonces_this_kernel = actual_nonces - stream_data[current_stream].last_nonces_processed;
+                total_hashes_ += nonces_this_kernel;
+                stream_data[current_stream].last_nonces_processed = actual_nonces;
+                // Process results
                 processResultsOptimized(current_stream);
                 stream_data[current_stream].busy = false;
 
@@ -433,8 +451,7 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
         stream_data[current_stream].busy = true;
         stream_data[current_stream].nonce_offset = global_nonce_offset;
 
-        // Update stats
-        total_hashes_ += getHashesPerKernel();
+        // Don't update total_hashes_ here - wait for actual count
         kernels_launched++;
         global_nonce_offset += nonce_stride;
 
@@ -442,9 +459,16 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
         current_stream = (current_stream + 1) % config_.num_streams;
     }
 
-    // Wait for all streams to complete
+    // Wait for all streams to complete and get final counts
     for (int i = 0; i < config_.num_streams; i++) {
         gpuStreamSynchronize(streams_[i]);
+        // Get final actual nonces processed
+        uint64_t actual_nonces = 0;
+        gpuMemcpy(&actual_nonces, gpu_pools_[i].nonces_processed, sizeof(uint64_t), gpuMemcpyDeviceToHost);
+        // Update total with any remaining work
+        uint64_t nonces_this_kernel = actual_nonces - stream_data[i].last_nonces_processed;
+        total_hashes_ += nonces_this_kernel;
+
         processResultsOptimized(i);
     }
 
@@ -455,6 +479,7 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
     }
 
     std::cout << "\n\nMining completed. Kernels launched: " << kernels_launched << "\n";
+    std::cout << "Actual hashes computed: " << static_cast<double>(total_hashes_) / 1e9 << " GH\n";
     std::cout << "Final best match: " << best_tracker_.getBestBits() << " bits\n";
 }
 
@@ -593,6 +618,13 @@ bool MiningSystem::initializeGPUResources() {
         }
 
         gpuMemsetAsync(pool.count, 0, sizeof(uint32_t), streams_[i]);
+
+        err = gpuMalloc(&pool.nonces_processed, sizeof(uint64_t));
+        if (err != gpuSuccess) {
+            std::cerr << "Failed to allocate nonce counter\n";
+            return false;
+        }
+        gpuMemsetAsync(pool.nonces_processed, 0, sizeof(uint64_t), streams_[i]);
 
         // Allocate pinned host memory
         if (config_.use_pinned_memory) {
@@ -734,6 +766,8 @@ uint64_t MiningSystem::getHashesPerKernel() const {
     return static_cast<uint64_t>(config_.blocks_per_stream) *
            static_cast<uint64_t>(config_.threads_per_block) *
            static_cast<uint64_t>(NONCES_PER_THREAD);
+
+    return config_.blocks_per_stream * config_.threads_per_block * NONCES_PER_THREAD;
 }
 
 void MiningSystem::optimizeForGPU() {

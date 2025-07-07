@@ -37,7 +37,7 @@ __device__ __forceinline__ uint32_t count_leading_zeros_160bit(
 }
 
 /**
- * Main SHA-1 mining kernel
+ * Main SHA-1 mining kernel for NVIDIA GPUs
  * Processes multiple nonces per thread to find near-collisions
  */
 __global__ void sha1_mining_kernel_nvidia(
@@ -48,11 +48,15 @@ __global__ void sha1_mining_kernel_nvidia(
     uint32_t * __restrict__ result_count,
     uint32_t result_capacity,
     uint64_t nonce_base,
-    uint32_t nonces_per_thread
+    uint32_t nonces_per_thread,
+    uint64_t * __restrict__ actual_nonces_processed // ADD THIS for accurate tracking
 ) {
     // Thread indices
     const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
+
+    // Track how many nonces this thread actually processes
+    uint32_t nonces_processed = 0;
 
     // Load the base message as bytes
     uint8_t base_msg[32];
@@ -72,6 +76,9 @@ __global__ void sha1_mining_kernel_nvidia(
     for (uint32_t i = 0; i < nonces_per_thread; i++) {
         uint64_t nonce = thread_nonce_base + i;
         if (nonce == 0) continue;
+
+        // Count this nonce as processed
+        nonces_processed++;
 
         // Create a copy of the message
         uint8_t msg_bytes[32];
@@ -209,6 +216,9 @@ __global__ void sha1_mining_kernel_nvidia(
             }
         }
     }
+
+    // At end of kernel, atomically add the actual count of nonces processed
+    atomicAdd((unsigned long long *) actual_nonces_processed, (unsigned long long) nonces_processed);
 }
 
 /**
@@ -265,7 +275,8 @@ void launch_mining_kernel_nvidia(
         pool.count,
         pool.capacity,
         nonce_offset,
-        nonces_per_thread
+        nonces_per_thread,
+        pool.nonces_processed
     );
 
     // Check for launch errors

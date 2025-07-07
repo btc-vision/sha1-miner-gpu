@@ -50,6 +50,7 @@ struct ResultPool {
     MiningResult *results; // Array of results
     uint32_t *count; // Number of results found
     uint32_t capacity; // Maximum number of results
+    uint64_t *nonces_processed;
 };
 
 // Mining statistics
