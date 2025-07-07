@@ -62,6 +62,8 @@ if (GPU_BACKEND STREQUAL "HIP")
                 "gfx1101"   # RDNA3 - Navi 32
                 "gfx1102"   # RDNA3 - Navi 33
                 "gfx1103"   # RDNA3 - Phoenix
+                "gfx1200"   # RDNA4 - Navi 44 (RX 9070 XT)
+                "gfx1201"   # RDNA4 - Navi 48 (RX 9070)
         )
         string(REPLACE ";" "," HIP_ARCH "${HIP_ARCH_LIST}")
     endif ()

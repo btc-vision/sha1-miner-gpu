@@ -81,6 +81,7 @@ while [[ $# -gt 0 ]]; do
             echo "  gfx1010 - RDNA1 (RX 5700 XT)"
             echo "  gfx1030 - RDNA2 (RX 6800/6900)"
             echo "  gfx1100 - RDNA3 (RX 7900 XTX)"
+            echo "  gfx1200 - RDNA4 (RX 9070 XT)"
             exit 0
             ;;
         *)
@@ -142,6 +143,9 @@ detect_amd_gpus() {
 
                 # Identify architecture family
                 case $arch in
+                    gfx120[0-9])
+                        echo " (RDNA4 - RX 9000 series)"
+                        ;;
                     gfx110[0-3])
                         echo " (RDNA3 - RX 7000 series)"
                         ;;
@@ -168,6 +172,11 @@ detect_amd_gpus() {
                 # Convert to semicolon-separated list
                 HIP_ARCH=$(echo $DETECTED_ARCHS | tr ' ' ';')
                 print_info "Will build for detected architectures: $HIP_ARCH"
+
+                # Check if RDNA4 is in the list
+                if echo "$HIP_ARCH" | grep -q "gfx120"; then
+                    print_warning "RDNA4 GPU detected. Ensure ROCm 6.2+ is installed for best compatibility."
+                fi
 
                 # Check if RDNA3 is in the list
                 if echo "$HIP_ARCH" | grep -q "gfx110"; then
