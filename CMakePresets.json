@@ -7,7 +7,9 @@
       "cacheVariables": {
         "CMAKE_CXX_STANDARD": "20",
         "CMAKE_CXX_STANDARD_REQUIRED": "ON",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_POLICY_DEFAULT_CMP0144": "NEW",
+        "CMAKE_POLICY_DEFAULT_CMP0167": "OLD"
       }
     },
     {
@@ -17,11 +19,17 @@
       "cacheVariables": {
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-windows",
-        "OPENSSL_ROOT_DIR": "${sourceDir}/vcpkg/installed/x64-windows"
+        "CMAKE_PREFIX_PATH": "${sourceDir}/vcpkg/installed/x64-windows",
+        "OPENSSL_ROOT_DIR": "${sourceDir}/vcpkg/installed/x64-windows",
+        "OPENSSL_USE_STATIC_LIBS": "OFF",
+        "Boost_ROOT": "${sourceDir}/vcpkg/installed/x64-windows",
+        "Boost_NO_SYSTEM_PATHS": "ON",
+        "Boost_USE_STATIC_LIBS": "ON",
+        "Boost_USE_MULTITHREADED": "ON",
+        "Boost_USE_STATIC_RUNTIME": "OFF"
       },
       "environment": {
-        "VCPKG_ROOT": "${sourceDir}/vcpkg",
-        "OPENSSL_ROOT_DIR": "${sourceDir}/vcpkg/installed/x64-windows"
+        "VCPKG_ROOT": "${sourceDir}/vcpkg"
       }
     },
     {
@@ -34,9 +42,7 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
         "CMAKE_CUDA_STANDARD": "20",
-        "CMAKE_CUDA_COMPILER": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe",
-        "UWEBSOCKETS_ROOT": "${sourceDir}/external/uWebSockets",
-        "USOCKETS_ROOT": "${sourceDir}/external/uSockets"
+        "CMAKE_CUDA_COMPILER": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe"
       }
     },
     {
@@ -49,9 +55,7 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CUDA_ARCHITECTURES": "86",
         "CMAKE_CUDA_STANDARD": "20",
-        "CMAKE_CUDA_COMPILER": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe",
-        "UWEBSOCKETS_ROOT": "${sourceDir}/external/uWebSockets",
-        "USOCKETS_ROOT": "${sourceDir}/external/uSockets"
+        "CMAKE_CUDA_COMPILER": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/bin/nvcc.exe"
       }
     },
     {
@@ -67,9 +71,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
-        "CMAKE_CUDA_STANDARD": "20",
-        "UWEBSOCKETS_ROOT": "${sourceDir}/external/uWebSockets",
-        "USOCKETS_ROOT": "${sourceDir}/external/uSockets"
+        "CMAKE_CUDA_STANDARD": "20"
       }
     },
     {
@@ -83,9 +85,7 @@
         "CMAKE_CXX_COMPILER": "g++",
         "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
         "CMAKE_CUDA_STANDARD": "20",
-        "CMAKE_CXX_STANDARD": "20",
-        "UWEBSOCKETS_ROOT": "${sourceDir}/external/uWebSockets",
-        "USOCKETS_ROOT": "${sourceDir}/external/uSockets"
+        "CMAKE_CXX_STANDARD": "20"
       }
     },
     {
@@ -100,9 +100,7 @@
         "CMAKE_CUDA_ARCHITECTURES": "50;52;60;61;70;75;80;86;89;90",
         "CMAKE_CUDA_STANDARD": "20",
         "CMAKE_CXX_STANDARD": "20",
-        "CMAKE_CUDA_HOST_COMPILER": "clang++",
-        "UWEBSOCKETS_ROOT": "${sourceDir}/external/uWebSockets",
-        "USOCKETS_ROOT": "${sourceDir}/external/uSockets"
+        "CMAKE_CUDA_HOST_COMPILER": "clang++"
       }
     },
     {
@@ -117,9 +115,7 @@
         "CMAKE_CXX_STANDARD": "20",
         "USE_HIP": "ON",
         "ROCM_PATH": "/opt/rocm",
-        "HIP_ARCH": "gfx900,gfx906,gfx908,gfx90a,gfx1030,gfx1100",
-        "UWEBSOCKETS_ROOT": "${sourceDir}/external/uWebSockets",
-        "USOCKETS_ROOT": "${sourceDir}/external/uSockets"
+        "HIP_ARCH": "gfx900,gfx906,gfx908,gfx90a,gfx1030,gfx1100"
       },
       "environment": {
         "ROCM_PATH": "/opt/rocm",

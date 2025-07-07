@@ -23,9 +23,9 @@ find_package(Threads REQUIRED)
 
 # Find OpenSSL with vcpkg hints
 if (WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE)
-    # vcpkg should handle this, but sometimes needs help
-    set(OPENSSL_USE_STATIC_LIBS TRUE)
-    set(OPENSSL_MSVC_STATIC_RT TRUE)
+    # vcpkg on Windows builds OpenSSL as dynamic by default
+    set(OPENSSL_USE_STATIC_LIBS OFF)
+    set(OPENSSL_MSVC_STATIC_RT OFF)
 endif ()
 
 # Additional search paths for OpenSSL
@@ -86,6 +86,7 @@ endif ()
 set(INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(MINER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include/miner)
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
+set(NET_DIR ${CMAKE_CURRENT_SOURCE_DIR}/net)
 
 # uWebSockets configuration
 find_path(UWEBSOCKETS_INCLUDE_DIR
@@ -279,8 +280,8 @@ add_executable(sha1_miner
         ${SRC_DIR}/mining_system.cpp
         ${SRC_DIR}/multi_gpu_manager.cpp
         ${SRC_DIR}/globals.cpp
-        ${SRC_DIR}/pool_client.cpp
-        ${SRC_DIR}/pool_integration.cpp
+        ${NET_DIR}/pool_client.cpp
+        ${NET_DIR}/pool_integration.cpp
         ${MINER_DIR}/kernel_launcher.cpp
 )
 
@@ -294,6 +295,7 @@ set_target_properties(sha1_miner PROPERTIES
 target_include_directories(sha1_miner PRIVATE
         ${INCLUDE_DIR}
         ${MINER_DIR}
+        ${NET_DIR}
         ${GPU_INCLUDES}
         ${UWEBSOCKETS_INCLUDE_DIR}
         ${USOCKETS_INCLUDE_DIR}
