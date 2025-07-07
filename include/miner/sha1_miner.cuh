@@ -17,13 +17,11 @@
 #define MAX_CANDIDATES_PER_BATCH 1024
 
 #ifdef USE_HIP
-    // AMD GPUs benefit from different tuning
-    #define NONCES_PER_THREAD 64  // AMD prefers fewer nonces per thread
-    #define DEFAULT_THREADS_PER_BLOCK 1024
+    #define NONCES_PER_THREAD 4096  // Reasonable for AMD
+    #define DEFAULT_THREADS_PER_BLOCK 256
 #else
-// NVIDIA GPUs can handle more work per thread
-#define NONCES_PER_THREAD 64
-#define DEFAULT_THREADS_PER_BLOCK 1024
+#define NONCES_PER_THREAD 8192  // NVIDIA can handle more
+#define DEFAULT_THREADS_PER_BLOCK 256
 #endif
 
 // Debug mode flag
