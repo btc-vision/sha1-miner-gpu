@@ -41,24 +41,54 @@ if (GPU_BACKEND STREQUAL "HIP")
         set(ROCM_PATH "/opt/rocm")
     endif ()
 
-    # Get HIP architectures
+    # Get HIP architectures - FIXED VERSION
     if (NOT HIP_ARCH)
-        set(HIP_ARCH "gfx1010;gfx1030;gfx1100;gfx1101;gfx1102;gfx1012;gfx906;gfx900")
+        # Default architectures - using correct target IDs
+        set(HIP_ARCH_LIST
+                "gfx900"    # Vega 10
+                "gfx906"    # Vega 20
+                "gfx908"    # MI100
+                "gfx90a"    # MI200
+                "gfx940"    # MI300
+                "gfx1010"   # RDNA1 - Navi 10
+                "gfx1012"   # RDNA1 - Navi 14
+                "gfx1030"   # RDNA2 - Navi 21
+                "gfx1031"   # RDNA2 - Navi 22
+                "gfx1032"   # RDNA2 - Navi 23
+                "gfx1034"   # RDNA2 - Navi 24
+                "gfx1035"   # RDNA2 - Rembrandt
+                "gfx1036"   # RDNA2 - Raphael
+                "gfx1100"   # RDNA3 - Navi 31
+                "gfx1101"   # RDNA3 - Navi 32
+                "gfx1102"   # RDNA3 - Navi 33
+                "gfx1103"   # RDNA3 - Phoenix
+        )
+        string(REPLACE ";" "," HIP_ARCH "${HIP_ARCH_LIST}")
     endif ()
+
+    # Convert semicolon-separated list to comma-separated for hipcc
     string(REPLACE ";" "," HIP_ARCH_FLAGS "${HIP_ARCH}")
+
+    # Split architectures into separate --offload-arch flags
+    string(REPLACE "," ";" HIP_ARCH_LIST "${HIP_ARCH}")
+    set(HIP_OFFLOAD_ARCH_FLAGS "")
+    foreach (arch IN LISTS HIP_ARCH_LIST)
+        string(STRIP ${arch} arch)
+        set(HIP_OFFLOAD_ARCH_FLAGS "${HIP_OFFLOAD_ARCH_FLAGS} --offload-arch=${arch}")
+    endforeach ()
 
     # Compile HIP kernel with custom command
     add_custom_command(
             OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/hip_kernel.o
             COMMAND ${ROCM_PATH}/bin/hipcc
             -O3 -ffast-math -fno-gpu-rdc -fPIC
-            --offload-arch=${HIP_ARCH_FLAGS}
+            ${HIP_OFFLOAD_ARCH_FLAGS}
             -I${INCLUDE_DIR} -I${MINER_DIR}
             -DUSE_HIP -D__HIP_PLATFORM_AMD__
             -c ${MINER_DIR}/sha1_kernel_amd.hip.cpp
             -o ${CMAKE_CURRENT_BINARY_DIR}/hip_kernel.o
             DEPENDS ${MINER_DIR}/sha1_kernel_amd.hip.cpp
-            COMMENT "Compiling HIP kernel"
+            COMMENT "Compiling HIP kernel for architectures: ${HIP_ARCH}"
             VERBATIM
     )
 
@@ -80,6 +110,7 @@ if (GPU_BACKEND STREQUAL "HIP")
     message(STATUS "Building with HIP/ROCm for AMD GPUs")
     message(STATUS "  ROCm path: ${ROCM_PATH}")
     message(STATUS "  HIP architectures: ${HIP_ARCH}")
+    message(STATUS "  HIP offload flags: ${HIP_OFFLOAD_ARCH_FLAGS}")
 
 else ()
     # NVIDIA/CUDA Build - WITH ALL OPTIMIZATIONS
