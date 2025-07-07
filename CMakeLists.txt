@@ -1,15 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-
-# Detect if we should use HIP or CUDA
-option(USE_HIP "Use HIP for AMD GPUs instead of CUDA" OFF)
-
-if (USE_HIP)
-    project(SHA1NearCollisionMiner LANGUAGES CXX)
-    set(GPU_BACKEND "HIP")
-else ()
-    project(SHA1NearCollisionMiner LANGUAGES CXX CUDA)
-    set(GPU_BACKEND "CUDA")
-endif ()
+project(SHA1OpenCLMiner LANGUAGES CXX)
 
 # C++ Standard
 set(CMAKE_CXX_STANDARD 20)
@@ -17,6 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Export compile commands
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Find OpenCL
+find_package(OpenCL REQUIRED)
 
 # Platform-specific optimization flags
 if (MSVC)
@@ -27,197 +20,48 @@ else ()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native -ffast-math -funroll-loops -finline-functions")
     set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
+
+    # Add OpenCL specific flags for better compatibility
+    if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations")
+    endif ()
 endif ()
 
-# Directories
-set(INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
-set(MINER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include/miner)
-set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
-
-if (GPU_BACKEND STREQUAL "HIP")
-    # AMD/HIP Build
-    set(ROCM_PATH $ENV{ROCM_PATH})
-    if (NOT ROCM_PATH)
-        set(ROCM_PATH "/opt/rocm")
-    endif ()
-
-    # Get HIP architectures - FIXED VERSION
-    if (NOT HIP_ARCH)
-        # Default architectures - using correct target IDs
-        set(HIP_ARCH_LIST
-                "gfx900"    # Vega 10
-                "gfx906"    # Vega 20
-                "gfx908"    # MI100
-                "gfx90a"    # MI200
-                "gfx940"    # MI300
-                "gfx1010"   # RDNA1 - Navi 10
-                "gfx1012"   # RDNA1 - Navi 14
-                "gfx1030"   # RDNA2 - Navi 21
-                "gfx1031"   # RDNA2 - Navi 22
-                "gfx1032"   # RDNA2 - Navi 23
-                "gfx1034"   # RDNA2 - Navi 24
-                "gfx1035"   # RDNA2 - Rembrandt
-                "gfx1036"   # RDNA2 - Raphael
-                "gfx1100"   # RDNA3 - Navi 31
-                "gfx1101"   # RDNA3 - Navi 32
-                "gfx1102"   # RDNA3 - Navi 33
-                "gfx1103"   # RDNA3 - Phoenix
-                "gfx1200"   # RDNA4 - Navi 44 (RX 9070 XT)
-                "gfx1201"   # RDNA4 - Navi 48 (RX 9070)
-        )
-        string(REPLACE ";" "," HIP_ARCH "${HIP_ARCH_LIST}")
-    endif ()
-
-    # Convert semicolon-separated list to comma-separated for hipcc
-    string(REPLACE ";" "," HIP_ARCH_FLAGS "${HIP_ARCH}")
-
-    # Split architectures into separate --offload-arch flags
-    string(REPLACE "," ";" HIP_ARCH_LIST "${HIP_ARCH}")
-    set(HIP_OFFLOAD_ARCH_FLAGS "")
-    foreach (arch IN LISTS HIP_ARCH_LIST)
-        string(STRIP ${arch} arch)
-        list(APPEND HIP_OFFLOAD_ARCH_FLAGS "--offload-arch=${arch}")
-    endforeach ()
-
-    # Compile HIP kernel with custom command
-    add_custom_command(
-            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/hip_kernel.o
-            COMMAND ${ROCM_PATH}/bin/hipcc
-            -O3 -ffast-math -fno-gpu-rdc -fPIC
-            ${HIP_OFFLOAD_ARCH_FLAGS}
-            -I${INCLUDE_DIR} -I${MINER_DIR}
-            -DUSE_HIP -D__HIP_PLATFORM_AMD__
-            -c ${MINER_DIR}/sha1_kernel_amd.hip.cpp
-            -o ${CMAKE_CURRENT_BINARY_DIR}/hip_kernel.o
-            DEPENDS ${MINER_DIR}/sha1_kernel_amd.hip.cpp
-            COMMENT "Compiling HIP kernel for architectures: ${HIP_ARCH}"
-            VERBATIM
-    )
-
-    # Custom target for HIP kernel
-    add_custom_target(hip_kernel_target ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/hip_kernel.o)
-
-    set(GPU_INCLUDES ${ROCM_PATH}/include)
-    set(GPU_LIBRARIES
-            ${ROCM_PATH}/lib/libamdhip64.so
-            ${ROCM_PATH}/lib/libhiprtc.so
-    )
-    if (EXISTS ${ROCM_PATH}/lib/librocm_smi64.so)
-        list(APPEND GPU_LIBRARIES ${ROCM_PATH}/lib/librocm_smi64.so)
-        add_definitions(-DHAS_ROCM_SMI)
-    endif ()
-    set(GPU_DEFINES -DUSE_HIP -D__HIP_PLATFORM_AMD__)
-    set(KERNEL_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/hip_kernel.o)
-
-    message(STATUS "Building with HIP/ROCm for AMD GPUs")
-    message(STATUS "  ROCm path: ${ROCM_PATH}")
-    message(STATUS "  HIP architectures: ${HIP_ARCH}")
-    message(STATUS "  HIP offload flags: ${HIP_OFFLOAD_ARCH_FLAGS}")
-
-else ()
-    # NVIDIA/CUDA Build - WITH ALL OPTIMIZATIONS
-    enable_language(CUDA)
-    find_package(CUDAToolkit REQUIRED)
-
-    # Set CUDA architectures
-    if (NOT CMAKE_CUDA_ARCHITECTURES)
-        set(CMAKE_CUDA_ARCHITECTURES "50;52;60;61;70;75;80;86;89;90")
-        if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.0")
-            list(APPEND CMAKE_CUDA_ARCHITECTURES "90a")
-        endif ()
-    endif ()
-
-    # CUDA compilation flags - ALL OPTIMIZATIONS
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math")
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xptxas -O3,-dlcm=ca,-dscm=wt")
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --extra-device-vectorization")
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --optimize 3")
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")
-    set(CMAKE_CUDA_FLAGS_RELEASE "-O3")
-    set(CMAKE_CUDA_FLAGS_DEBUG "-g -G")
-    set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
-
-    # Create CUDA kernel library with all optimizations
-    add_library(gpu_kernel STATIC ${MINER_DIR}/sha1_kernel.cu)
-    set_target_properties(gpu_kernel PROPERTIES
-            CUDA_SEPARABLE_COMPILATION ON
-            CUDA_RESOLVE_DEVICE_SYMBOLS ON
-            CUDA_STANDARD 17
-            CUDA_STANDARD_REQUIRED ON
-            POSITION_INDEPENDENT_CODE ON
-    )
-    target_include_directories(gpu_kernel PRIVATE ${INCLUDE_DIR} ${MINER_DIR})
-
-    # Additional CUDA optimizations
-    target_compile_options(gpu_kernel PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
-            $<$<COMPILE_LANGUAGE:CUDA>:--extra-device-vectorization>
-    )
-
-    set(GPU_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
-    set(GPU_LIBRARIES gpu_kernel CUDA::cudart_static CUDA::cuda_driver)
-    set(GPU_DEFINES "")
-    set(KERNEL_OBJECT "")
-
-    message(STATUS "Building with CUDA for NVIDIA GPUs")
-    message(STATUS "  CUDA version: ${CUDAToolkit_VERSION}")
-    message(STATUS "  CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
-    message(STATUS "  CUDA flags: ${CMAKE_CUDA_FLAGS}")
-endif ()
-
-# Create main executable with all sources
-add_executable(sha1_miner
-        ${SRC_DIR}/main.cpp
-        ${SRC_DIR}/mining_system.cpp
-        ${SRC_DIR}/multi_gpu_manager.cpp
-        ${SRC_DIR}/globals.cpp
-        ${MINER_DIR}/kernel_launcher.cpp
+# Source files
+set(SOURCES
+        src/main_opencl.cpp
+        include/sha1_opencl_miner.cpp
 )
 
-# Set properties
-set_target_properties(sha1_miner PROPERTIES
-        LINKER_LANGUAGE CXX
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+# Header files
+set(HEADERS
+        include/sha1_opencl_miner.hpp
+        include/cxxsha1.hpp
 )
+
+# Create executable
+add_executable(sha1_opencl_miner ${SOURCES} ${HEADERS})
 
 # Include directories
-target_include_directories(sha1_miner PRIVATE
-        ${INCLUDE_DIR}
-        ${MINER_DIR}
-        ${GPU_INCLUDES}
+target_include_directories(sha1_opencl_miner PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${OpenCL_INCLUDE_DIRS}
 )
 
-# Compile definitions
-target_compile_definitions(sha1_miner PRIVATE ${GPU_DEFINES})
+# Link libraries
+target_link_libraries(sha1_opencl_miner PRIVATE
+        ${OpenCL_LIBRARIES}
+)
 
-# Apply C++ optimizations
-if (NOT MSVC)
-    target_compile_options(sha1_miner PRIVATE
-            $<$<CONFIG:Release>:-O3 -march=native -mtune=native -ffast-math -funroll-loops>
-            $<$<CONFIG:Debug>:-O0 -g>
-    )
-endif ()
-
-# Linking
+# Find Threads
 find_package(Threads REQUIRED)
-if (GPU_BACKEND STREQUAL "HIP")
-    add_dependencies(sha1_miner hip_kernel_target)
-    target_link_libraries(sha1_miner PRIVATE
-            ${KERNEL_OBJECT}
-            ${GPU_LIBRARIES}
-            Threads::Threads
-    )
-else ()
-    target_link_libraries(sha1_miner PRIVATE
-            ${GPU_LIBRARIES}
-            Threads::Threads
-    )
+target_link_libraries(sha1_opencl_miner PRIVATE Threads::Threads)
 
-    # For CUDA, also handle separable compilation
-    set_target_properties(sha1_miner PROPERTIES
-            CUDA_SEPARABLE_COMPILATION ON
-            CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    )
+# Platform-specific libraries
+if (WIN32)
+    target_link_libraries(sha1_opencl_miner PRIVATE ws2_32)
+elseif (UNIX AND NOT APPLE)
+    target_link_libraries(sha1_opencl_miner PRIVATE dl)
 endif ()
 
 # Enable link-time optimization for release builds
@@ -225,13 +69,14 @@ if (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDeb
     include(CheckIPOSupported)
     check_ipo_supported(RESULT ipo_supported)
     if (ipo_supported)
-        set_property(TARGET sha1_miner PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-        if (GPU_BACKEND STREQUAL "CUDA")
-            set_property(TARGET gpu_kernel PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-        endif ()
+        set_property(TARGET sha1_opencl_miner PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
         message(STATUS "Link-time optimization enabled")
     endif ()
 endif ()
+
+# Copy OpenCL kernel file to build directory (if using external file)
+# configure_file(${CMAKE_CURRENT_SOURCE_DIR}/sha1_kernel.cl
+#                ${CMAKE_CURRENT_BINARY_DIR}/sha1_kernel.cl COPYONLY)
 
 # Set default build type
 if (NOT CMAKE_BUILD_TYPE)
@@ -239,15 +84,30 @@ if (NOT CMAKE_BUILD_TYPE)
 endif ()
 
 # Install
-install(TARGETS sha1_miner RUNTIME DESTINATION bin)
+install(TARGETS sha1_opencl_miner RUNTIME DESTINATION bin)
 
 # Summary
 message(STATUS "")
 message(STATUS "Build Configuration:")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "  GPU Backend: ${GPU_BACKEND}")
 message(STATUS "  C++ Compiler: ${CMAKE_CXX_COMPILER}")
-if (GPU_BACKEND STREQUAL "CUDA")
-    message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
-endif ()
+message(STATUS "  OpenCL found: ${OpenCL_FOUND}")
+message(STATUS "  OpenCL Include: ${OpenCL_INCLUDE_DIRS}")
+message(STATUS "  OpenCL Libraries: ${OpenCL_LIBRARIES}")
 message(STATUS "")
+
+# Add custom target to run the miner with default settings
+add_custom_target(run
+        COMMAND sha1_opencl_miner --list
+        DEPENDS sha1_opencl_miner
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+        COMMENT "Running SHA-1 OpenCL miner - listing devices"
+)
+
+# Add custom target for benchmark
+add_custom_target(benchmark
+        COMMAND sha1_opencl_miner --benchmark --all-gpus
+        DEPENDS sha1_opencl_miner
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+        COMMENT "Running SHA-1 OpenCL miner benchmark"
+)
