@@ -23,7 +23,7 @@ __device__ __forceinline__ uint32_t count_leading_zeros_160bit_amd(
     const uint32_t target[5]
 ) {
     uint32_t total_bits = 0;
- // Use vector operations where possible
+    // Use vector operations where possible
 #pragma unroll
     for (int i = 0; i < 5; i++) {
         uint32_t xor_val = hash[i] ^ target[i];

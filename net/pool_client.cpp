@@ -1,9 +1,7 @@
-// pool_client.cpp - Fixed version with proper uWebSockets usage
 #include "pool_client.hpp"
 #include <iostream>
-#include <iomanip>
 #include <regex>
-#include <uwebsockets/App.h>
+#include <uWebSockets/App.h>
 
 namespace MiningPool {
     // ParsedUrl implementation
