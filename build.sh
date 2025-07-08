@@ -1,6 +1,10 @@
 #!/bin/bash
+#
+# SHA-1 OP_NET Miner - Build Script for Linux
+# Supports both NVIDIA CUDA and AMD ROCm GPUs
+#
 
-# Build script for SHA-1 miner with AMD/NVIDIA GPU support
+set -e
 
 # Colors for output
 RED='\033[0;31m'
@@ -9,9 +13,13 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Function to print colored output
+# Print colored output
 print_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
 
 print_error() {
@@ -22,66 +30,51 @@ print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
-print_debug() {
-    echo -e "${BLUE}[DEBUG]${NC} $1"
-}
+# Default settings
+BUILD_TYPE="Release"
+GPU_TYPE=""
+HIP_ARCH=""
+CMAKE_ARGS=""
+THREADS=$(nproc)
+CLEAN_BUILD=0
 
 # Parse command line arguments
-GPU_TYPE=""
-BUILD_TYPE="Release"
-CLEAN_BUILD=0
-HIP_ARCH=""
-VERBOSE=0
-DEBUG_BUILD=0
-SPECIFIC_ARCH=0
-
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --amd|--hip)
-            GPU_TYPE="AMD"
-            shift
-            ;;
-        --nvidia|--cuda)
-            GPU_TYPE="NVIDIA"
-            shift
-            ;;
         --debug)
             BUILD_TYPE="Debug"
-            DEBUG_BUILD=1
             shift
+            ;;
+        --cuda)
+            GPU_TYPE="CUDA"
+            shift
+            ;;
+        --hip|--amd)
+            GPU_TYPE="HIP"
+            shift
+            ;;
+        --arch)
+            HIP_ARCH="$2"
+            shift 2
             ;;
         --clean)
             CLEAN_BUILD=1
             shift
             ;;
-        --hip-arch)
-            HIP_ARCH="$2"
-            SPECIFIC_ARCH=1
+        --threads|-j)
+            THREADS="$2"
             shift 2
             ;;
-        --verbose|-v)
-            VERBOSE=1
-            shift
-            ;;
         --help|-h)
-            echo "Usage: $0 [OPTIONS]"
+            echo "Usage: $0 [options]"
             echo "Options:"
-            echo "  --amd, --hip       Build for AMD GPUs using HIP"
-            echo "  --nvidia, --cuda   Build for NVIDIA GPUs using CUDA"
-            echo "  --debug            Build in debug mode"
-            echo "  --clean            Clean build directory before building"
-            echo "  --hip-arch ARCH    Specify HIP architecture (e.g., gfx1030)"
-            echo "                     Multiple architectures: --hip-arch 'gfx1030;gfx1100'"
-            echo "  --verbose, -v      Verbose output"
-            echo "  --help, -h         Show this help message"
-            echo ""
-            echo "Common AMD architectures:"
-            echo "  gfx900  - Vega 10 (Vega 56/64)"
-            echo "  gfx906  - Vega 20 (Radeon VII)"
-            echo "  gfx1010 - RDNA1 (RX 5700 XT)"
-            echo "  gfx1030 - RDNA2 (RX 6800/6900)"
-            echo "  gfx1100 - RDNA3 (RX 7900 XTX)"
-            echo "  gfx1200 - RDNA4 (RX 9070 XT)"
+            echo "  --debug           Build in debug mode"
+            echo "  --cuda            Force CUDA build (NVIDIA)"
+            echo "  --hip, --amd      Force HIP build (AMD)"
+            echo "  --arch <arch>     Specify AMD GPU architecture (e.g., gfx1030)"
+            echo "  --clean           Clean build directory before building"
+            echo "  --threads, -j N   Number of build threads (default: $(nproc))"
+            echo "  --help, -h        Show this help message"
             exit 0
             ;;
         *)
@@ -91,256 +84,180 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Function to check ROCm installation
-check_rocm() {
+# Auto-detect GPU type if not specified
+if [ -z "$GPU_TYPE" ]; then
+    print_info "Auto-detecting GPU type..."
+
+    # Check for NVIDIA GPU
+    if command -v nvidia-smi &> /dev/null; then
+        if nvidia-smi &> /dev/null; then
+            GPU_TYPE="CUDA"
+            print_info "Detected NVIDIA GPU"
+        fi
+    fi
+
+    # Check for AMD GPU
+    if [ -z "$GPU_TYPE" ]; then
+        if [ -d /opt/rocm ] || command -v rocm-smi &> /dev/null; then
+            # Check if AMD GPU is actually present
+            if [ -f /sys/class/kfd/kfd/topology/nodes/1/gpu_id ] || \
+               (command -v rocm-smi &> /dev/null && rocm-smi --showid 2>/dev/null | grep -q "GPU"); then
+                GPU_TYPE="HIP"
+                print_info "Detected AMD GPU"
+            fi
+        fi
+    fi
+
+    if [ -z "$GPU_TYPE" ]; then
+        print_error "No supported GPU detected. Please install CUDA (NVIDIA) or ROCm (AMD)."
+        print_info "You can force a build type with --cuda or --hip"
+        exit 1
+    fi
+fi
+
+# AMD-specific setup
+if [ "$GPU_TYPE" = "HIP" ]; then
+    # Find ROCm installation
     if [ -n "$ROCM_PATH" ]; then
         print_info "Using ROCM_PATH: $ROCM_PATH"
-    elif [ -d "/opt/rocm" ]; then
-        export ROCM_PATH="/opt/rocm"
-        print_info "Found ROCm at: $ROCM_PATH"
+    elif [ -d /opt/rocm ]; then
+        export ROCM_PATH=/opt/rocm
+        print_info "Using ROCM_PATH: $ROCM_PATH"
     else
         print_error "ROCm not found. Please install ROCm or set ROCM_PATH"
-        return 1
+        exit 1
     fi
 
     # Check ROCm version
     if [ -f "$ROCM_PATH/.info/version" ]; then
         ROCM_VERSION=$(cat "$ROCM_PATH/.info/version")
         print_info "ROCm version: $ROCM_VERSION"
-
-        # Extract major.minor version
-        ROCM_MAJOR=$(echo $ROCM_VERSION | cut -d. -f1)
-        ROCM_MINOR=$(echo $ROCM_VERSION | cut -d. -f2)
-
-        # Check if version is sufficient for RDNA3
-        if [ "$ROCM_MAJOR" -lt 5 ] || ([ "$ROCM_MAJOR" -eq 5 ] && [ "$ROCM_MINOR" -lt 7 ]); then
-            print_warning "ROCm version $ROCM_VERSION detected. RDNA3 GPUs require 5.7 or later."
-            print_warning "You may experience issues with gfx11xx architectures."
-        fi
     fi
 
-    return 0
-}
-
-# Function to detect AMD GPU architectures
-detect_amd_gpus() {
-    if command -v rocminfo &> /dev/null; then
+    # Auto-detect AMD GPU architecture if not specified
+    if [ -z "$HIP_ARCH" ]; then
         print_info "Detecting AMD GPUs..."
 
-        # Get all GPU architectures - fixed to avoid partial matches
-        # Look for architecture names at the beginning of lines (GPU names)
-        DETECTED_ARCHS=$(rocminfo 2>/dev/null | grep "^  Name:" | grep -oP 'gfx\d{4}\b' | sort -u | grep -v "gfx000")
+        # Try using rocminfo
+        if command -v rocminfo &> /dev/null; then
+            # Extract gfx architectures from rocminfo
+            DETECTED_ARCHS=$(rocminfo 2>/dev/null | grep -E "^\s*Name:\s+gfx" | sed 's/.*gfx/gfx/' | sort -u | tr '\n' ',')
+            # Remove trailing comma
+            DETECTED_ARCHS=${DETECTED_ARCHS%,}
+        fi
 
-        # If no 4-digit architectures found, try 3-digit (older GPUs)
-        if [ -z "$DETECTED_ARCHS" ]; then
-            DETECTED_ARCHS=$(rocminfo 2>/dev/null | grep "^  Name:" | grep -oP 'gfx\d{3}\b' | sort -u)
+        # Fallback to rocm-smi if rocminfo didn't work
+        if [ -z "$DETECTED_ARCHS" ] && command -v rocm-smi &> /dev/null; then
+            # Try to detect from device name
+            GPU_NAME=$(rocm-smi --showproductname 2>/dev/null | grep -E "Card series|GPU" | head -1)
+            case "$GPU_NAME" in
+                *"RX 5"*) DETECTED_ARCHS="gfx1010" ;;  # RDNA1
+                *"RX 6"*) DETECTED_ARCHS="gfx1030" ;;  # RDNA2
+                *"RX 7"*) DETECTED_ARCHS="gfx1100" ;;  # RDNA3
+                *"MI100"*) DETECTED_ARCHS="gfx908" ;;
+                *"MI200"*) DETECTED_ARCHS="gfx90a" ;;
+                *"MI300"*) DETECTED_ARCHS="gfx940" ;;
+            esac
         fi
 
         if [ -n "$DETECTED_ARCHS" ]; then
+            HIP_ARCH="$DETECTED_ARCHS"
             print_info "Detected AMD GPU architectures:"
-            for arch in $DETECTED_ARCHS; do
-                echo -n "  - $arch"
-
-                # Identify architecture family
-                case $arch in
-                    gfx120[0-9])
-                        echo " (RDNA4 - RX 9000 series)"
-                        ;;
-                    gfx110[0-3])
-                        echo " (RDNA3 - RX 7000 series)"
-                        ;;
-                    gfx103[0-6])
-                        echo " (RDNA2 - RX 6000 series)"
-                        ;;
-                    gfx101[0-2])
-                        echo " (RDNA1 - RX 5000 series)"
-                        ;;
-                    gfx90[0-9]|gfx90a)
-                        echo " (GCN5/Vega or CDNA)"
-                        ;;
-                    gfx80[0-9])
-                        echo " (GCN4/Polaris - RX 400/500)"
-                        ;;
-                    *)
-                        echo " (Unknown)"
-                        ;;
+            IFS=',' read -ra ARCH_ARRAY <<< "$HIP_ARCH"
+            for arch in "${ARCH_ARRAY[@]}"; do
+                case "$arch" in
+                    gfx900) echo "  - $arch (Vega 10)" ;;
+                    gfx906) echo "  - $arch (Vega 20)" ;;
+                    gfx908) echo "  - $arch (MI100)" ;;
+                    gfx90a) echo "  - $arch (MI200)" ;;
+                    gfx940) echo "  - $arch (MI300)" ;;
+                    gfx1010) echo "  - $arch (RDNA1 - RX 5000 series)" ;;
+                    gfx1030) echo "  - $arch (RDNA2 - RX 6000 series)" ;;
+                    gfx1100) echo "  - $arch (RDNA3 - RX 7000 series)" ;;
+                    *) echo "  - $arch" ;;
                 esac
             done
-
-            # If no specific architecture was requested, build for detected GPUs
-            if [ -z "$HIP_ARCH" ] && [ $SPECIFIC_ARCH -eq 0 ]; then
-                # Convert to semicolon-separated list
-                HIP_ARCH=$(echo $DETECTED_ARCHS | tr ' ' ';')
-                print_info "Will build for detected architectures: $HIP_ARCH"
-
-                # Check if RDNA4 is in the list
-                if echo "$HIP_ARCH" | grep -q "gfx120"; then
-                    print_warning "RDNA4 GPU detected. Ensure ROCm 6.2+ is installed for best compatibility."
-                fi
-
-                # Check if RDNA3 is in the list
-                if echo "$HIP_ARCH" | grep -q "gfx110"; then
-                    print_warning "RDNA3 GPU detected. Ensure ROCm 5.7+ is installed for best compatibility."
-                fi
-            fi
         else
-            print_warning "Could not detect AMD GPU architectures"
-            print_info "You may need to specify architectures manually with --hip-arch"
-        fi
-    else
-        print_warning "rocminfo not found. Cannot auto-detect GPU architectures."
-
-        if [ -z "$HIP_ARCH" ]; then
-            print_info "Using default architecture set (common AMD GPUs)"
-            HIP_ARCH="gfx906;gfx1010;gfx1030;gfx1100"
-        fi
-    fi
-}
-
-# Auto-detect GPU if not specified
-if [ -z "$GPU_TYPE" ]; then
-    print_info "Auto-detecting GPU type..."
-
-    # Check for NVIDIA GPU
-    if command -v nvidia-smi &> /dev/null; then
-        if nvidia-smi &> /dev/null 2>&1; then
-            GPU_TYPE="NVIDIA"
-            print_info "Detected NVIDIA GPU"
+            print_warning "Could not auto-detect AMD GPU architecture"
+            print_info "Please specify with --arch flag (e.g., --arch gfx1030)"
+            print_info "Common architectures:"
+            print_info "  gfx900  - Vega 10 (RX Vega 56/64)"
+            print_info "  gfx906  - Vega 20 (Radeon VII)"
+            print_info "  gfx1010 - RDNA1 (RX 5500/5600/5700)"
+            print_info "  gfx1030 - RDNA2 (RX 6000 series)"
+            print_info "  gfx1100 - RDNA3 (RX 7000 series)"
+            exit 1
         fi
     fi
 
-    # Check for AMD GPU
-    if [ -z "$GPU_TYPE" ] && command -v rocm-smi &> /dev/null; then
-        if rocm-smi &> /dev/null 2>&1; then
-            GPU_TYPE="AMD"
-            print_info "Detected AMD GPU"
-        fi
-    fi
-
-    if [ -z "$GPU_TYPE" ]; then
-        print_error "Could not auto-detect GPU type. Please specify --amd or --nvidia"
-        exit 1
-    fi
+    print_info "Will build for detected architectures: $HIP_ARCH"
 fi
 
-# Additional checks for AMD
-if [ "$GPU_TYPE" == "AMD" ]; then
-    if ! check_rocm; then
-        exit 1
-    fi
-
-    detect_amd_gpus
+# Create build directory
+BUILD_DIR="build"
+if [ "$BUILD_TYPE" = "Debug" ]; then
+    BUILD_DIR="build-debug"
 fi
 
-# Set build directory based on GPU type
-BUILD_DIR="build_${GPU_TYPE,,}"
-if [ $DEBUG_BUILD -eq 1 ]; then
-    BUILD_DIR="${BUILD_DIR}_debug"
-fi
-
-# Clean build directory if requested
-if [ $CLEAN_BUILD -eq 1 ]; then
+if [ $CLEAN_BUILD -eq 1 ] && [ -d "$BUILD_DIR" ]; then
     print_info "Cleaning build directory..."
     rm -rf "$BUILD_DIR"
 fi
 
-# Create build directory
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
-# Configure CMake based on GPU type
-print_info "Configuring for $GPU_TYPE GPUs..."
-
-CMAKE_ARGS="-DCMAKE_BUILD_TYPE=$BUILD_TYPE"
-
-if [ $VERBOSE -eq 1 ]; then
-    CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_VERBOSE_MAKEFILE=ON"
-fi
-
-if [ "$GPU_TYPE" == "AMD" ]; then
-    CMAKE_ARGS="$CMAKE_ARGS -DUSE_HIP=ON"
-
-    # Add HIP architecture if specified
-    if [ -n "$HIP_ARCH" ]; then
-        CMAKE_ARGS="$CMAKE_ARGS -DHIP_ARCH=\"$HIP_ARCH\""
-        print_info "Building for architectures: $HIP_ARCH"
-    fi
-
-    # Add debug flags for AMD
-    if [ $DEBUG_BUILD -eq 1 ]; then
-        CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CXX_FLAGS_DEBUG='-O0 -g -DDEBUG_SHA1'"
-    fi
+# Configure with CMake
+if [ "$GPU_TYPE" = "HIP" ]; then
+    print_info "Configuring for AMD GPUs..."
+    print_info "Building for architectures: $HIP_ARCH"
+    CMAKE_ARGS="-DCMAKE_BUILD_TYPE=$BUILD_TYPE -DUSE_HIP=ON -DHIP_ARCH=\"$HIP_ARCH\""
 else
-    CMAKE_ARGS="$CMAKE_ARGS -DUSE_HIP=OFF"
-
-    # Add debug flags for NVIDIA
-    if [ $DEBUG_BUILD -eq 1 ]; then
-        CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CUDA_FLAGS_DEBUG='-g -G -DDEBUG_SHA1'"
-    fi
+    print_info "Configuring for NVIDIA GPUs..."
+    CMAKE_ARGS="-DCMAKE_BUILD_TYPE=$BUILD_TYPE"
 fi
 
-# Run CMake
+# Add paths for uWebSockets and uSockets
+PROJECT_ROOT=$(dirname "$(pwd)")
+CMAKE_ARGS="$CMAKE_ARGS -DUWEBSOCKETS_INCLUDE_DIR=$PROJECT_ROOT/external/uWebSockets/src"
+CMAKE_ARGS="$CMAKE_ARGS -DUSOCKETS_INCLUDE_DIR=$PROJECT_ROOT/external/uSockets/src"
+
+# If uSockets was built, add the library path
+if [ -f "$PROJECT_ROOT/external/uSockets/uSockets.a" ]; then
+    CMAKE_ARGS="$CMAKE_ARGS -DUSOCKETS_LIB=$PROJECT_ROOT/external/uSockets/uSockets.a"
+fi
+
 print_info "Running CMake with args: $CMAKE_ARGS"
-if eval cmake .. $CMAKE_ARGS; then
-    print_info "CMake configuration successful"
-else
+eval cmake .. $CMAKE_ARGS
+
+if [ $? -ne 0 ]; then
     print_error "CMake configuration failed"
     exit 1
 fi
 
-# Get number of CPU cores for parallel build
-if command -v nproc &> /dev/null; then
-    NUM_CORES=$(nproc)
-else
-    NUM_CORES=4
-fi
+# Build
+print_info "Building with $THREADS threads..."
+make -j$THREADS
 
-# Build the project
-print_info "Building with $NUM_CORES parallel jobs..."
-if [ $VERBOSE -eq 1 ]; then
-    make -j$NUM_CORES VERBOSE=1
-else
-    make -j$NUM_CORES
-fi
-
-if [ $? -eq 0 ]; then
-    print_info "Build successful!"
-    print_info "Executable location: $(pwd)/sha1_miner"
-
-    # Print GPU-specific instructions
-    echo ""
-    if [ "$GPU_TYPE" == "AMD" ]; then
-        print_info "AMD GPU Usage Tips:"
-        echo "  - For RDNA3 GPUs (gfx11xx), ensure ROCm 5.7+ is installed"
-        echo "  - Use --all-gpus to mine on all available AMD GPUs"
-        echo "  - If a GPU fails, try reducing streams with manual config"
-        echo ""
-        if [ -n "$HIP_ARCH" ]; then
-            echo "  Built for architectures: $HIP_ARCH"
-        fi
-    else
-        print_info "NVIDIA GPU Usage Tips:"
-        echo "  - Use --all-gpus to mine on all available NVIDIA GPUs"
-        echo "  - Enable GPU boost for better performance"
-    fi
-
-    echo ""
-    print_info "Example commands:"
-    echo "  Single GPU:     ./$BUILD_DIR/sha1_miner --gpu 0 --duration 60 --difficulty 45"
-    echo "  All GPUs:       ./$BUILD_DIR/sha1_miner --all-gpus --duration 300 --difficulty 50"
-    echo "  Specific GPUs:  ./$BUILD_DIR/sha1_miner --gpus 0,1 --duration 300 --difficulty 50"
-    echo "  Benchmark:      ./$BUILD_DIR/sha1_miner --benchmark --auto-tune"
-    echo ""
-    print_info "For help: ./$BUILD_DIR/sha1_miner --help"
-else
+if [ $? -ne 0 ]; then
     print_error "Build failed"
-
-    if [ "$GPU_TYPE" == "AMD" ] && [ $VERBOSE -eq 0 ]; then
-        print_info "Try building with --verbose flag for more details"
-        print_info "Or specify your exact GPU architecture with --hip-arch"
-        echo ""
-        echo "Example: ./build.sh --amd --hip-arch gfx1030"
-    fi
-
     exit 1
 fi
+
+print_success "Build complete!"
+print_info "Executable: $BUILD_DIR/sha1_miner"
+
+# Print usage instructions
+echo
+echo "To run the miner:"
+if [ "$GPU_TYPE" = "HIP" ]; then
+    echo "  ./$BUILD_DIR/sha1_miner --gpu 0"
+    echo
+    echo "Note: You may need to set LD_LIBRARY_PATH:"
+    echo "  export LD_LIBRARY_PATH=$ROCM_PATH/lib:\$LD_LIBRARY_PATH"
+else
+    echo "  ./$BUILD_DIR/sha1_miner --gpu 0"
+fi
+echo
+echo "For help:"
+echo "  ./$BUILD_DIR/sha1_miner --help"

@@ -94,34 +94,45 @@ set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(NET_DIR ${CMAKE_CURRENT_SOURCE_DIR}/net)
 
 # uWebSockets configuration
-find_path(UWEBSOCKETS_INCLUDE_DIR
-        NAMES uwebsockets/App.h
-        PATHS
-        ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
-        ${CMAKE_PREFIX_PATH}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets
-        /usr/include
-        /usr/local/include
-)
+# Allow manual override via command line
+if (NOT UWEBSOCKETS_INCLUDE_DIR)
+    find_path(UWEBSOCKETS_INCLUDE_DIR
+            NAMES uwebsockets/App.h
+            PATHS
+            ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets
+            ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
+            ${CMAKE_PREFIX_PATH}/include
+            /usr/include
+            /usr/local/include
+    )
+endif ()
 
-find_path(USOCKETS_INCLUDE_DIR
-        NAMES libusockets.h
-        PATHS
-        ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
-        ${CMAKE_PREFIX_PATH}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/uSockets/src
-        /usr/include
-        /usr/local/include
-)
+if (NOT USOCKETS_INCLUDE_DIR)
+    find_path(USOCKETS_INCLUDE_DIR
+            NAMES libusockets.h
+            PATHS
+            ${CMAKE_CURRENT_SOURCE_DIR}/external/uSockets/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/external/uSockets
+            ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
+            ${CMAKE_PREFIX_PATH}/include
+            /usr/include
+            /usr/local/include
+    )
+endif ()
 
-# Find uSockets library if using vcpkg
-find_library(USOCKETS_LIB
-        NAMES uSockets usockets
-        PATHS
-        ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib
-        ${CMAKE_PREFIX_PATH}/lib
-)
+# Find uSockets library
+if (NOT USOCKETS_LIB)
+    find_library(USOCKETS_LIB
+            NAMES uSockets usockets
+            PATHS
+            ${CMAKE_CURRENT_SOURCE_DIR}/external/uSockets
+            ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib
+            ${CMAKE_PREFIX_PATH}/lib
+            /usr/local/lib
+            /usr/lib
+    )
+endif ()
 
 # Find libuv (required by uSockets)
 find_package(libuv CONFIG QUIET)
@@ -316,6 +327,9 @@ endif ()
 set(POOL_SOURCES "")
 if (EXISTS ${NET_DIR}/pool_protocol.cpp)
     list(APPEND POOL_SOURCES ${NET_DIR}/pool_protocol.cpp)
+endif ()
+if (EXISTS ${NET_DIR}/pool_utils.cpp)
+    list(APPEND POOL_SOURCES ${NET_DIR}/pool_utils.cpp)
 endif ()
 
 # Create main executable with all sources
