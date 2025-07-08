@@ -21,6 +21,25 @@
 #include <sys/stat.h>
 #endif
 
+#ifdef _WIN32
+#include <fcntl.h>
+
+void setup_console_encoding() {
+    // Set console code page to UTF-8
+    SetConsoleCP(CP_UTF8);
+    SetConsoleOutputCP(CP_UTF8);
+
+    // Enable UTF-8 for C++ streams
+    std::locale::global(std::locale(""));
+}
+#else
+void setup_console_encoding() {
+    // Unix systems usually handle UTF-8 properly by default
+    std::locale::global(std::locale(""));
+}
+#endif
+
+
 namespace po = boost::program_options;
 
 // Advanced configuration for production mining
@@ -593,6 +612,9 @@ int run_pool_mining(const MiningConfig &config) {
 
 // Main program
 int main(int argc, char *argv[]) {
+    // Set up UTF-8 encoding for console output
+    setup_console_encoding();
+
     // Set up signal handlers
     setup_signal_handlers();
 

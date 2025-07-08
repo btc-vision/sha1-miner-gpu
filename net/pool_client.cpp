@@ -62,86 +62,112 @@ namespace MiningPool {
         try {
             auto parsed = parse_url(config_.url);
 
-            // Start auxiliary threads first
+            // IMPORTANT: Start the IO thread FIRST before any other operations
+            io_thread_ = std::make_unique<std::thread>(&PoolClient::io_loop, this);
+            // Give IO thread time to start
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+            // Then start auxiliary threads
             message_processor_thread_ = std::thread(&PoolClient::message_processor_loop, this);
             keepalive_thread_ = std::thread(&PoolClient::keepalive_loop, this);
-
-            // Start IO thread
-            io_thread_ = std::make_unique<std::thread>(&PoolClient::io_loop, this);
 
             // Add DNS resolution debugging
             std::cout << "Resolving host: " << parsed.host << ":" << parsed.port << std::endl;
 
-            // Resolve host
-            tcp::resolver resolver{ioc_};
-            boost::system::error_code ec;
-            auto const results = resolver.resolve(parsed.host, parsed.port, ec);
+            // Create a promise/future to synchronize the connection
+            std::promise<bool> connection_promise;
+            auto connection_future = connection_promise.get_future();
 
-            if (ec) {
-                throw std::runtime_error("Failed to resolve host: " + parsed.host + " - " + ec.message());
-            }
+            // Post the connection work to the io_context
+            net::post(ioc_, [this, parsed, &connection_promise]() {
+                try {
+                    // Resolve host
+                    tcp::resolver resolver{ioc_};
+                    boost::system::error_code ec;
+                    auto const results = resolver.resolve(parsed.host, parsed.port, ec);
 
-            if (results.empty()) {
-                throw std::runtime_error("Failed to resolve host: " + parsed.host);
-            }
+                    if (ec) {
+                        throw std::runtime_error("Failed to resolve host: " + parsed.host + " - " + ec.message());
+                    }
 
-            // Print resolved addresses
-            for (auto const &endpoint: results) {
-                std::cout << "Resolved to: " << endpoint.endpoint().address().to_string()
-                        << ":" << endpoint.endpoint().port() << std::endl;
-            }
+                    if (results.empty()) {
+                        throw std::runtime_error("Failed to resolve host: " + parsed.host);
+                    }
 
-            if (config_.use_tls) {
-                // Initialize SSL context
-                ssl_ctx_.set_verify_mode(config_.verify_server_cert ? ssl::verify_peer : ssl::verify_none);
-                if (!config_.tls_cert_file.empty() && !config_.tls_key_file.empty()) {
-                    ssl_ctx_.use_certificate_file(config_.tls_cert_file, ssl::context::pem);
-                    ssl_ctx_.use_private_key_file(config_.tls_key_file, ssl::context::pem);
+                    // Print resolved addresses
+                    for (auto const &endpoint: results) {
+                        std::cout << "Resolved to: " << endpoint.endpoint().address().to_string()
+                                << ":" << endpoint.endpoint().port() << std::endl;
+                    }
+
+                    if (config_.use_tls) {
+                        // Initialize SSL context
+                        ssl_ctx_.set_verify_mode(config_.verify_server_cert ? ssl::verify_peer : ssl::verify_none);
+                        if (!config_.tls_cert_file.empty() && !config_.tls_key_file.empty()) {
+                            ssl_ctx_.use_certificate_file(config_.tls_cert_file, ssl::context::pem);
+                            ssl_ctx_.use_private_key_file(config_.tls_key_file, ssl::context::pem);
+                        }
+
+                        // Create SSL stream
+                        wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket> > >(ioc_, ssl_ctx_);
+
+                        // Connect TCP socket
+                        beast::get_lowest_layer(*wss_).connect(results.begin()->endpoint());
+
+                        // Perform SSL handshake
+                        wss_->next_layer().handshake(ssl::stream_base::client);
+
+                        // Set WebSocket options
+                        wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+                        wss_->set_option(websocket::stream_base::decorator(
+                            [](websocket::request_type &req) {
+                                req.set(http::field::user_agent, "SHA1-Miner/1.0 Boost.Beast");
+                            }));
+
+                        // Perform WebSocket handshake
+                        wss_->handshake(parsed.host, parsed.path);
+                    } else {
+                        // Create plain WebSocket stream
+                        ws_ = std::make_unique<websocket::stream<tcp::socket> >(ioc_);
+
+                        // Connect TCP socket
+                        beast::get_lowest_layer(*ws_).connect(results.begin()->endpoint());
+
+                        // Set WebSocket options
+                        ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+                        ws_->set_option(websocket::stream_base::decorator(
+                            [](websocket::request_type &req) {
+                                req.set(http::field::user_agent, "SHA1-Miner/1.0 Boost.Beast");
+                            }));
+
+                        // Perform WebSocket handshake with host header
+                        ws_->handshake(parsed.host + ":" + parsed.port, parsed.path);
+                    }
+
+                    connected_ = true;
+                    worker_stats_.connected_since = std::chrono::steady_clock::now();
+                    // Start reading immediately in the IO thread
+                    std::cout << "[CLIENT] Starting async read loop" << std::endl;
+                    do_read();
+                    connection_promise.set_value(true);
+                } catch (const std::exception &e) {
+                    std::cerr << "Connection error in IO thread: " << e.what() << std::endl;
+                    connection_promise.set_value(false);
                 }
+            });
 
-                // Create SSL stream
-                wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket> > >(ioc_, ssl_ctx_);
-
-                // Connect TCP socket
-                beast::get_lowest_layer(*wss_).connect(results.begin()->endpoint());
-
-                // Perform SSL handshake
-                wss_->next_layer().handshake(ssl::stream_base::client);
-
-                // Set WebSocket options
-                wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-                wss_->set_option(websocket::stream_base::decorator(
-                    [](websocket::request_type &req) {
-                        req.set(http::field::user_agent, "SHA1-Miner/1.0 Boost.Beast");
-                    }));
-
-                // Perform WebSocket handshake
-                wss_->handshake(parsed.host, parsed.path);
-            } else {
-                // Create plain WebSocket stream
-                ws_ = std::make_unique<websocket::stream<tcp::socket> >(ioc_);
-
-                // Connect TCP socket
-                beast::get_lowest_layer(*ws_).connect(results.begin()->endpoint());
-
-                // Set WebSocket options
-                ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-                ws_->set_option(websocket::stream_base::decorator(
-                    [](websocket::request_type &req) {
-                        req.set(http::field::user_agent, "SHA1-Miner/1.0 Boost.Beast");
-                    }));
-
-                // Perform WebSocket handshake with host header
-                // Use the original host from URL, not the resolved IP
-                ws_->handshake(parsed.host + ":" + parsed.port, parsed.path);
+            // Wait for connection to complete
+            if (!connection_future.get()) {
+                running_ = false;
+                connected_ = false;
+                return false;
             }
 
-            connected_ = true;
-            worker_stats_.connected_since = std::chrono::steady_clock::now();
+            // Connection successful, notify handler
             event_handler_->on_connected();
 
-            // Send hello message after a small delay to avoid rate limiting
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // Send hello message after connection is established
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
             HelloMessage hello;
             hello.protocol_version = PROTOCOL_VERSION;
@@ -155,10 +181,8 @@ namespace MiningPool {
             msg.timestamp = Utils::current_timestamp_ms();
             msg.payload = hello.to_json();
 
+            std::cout << "[CLIENT] Sending HELLO message" << std::endl;
             send_message(msg);
-
-            // Start read loop
-            do_read();
 
             return true;
         } catch (const std::exception &e) {
@@ -182,13 +206,11 @@ namespace MiningPool {
         try {
             if (config_.use_tls && wss_) {
                 if (wss_->is_open()) {
-                    // Use the numeric value directly to avoid Windows macro conflicts
-                    wss_->close(static_cast<websocket::close_code>(1000)); // 1000 is normal closure
+                    wss_->close(websocket::close_code::normal);
                 }
             } else if (ws_) {
                 if (ws_->is_open()) {
-                    // Use the numeric value directly to avoid Windows macro conflicts
-                    ws_->close(static_cast<websocket::close_code>(1000)); // 1000 is normal closure
+                    ws_->close(websocket::close_code::normal);
                 }
             }
         } catch (const std::exception &e) {
@@ -205,14 +227,19 @@ namespace MiningPool {
         outgoing_cv_.notify_all();
         incoming_cv_.notify_all();
 
-        // Join threads
-        if (io_thread_ && io_thread_->joinable()) {
+        // IMPORTANT: Don't join threads if we're being called from one of them
+        // Check if we're being called from io_thread
+        if (io_thread_ && io_thread_->joinable() && io_thread_->get_id() != std::this_thread::get_id()) {
             io_thread_->join();
         }
-        if (message_processor_thread_.joinable()) {
+        // Check if we're being called from message_processor_thread
+        if (message_processor_thread_.joinable() && message_processor_thread_.get_id() != std::this_thread::get_id()) {
             message_processor_thread_.join();
         }
-        if (keepalive_thread_.joinable()) {
+
+        // Check if we're being called from keepalive_thread
+        if (keepalive_thread_.joinable() &&
+            keepalive_thread_.get_id() != std::this_thread::get_id()) {
             keepalive_thread_.join();
         }
     }
@@ -252,9 +279,20 @@ namespace MiningPool {
     }
 
     void PoolClient::do_read() {
-        auto self = shared_from_this();
+        if (!connected_.load()) {
+            std::cerr << "[CLIENT] do_read called but not connected!" << std::endl;
+            return;
+        }
 
-        auto read_handler = [this, self](beast::error_code ec, std::size_t bytes_transferred) {
+        std::cout << "[CLIENT] Setting up async_read" << std::endl;
+        // Clear buffer before reading
+        buffer_.consume(buffer_.size());
+        auto read_handler = [this](beast::error_code ec, std::size_t bytes_transferred) {
+            std::cout << "[CLIENT] async_read completed - ec: " << ec
+                    << ", bytes: " << bytes_transferred << std::endl;
+            if (!ec) {
+                std::cout << "[CLIENT] Read data: " << beast::buffers_to_string(buffer_.data()) << std::endl;
+            }
             on_read(ec, bytes_transferred);
         };
 
@@ -262,6 +300,8 @@ namespace MiningPool {
             wss_->async_read(buffer_, read_handler);
         } else if (ws_) {
             ws_->async_read(buffer_, read_handler);
+        } else {
+            std::cerr << "[CLIENT] ERROR: No websocket stream available!" << std::endl;
         }
     }
 
@@ -280,9 +320,9 @@ namespace MiningPool {
         lock.unlock();
 
         std::string payload = msg.serialize();
-        auto self = shared_from_this();
 
-        auto write_handler = [this, self](beast::error_code ec, std::size_t bytes_transferred) {
+        // Simply capture 'this' - the PoolClient lifetime is managed externally
+        auto write_handler = [this](beast::error_code ec, std::size_t bytes_transferred) {
             on_write(ec, bytes_transferred);
         };
 
@@ -296,16 +336,32 @@ namespace MiningPool {
     void PoolClient::on_read(beast::error_code ec, std::size_t bytes_transferred) {
         if (ec) {
             if (ec != websocket::error::closed) {
-                std::cerr << "Read error: " << ec.message() << std::endl;
+                // Convert error message to UTF-8 if needed
+                std::string error_msg = ec.message();
+#ifdef _WIN32
+                // For now, just use the error code if the message has encoding issues
+                if (error_msg.find('\xd9') != std::string::npos || error_msg.find('\xda') != std::string::npos ||
+                    error_msg.find('\xc6') != std::string::npos) {
+                    error_msg = "Connection closed by remote host (error code: " + std::to_string(ec.value()) + ")";
+                }
+#endif
+                std::cerr << "Read error: " << error_msg << std::endl;
             }
+
             connected_ = false;
             authenticated_ = false;
+
+            // Don't call disconnect() here to avoid deadlock
+            // Just notify the event handler
             event_handler_->on_disconnected(ec.message());
 
             // Handle reconnection if configured
             if (running_.load() && config_.reconnect_attempts != 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
-                reconnect();
+                // Post reconnection attempt to io_context to avoid deadlock
+                net::post(ioc_, [this]() {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
+                    reconnect();
+                });
             }
             return;
         }
@@ -314,11 +370,22 @@ namespace MiningPool {
         std::string data = beast::buffers_to_string(buffer_.data());
         buffer_.consume(bytes_transferred);
 
+        std::cout << "[CLIENT] Received " << bytes_transferred << " bytes" << std::endl;
+        std::cout << "[CLIENT] Raw data: " << data << std::endl;
+
         auto parsed = Message::deserialize(data);
         if (parsed) {
-            std::lock_guard<std::mutex> lock(incoming_mutex_);
-            incoming_queue_.push(*parsed);
+            std::cout << "[CLIENT] Successfully parsed message type: " << static_cast<int>(parsed->type) << ", id: " <<
+                    parsed->id << std::endl; {
+                std::lock_guard<std::mutex> lock(incoming_mutex_);
+                incoming_queue_.push(*parsed);
+                std::cout << "[CLIENT] Message queued, queue size: " << incoming_queue_.size() << std::endl;
+            }
+
             incoming_cv_.notify_one();
+            std::cout << "[CLIENT] Notified message processor" << std::endl;
+        } else {
+            std::cerr << "[CLIENT] Failed to parse message from data: " << data << std::endl;
         }
 
         // Continue reading
@@ -356,22 +423,43 @@ namespace MiningPool {
     }
 
     void PoolClient::message_processor_loop() {
+        std::cout << "[CLIENT] Message processor thread started (tid: " << std::this_thread::get_id() << ")" <<
+                std::endl;
         while (running_.load()) {
             std::unique_lock<std::mutex> lock(incoming_mutex_);
-            incoming_cv_.wait(lock, [this] {
-                return !incoming_queue_.empty() || !running_.load();
+            std::cout << "[CLIENT] Message processor waiting for messages..." << std::endl;
+            // Wait for messages with timeout to check running status
+            bool has_message = incoming_cv_.wait_for(lock, std::chrono::milliseconds(1000), [this] {
+                bool result = !incoming_queue_.empty() || !running_.load();
+                if (result) {
+                    std::cout << "[CLIENT] Wait condition met - queue empty: " << incoming_queue_.empty() <<
+                            ", running: " << running_.load() << std::endl;
+                }
+                return result;
             });
+
+            if (!has_message) {
+                std::cout << "[CLIENT] Message processor timeout - no messages" << std::endl;
+                continue;
+            }
 
             while (!incoming_queue_.empty()) {
                 Message msg = incoming_queue_.front();
                 incoming_queue_.pop();
+                std::cout << "[CLIENT] Dequeued message for processing - type: " << static_cast<int>(msg.type) <<
+                        ", id: " << msg.id << std::endl;
                 lock.unlock();
-
-                process_message(msg);
+                try {
+                    process_message(msg);
+                } catch (const std::exception &e) {
+                    std::cerr << "[CLIENT] Exception processing message: " << e.what() << std::endl;
+                }
 
                 lock.lock();
             }
         }
+
+        std::cout << "[CLIENT] Message processor thread stopped" << std::endl;
     }
 
     void PoolClient::process_message(const Message &msg) {
@@ -381,38 +469,51 @@ namespace MiningPool {
             pending_requests_.erase(msg.id);
         }
 
+        std::cout << "[CLIENT] process_message called with type: " << static_cast<int>(msg.type) << " (0x" << std::hex
+                << static_cast<int>(msg.type) << std::dec << ")" << std::endl;
+
         try {
             switch (msg.type) {
-                case MessageType::WELCOME:
+                case MessageType::WELCOME: // This is 0x11 = 17
+                    std::cout << "[CLIENT] Handling WELCOME message" << std::endl;
                     handle_welcome(WelcomeMessage::from_json(msg.payload));
                     break;
                 case MessageType::AUTH_RESPONSE:
+                    std::cout << "[CLIENT] Handling AUTH_RESPONSE message" << std::endl;
                     handle_auth_response(AuthResponseMessage::from_json(msg.payload));
                     break;
                 case MessageType::NEW_JOB:
+                    std::cout << "[CLIENT] Handling NEW_JOB message" << std::endl;
                     handle_new_job(JobMessage::from_json(msg.payload));
                     break;
                 case MessageType::SHARE_RESULT:
+                    std::cout << "[CLIENT] Handling SHARE_RESULT message" << std::endl;
                     handle_share_result(ShareResultMessage::from_json(msg.payload));
                     break;
                 case MessageType::DIFFICULTY_ADJUST:
+                    std::cout << "[CLIENT] Handling DIFFICULTY_ADJUST message" << std::endl;
                     handle_difficulty_adjust(DifficultyAdjustMessage::from_json(msg.payload));
                     break;
                 case MessageType::POOL_STATUS:
+                    std::cout << "[CLIENT] Handling POOL_STATUS message" << std::endl;
                     handle_pool_status(PoolStatusMessage::from_json(msg.payload));
                     break;
-                case MessageType::ERROR_PROBLEM:
+                case MessageType::ERROR_PROBLEM: // This is 0x17 = 23
+                    std::cout << "[CLIENT] Handling ERROR message" << std::endl;
                     handle_error(msg);
                     break;
                 case MessageType::RECONNECT:
+                    std::cout << "[CLIENT] Handling RECONNECT message" << std::endl;
                     // Server requested reconnect
                     reconnect();
                     break;
                 default:
-                    std::cerr << "Unknown message type: " << static_cast<int>(msg.type) << std::endl;
+                    std::cerr << "[CLIENT] Unknown message type: " << static_cast<int>(msg.type)
+                            << " (hex: 0x" << std::hex << static_cast<int>(msg.type) << std::dec << ")" << std::endl;
             }
         } catch (const std::exception &e) {
-            std::cerr << "Error processing message: " << e.what() << std::endl;
+            std::cerr << "[CLIENT] Error processing message type " << static_cast<int>(msg.type)
+                    << ": " << e.what() << std::endl;
             event_handler_->on_error(ErrorCode::PROTOCOL_ERROR, e.what());
         }
     }
@@ -714,11 +815,91 @@ namespace MiningPool {
 
         std::cout << "Attempting to reconnect..." << std::endl;
 
-        // The disconnect will trigger reconnection through on_close handler
-        disconnect();
-        // Try to reconnect after a delay
-        std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
-        connect();
+        // Reset connection state
+        connected_ = false;
+        authenticated_ = false;
+
+        // Close existing connections
+        try {
+            if (config_.use_tls && wss_) {
+                if (wss_->is_open()) {
+                    wss_->close(websocket::close_code::normal);
+                }
+                wss_.reset();
+            } else if (ws_) {
+                if (ws_->is_open()) {
+                    ws_->close(websocket::close_code::normal);
+                }
+                ws_.reset();
+            }
+        } catch (...) {
+            // Ignore errors
+        }
+
+        // Reset work guard and restart io_context
+        work_guard_.reset();
+        ioc_.restart();
+        work_guard_ = std::make_unique<net::executor_work_guard<net::io_context::executor_type> >(
+            ioc_.get_executor()
+        );
+
+        // Try to reconnect
+        try {
+            auto parsed = parse_url(config_.url);
+
+            // Resolve host
+            tcp::resolver resolver{ioc_};
+            auto const results = resolver.resolve(parsed.host, parsed.port);
+
+            if (config_.use_tls) {
+                // Create new SSL stream
+                wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket> > >(ioc_, ssl_ctx_);
+                beast::get_lowest_layer(*wss_).connect(results.begin()->endpoint());
+                wss_->next_layer().handshake(ssl::stream_base::client);
+                wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+                wss_->handshake(parsed.host, parsed.path);
+            } else {
+                // Create new plain WebSocket stream
+                ws_ = std::make_unique<websocket::stream<tcp::socket> >(ioc_);
+                beast::get_lowest_layer(*ws_).connect(results.begin()->endpoint());
+                ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+                ws_->handshake(parsed.host + ":" + parsed.port, parsed.path);
+            }
+
+            connected_ = true;
+            worker_stats_.connected_since = std::chrono::steady_clock::now();
+            event_handler_->on_connected();
+
+            // Send hello message
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+            HelloMessage hello;
+            hello.protocol_version = PROTOCOL_VERSION;
+            hello.client_version = "SHA1-Miner/1.0";
+            hello.capabilities = {"gpu", "multi-gpu", "vardiff"};
+            hello.user_agent = "SHA1-Miner";
+
+            Message msg;
+            msg.type = MessageType::HELLO;
+            msg.id = Utils::generate_message_id();
+            msg.timestamp = Utils::current_timestamp_ms();
+            msg.payload = hello.to_json();
+
+            send_message(msg);
+
+            // Start read loop
+            do_read();
+        } catch (const std::exception &e) {
+            std::cerr << "Reconnection failed: " << e.what() << std::endl;
+
+            // Schedule another reconnection attempt
+            if (config_.reconnect_attempts != 0) {
+                net::post(ioc_, [this]() {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
+                    reconnect();
+                });
+            }
+        }
     }
 
     // PoolClientManager implementation

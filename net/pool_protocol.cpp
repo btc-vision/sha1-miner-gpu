@@ -1,14 +1,12 @@
 #include "pool_protocol.hpp"
-#include <sstream>
-#include <iomanip>
-#include <atomic>
+#include <iostream>
 
 namespace MiningPool {
     // Message serialization/deserialization
     std::string Message::serialize() const {
         nlohmann::json j;
-        j["type"] = static_cast<int>(type);
-        j["id"] = id;
+        j["type"] = type;
+        j["id"] = std::to_string(id);
         j["timestamp"] = timestamp;
         j["payload"] = payload;
         return j.dump();
@@ -18,12 +16,33 @@ namespace MiningPool {
         try {
             nlohmann::json j = nlohmann::json::parse(data);
             Message msg;
+            // Handle type field
             msg.type = static_cast<MessageType>(j["type"].get<int>());
-            msg.id = j["id"].get<uint64_t>();
-            msg.timestamp = j["timestamp"].get<uint64_t>();
+            // Handle id field - it might be a string or number
+            if (j["id"].is_string()) {
+                msg.id = std::stoull(j["id"].get<std::string>());
+            } else if (j["id"].is_number()) {
+                msg.id = j["id"].get<uint64_t>();
+            } else {
+                throw std::runtime_error("Invalid id field type");
+            }
+            // Handle timestamp field - it might be a string or number
+            if (j["timestamp"].is_string()) {
+                msg.timestamp = std::stoull(j["timestamp"].get<std::string>());
+            } else if (j["timestamp"].is_number()) {
+                msg.timestamp = j["timestamp"].get<uint64_t>();
+            } else {
+                throw std::runtime_error("Invalid timestamp field type");
+            }
+            // Payload is already a JSON object
             msg.payload = j["payload"];
+            std::cout << "[MESSAGE] Deserialized - type: " << static_cast<int>(msg.type)
+                    << " id: " << msg.id << " timestamp: " << msg.timestamp << std::endl;
+
             return msg;
         } catch (const std::exception &e) {
+            std::cerr << "[MESSAGE] Deserialize error: " << e.what() << std::endl;
+            std::cerr << "[MESSAGE] Raw data: " << data << std::endl;
             return std::nullopt;
         }
     }
@@ -77,29 +96,52 @@ namespace MiningPool {
     // AuthMessage
     nlohmann::json AuthMessage::to_json() const {
         nlohmann::json j;
-        j["method"] = static_cast<int>(method);
+        // Convert enum to string to match TypeScript
+        switch (method) {
+            case AuthMethod::WORKER_PASS:
+                j["method"] = "worker_pass";
+                break;
+            case AuthMethod::API_KEY:
+                j["method"] = "api_key";
+                break;
+            case AuthMethod::CERTIFICATE:
+                j["method"] = "certificate";
+                break;
+        }
         j["username"] = username;
-        j["password"] = password;
-        j["session_id"] = session_id;
-        j["otp"] = otp;
-        j["client_nonce"] = client_nonce;
+        if (!password.empty()) j["password"] = password;
+        if (!session_id.empty()) j["session_id"] = session_id;
+        if (!otp.empty()) j["otp"] = otp;
+        if (!client_nonce.empty()) j["client_nonce"] = client_nonce;
         return j;
     }
 
     AuthMessage AuthMessage::from_json(const nlohmann::json &j) {
         AuthMessage msg;
-        msg.method = static_cast<AuthMethod>(j["method"].get<int>());
+
+        // Parse method from string
+        std::string method_str = j["method"].get<std::string>();
+        if (method_str == "worker_pass") {
+            msg.method = AuthMethod::WORKER_PASS;
+        } else if (method_str == "api_key") {
+            msg.method = AuthMethod::API_KEY;
+        } else if (method_str == "certificate") {
+            msg.method = AuthMethod::CERTIFICATE;
+        } else {
+            throw std::runtime_error("Invalid auth method: " + method_str);
+        }
+
         msg.username = j["username"].get<std::string>();
-        if (j.contains("password")) {
+        if (j.contains("password") && !j["password"].is_null()) {
             msg.password = j["password"].get<std::string>();
         }
-        if (j.contains("session_id")) {
+        if (j.contains("session_id") && !j["session_id"].is_null()) {
             msg.session_id = j["session_id"].get<std::string>();
         }
-        if (j.contains("otp")) {
+        if (j.contains("otp") && !j["otp"].is_null()) {
             msg.otp = j["otp"].get<std::string>();
         }
-        if (j.contains("client_nonce")) {
+        if (j.contains("client_nonce") && !j["client_nonce"].is_null()) {
             msg.client_nonce = j["client_nonce"].get<std::string>();
         }
         return msg;
@@ -119,10 +161,21 @@ namespace MiningPool {
     AuthResponseMessage AuthResponseMessage::from_json(const nlohmann::json &j) {
         AuthResponseMessage msg;
         msg.success = j["success"].get<bool>();
-        msg.session_id = j["session_id"].get<std::string>();
-        msg.worker_id = j["worker_id"].get<std::string>();
-        msg.error_code = static_cast<ErrorCode>(j["error_code"].get<int>());
-        msg.error_message = j["error_message"].get<std::string>();
+
+        if (j.contains("session_id") && !j["session_id"].is_null()) {
+            msg.session_id = j["session_id"].get<std::string>();
+        }
+        if (j.contains("worker_id") && !j["worker_id"].is_null()) {
+            msg.worker_id = j["worker_id"].get<std::string>();
+        }
+        if (j.contains("error_code") && !j["error_code"].is_null()) {
+            msg.error_code = static_cast<ErrorCode>(j["error_code"].get<int>());
+        } else {
+            msg.error_code = ErrorCode::NONE;
+        }
+        if (j.contains("error_message") && !j["error_message"].is_null()) {
+            msg.error_message = j["error_message"].get<std::string>();
+        }
         return msg;
     }
 
@@ -134,8 +187,8 @@ namespace MiningPool {
         j["target_pattern"] = target_pattern;
         j["prefix_data"] = prefix_data;
         j["suffix_data"] = suffix_data;
-        j["nonce_start"] = nonce_start;
-        j["nonce_end"] = nonce_end;
+        j["nonce_start"] = std::to_string(nonce_start); // Convert to string for JS bigint
+        j["nonce_end"] = std::to_string(nonce_end); // Convert to string for JS bigint
         j["algorithm"] = algorithm;
         j["extra_data"] = extra_data;
         j["clean_jobs"] = clean_jobs;
@@ -150,10 +203,23 @@ namespace MiningPool {
         msg.target_pattern = j["target_pattern"].get<std::string>();
         msg.prefix_data = j["prefix_data"].get<std::string>();
         msg.suffix_data = j["suffix_data"].get<std::string>();
-        msg.nonce_start = j["nonce_start"].get<uint64_t>();
-        msg.nonce_end = j["nonce_end"].get<uint64_t>();
+        // Handle bigint fields
+        if (j["nonce_start"].is_string()) {
+            msg.nonce_start = std::stoull(j["nonce_start"].get<std::string>());
+        } else {
+            msg.nonce_start = j["nonce_start"].get<uint64_t>();
+        }
+
+        if (j["nonce_end"].is_string()) {
+            msg.nonce_end = std::stoull(j["nonce_end"].get<std::string>());
+        } else {
+            msg.nonce_end = j["nonce_end"].get<uint64_t>();
+        }
+
         msg.algorithm = j["algorithm"].get<std::string>();
-        msg.extra_data = j["extra_data"];
+        if (j.contains("extra_data") && !j["extra_data"].is_null()) {
+            msg.extra_data = j["extra_data"];
+        }
         msg.clean_jobs = j["clean_jobs"].get<bool>();
         msg.expires_in_seconds = j["expires_in_seconds"].get<uint32_t>();
         return msg;
@@ -163,22 +229,31 @@ namespace MiningPool {
     nlohmann::json SubmitShareMessage::to_json() const {
         nlohmann::json j;
         j["job_id"] = job_id;
-        j["nonce"] = nonce;
+        j["nonce"] = std::to_string(nonce); // Convert to string for JS bigint
         j["hash"] = hash;
         j["matching_bits"] = matching_bits;
-        j["worker_name"] = worker_name;
-        j["extra_nonce"] = extra_nonce;
+        if (!worker_name.empty()) j["worker_name"] = worker_name;
+        if (!extra_nonce.empty()) j["extra_nonce"] = extra_nonce;
         return j;
     }
 
     SubmitShareMessage SubmitShareMessage::from_json(const nlohmann::json &j) {
         SubmitShareMessage msg;
         msg.job_id = j["job_id"].get<std::string>();
-        msg.nonce = j["nonce"].get<uint64_t>();
+        // Handle bigint nonce
+        if (j["nonce"].is_string()) {
+            msg.nonce = std::stoull(j["nonce"].get<std::string>());
+        } else {
+            msg.nonce = j["nonce"].get<uint64_t>();
+        }
+
         msg.hash = j["hash"].get<std::string>();
         msg.matching_bits = j["matching_bits"].get<uint32_t>();
-        msg.worker_name = j["worker_name"].get<std::string>();
-        if (j.contains("extra_nonce")) {
+
+        if (j.contains("worker_name") && !j["worker_name"].is_null()) {
+            msg.worker_name = j["worker_name"].get<std::string>();
+        }
+        if (j.contains("extra_nonce") && !j["extra_nonce"].is_null()) {
             msg.extra_nonce = j["extra_nonce"].get<std::string>();
         }
         return msg;
@@ -188,22 +263,63 @@ namespace MiningPool {
     nlohmann::json ShareResultMessage::to_json() const {
         nlohmann::json j;
         j["job_id"] = job_id;
-        j["status"] = static_cast<int>(status);
+
+        // Convert enum to string to match TypeScript
+        switch (status) {
+            case ShareStatus::ACCEPTED:
+                j["status"] = "accepted";
+                break;
+            case ShareStatus::REJECTED_LOW_DIFFICULTY:
+                j["status"] = "rejected_low_difficulty";
+                break;
+            case ShareStatus::REJECTED_INVALID:
+                j["status"] = "rejected_invalid";
+                break;
+            case ShareStatus::REJECTED_STALE:
+                j["status"] = "rejected_stale";
+                break;
+            case ShareStatus::REJECTED_DUPLICATE:
+                j["status"] = "rejected_duplicate";
+                break;
+        }
+
         j["difficulty_credited"] = difficulty_credited;
-        j["message"] = message;
-        j["share_value"] = share_value;
-        j["total_shares"] = total_shares;
+        if (!message.empty()) j["message"] = message;
+        if (share_value > 0) j["share_value"] = share_value;
+        if (total_shares > 0) j["total_shares"] = total_shares;
         return j;
     }
 
     ShareResultMessage ShareResultMessage::from_json(const nlohmann::json &j) {
         ShareResultMessage msg;
         msg.job_id = j["job_id"].get<std::string>();
-        msg.status = static_cast<ShareStatus>(j["status"].get<int>());
+
+        // Parse status from string
+        std::string status_str = j["status"].get<std::string>();
+        if (status_str == "accepted") {
+            msg.status = ShareStatus::ACCEPTED;
+        } else if (status_str == "rejected_low_difficulty") {
+            msg.status = ShareStatus::REJECTED_LOW_DIFFICULTY;
+        } else if (status_str == "rejected_invalid") {
+            msg.status = ShareStatus::REJECTED_INVALID;
+        } else if (status_str == "rejected_stale") {
+            msg.status = ShareStatus::REJECTED_STALE;
+        } else if (status_str == "rejected_duplicate") {
+            msg.status = ShareStatus::REJECTED_DUPLICATE;
+        } else {
+            throw std::runtime_error("Invalid share status: " + status_str);
+        }
+
         msg.difficulty_credited = j["difficulty_credited"].get<uint32_t>();
-        msg.message = j["message"].get<std::string>();
-        msg.share_value = j["share_value"].get<double>();
-        msg.total_shares = j["total_shares"].get<uint64_t>();
+        if (j.contains("message") && !j["message"].is_null()) {
+            msg.message = j["message"].get<std::string>();
+        }
+        if (j.contains("share_value") && !j["share_value"].is_null()) {
+            msg.share_value = j["share_value"].get<double>();
+        }
+        if (j.contains("total_shares") && !j["total_shares"].is_null()) {
+            msg.total_shares = j["total_shares"].get<uint64_t>();
+        }
         return msg;
     }
 
