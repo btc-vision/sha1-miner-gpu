@@ -9,8 +9,6 @@
 #include <optional>
 #include <nlohmann/json.hpp>
 
-using json = nlohmann::json;
-
 namespace MiningPool {
     // Protocol version
     constexpr uint32_t PROTOCOL_VERSION = 1;
@@ -71,7 +69,7 @@ namespace MiningPool {
         MessageType type;
         uint64_t id; // Message ID for request/response matching
         uint64_t timestamp; // Unix timestamp in milliseconds
-        json payload; // Message-specific payload
+        nlohmann::json payload; // Message-specific payload
 
         std::string serialize() const;
 
@@ -83,10 +81,11 @@ namespace MiningPool {
         uint32_t protocol_version;
         std::string client_version;
         std::vector<std::string> capabilities; // e.g., ["gpu", "cpu", "multi-gpu"]
+        std::string user_agent;
 
-        json to_json() const;
+        nlohmann::json to_json() const;
 
-        static HelloMessage from_json(const json &j);
+        static HelloMessage from_json(const nlohmann::json &j);
     };
 
     struct AuthMessage {
@@ -94,48 +93,52 @@ namespace MiningPool {
         std::string username; // Format: "wallet_address.worker_name" or "username.worker"
         std::string password; // Optional password or API key
         std::string session_id; // For reconnection
+        std::string otp; // Optional OTP
+        std::string client_nonce; // Optional nonce
 
-        json to_json() const;
+        nlohmann::json to_json() const;
 
-        static AuthMessage from_json(const json &j);
+        static AuthMessage from_json(const nlohmann::json &j);
     };
 
     struct SubmitShareMessage {
         std::string job_id;
         uint64_t nonce;
-        std::vector<uint8_t> hash; // 20 bytes SHA-1 hash
+        std::string hash; // Hex string of SHA-1 hash
         uint32_t matching_bits;
         std::string worker_name; // Optional, for multi-worker setups
+        std::string extra_nonce; // Optional extra nonce
 
-        json to_json() const;
+        nlohmann::json to_json() const;
 
-        static SubmitShareMessage from_json(const json &j);
+        static SubmitShareMessage from_json(const nlohmann::json &j);
     };
 
     struct HashrateReportMessage {
         double hashrate; // Hashes per second
-        uint32_t gpu_count;
-        std::vector<double> gpu_hashrates; // Per-GPU hashrates
-        uint64_t shares_found;
+        uint64_t shares_submitted;
+        uint64_t shares_accepted;
         uint64_t uptime_seconds;
+        uint32_t gpu_count;
+        nlohmann::json gpu_stats; // Flexible GPU statistics
 
-        json to_json() const;
+        nlohmann::json to_json() const;
 
-        static HashrateReportMessage from_json(const json &j);
+        static HashrateReportMessage from_json(const nlohmann::json &j);
     };
 
     // Server messages
     struct WelcomeMessage {
-        uint32_t protocol_version;
         std::string pool_name;
         std::string pool_version;
-        std::vector<std::string> supported_algorithms; // ["sha1-collision"]
+        uint32_t protocol_version;
         uint32_t min_difficulty;
-        uint32_t max_difficulty;
+        std::vector<std::string> features;
+        std::string motd; // Message of the day
 
-        json to_json() const;
+        nlohmann::json to_json() const;
 
-        static WelcomeMessage from_json(const json &j);
+        static WelcomeMessage from_json(const nlohmann::json &j);
     };
 
     struct AuthResponseMessage {
@@ -145,72 +148,74 @@ namespace MiningPool {
         ErrorCode error_code;
         std::string error_message;
 
-        json to_json() const;
+        nlohmann::json to_json() const;
 
-        static AuthResponseMessage from_json(const json &j);
+        static AuthResponseMessage from_json(const nlohmann::json &j);
     };
 
     struct JobMessage {
         std::string job_id;
-        std::vector<uint8_t> base_message; // 32 bytes
-        std::vector<uint8_t> target_hash; // 20 bytes
-        uint32_t difficulty; // Required matching bits
-        uint64_t nonce_start; // Starting nonce range
-        uint64_t nonce_end; // Ending nonce range (0 = no limit)
-        uint32_t expires_in_seconds; // Job expiration time
-        bool clean_jobs; // Should drop all previous jobs
+        uint32_t target_difficulty;
+        std::string target_pattern;
+        std::string prefix_data;
+        std::string suffix_data;
+        uint64_t nonce_start;
+        uint64_t nonce_end;
+        std::string algorithm;
+        nlohmann::json extra_data;
+        bool clean_jobs;
+        uint32_t expires_in_seconds;
 
-        json to_json() const;
+        nlohmann::json to_json() const;
 
-        static JobMessage from_json(const json &j);
+        static JobMessage from_json(const nlohmann::json &j);
     };
 
     struct ShareResultMessage {
-        std::string share_id;
-        ShareStatus status;
         std::string job_id;
-        double difficulty_credited; // Actual difficulty credited (for vardiff)
-        uint64_t total_shares; // Total shares from this worker
-        double total_difficulty; // Total difficulty submitted
-        std::string message; // Optional message (e.g., "Block found!")
+        ShareStatus status;
+        uint32_t difficulty_credited;
+        std::string message;
+        double share_value;
+        uint64_t total_shares;
 
-        json to_json() const;
+        nlohmann::json to_json() const;
 
-        static ShareResultMessage from_json(const json &j);
+        static ShareResultMessage from_json(const nlohmann::json &j);
     };
 
     struct DifficultyAdjustMessage {
         uint32_t new_difficulty;
-        std::string reason; // "vardiff", "manual", "pool_adjust"
-        uint32_t min_difficulty; // Minimum allowed
-        uint32_t max_difficulty; // Maximum allowed
-        double target_time; // Target seconds between shares
+        std::string reason;
+        uint32_t effective_in_seconds;
 
-        json to_json() const;
+        nlohmann::json to_json() const;
 
-        static DifficultyAdjustMessage from_json(const json &j);
+        static DifficultyAdjustMessage from_json(const nlohmann::json &j);
     };
 
     struct PoolStatusMessage {
-        uint64_t active_workers;
-        double pool_hashrate;
+        uint32_t connected_workers;
+        double total_hashrate;
+        double shares_per_minute;
         uint64_t blocks_found;
-        uint64_t total_shares;
-        double average_difficulty;
-        std::map<std::string, std::string> network_info; // Additional network stats
+        uint64_t current_round_shares;
+        double pool_fee_percent;
+        double minimum_payout;
+        nlohmann::json extra_info;
 
-        json to_json() const;
+        nlohmann::json to_json() const;
 
-        static PoolStatusMessage from_json(const json &j);
+        static PoolStatusMessage from_json(const nlohmann::json &j);
     };
 
     // Connection configuration
     struct PoolConfig {
         std::string url; // ws://pool.example.com:3333 or wss://...
-        bool use_tls;
+        bool use_tls = false;
         std::string tls_cert_file; // Optional client certificate
         std::string tls_key_file; // Optional client key
-        bool verify_server_cert;
+        bool verify_server_cert = true;
 
         // Reconnection settings
         uint32_t reconnect_delay_ms = 5000;
@@ -234,12 +239,12 @@ namespace MiningPool {
     struct WorkerStats {
         std::string worker_id;
         std::chrono::steady_clock::time_point connected_since;
-        uint64_t shares_accepted;
-        uint64_t shares_rejected;
-        double total_difficulty_accepted;
-        double average_hashrate;
-        double current_hashrate;
-        uint32_t current_difficulty;
+        uint64_t shares_accepted = 0;
+        uint64_t shares_rejected = 0;
+        double total_difficulty_accepted = 0;
+        double average_hashrate = 0;
+        double current_hashrate = 0;
+        uint32_t current_difficulty = 0;
         std::chrono::steady_clock::time_point last_share_time;
         std::chrono::steady_clock::time_point last_job_time;
     };
@@ -248,7 +253,7 @@ namespace MiningPool {
     struct Share {
         std::string job_id;
         uint64_t nonce;
-        std::vector<uint8_t> hash;
+        std::string hash; // Hex string
         uint32_t matching_bits;
         std::chrono::steady_clock::time_point found_time;
 
@@ -307,22 +312,17 @@ namespace MiningPool {
 
     // Utility functions
     namespace Utils {
-        // Convert binary data to hex string
-        std::string binary_to_hex(const std::vector<uint8_t> &data);
-
-        // Convert hex string to binary data
-        std::vector<uint8_t> hex_to_binary(const std::string &hex);
-
-        // Calculate share difficulty from matching bits
-        double calculate_share_difficulty(uint32_t matching_bits);
-
-        // Validate share against target difficulty
-        bool validate_share_difficulty(const Share &share, uint32_t target_difficulty);
-
         // Generate unique message ID
         uint64_t generate_message_id();
 
         // Get current timestamp in milliseconds
         uint64_t current_timestamp_ms();
+
+        // Convert bytes to hex string
+        std::string bytes_to_hex(const uint8_t *data, size_t len);
+
+        // Convert hex string to bytes
+        std::vector<uint8_t> hex_to_bytes(const std::string &hex);
     }
 } // namespace MiningPool
+
