@@ -27,9 +27,8 @@ namespace MiningPool {
             }
             result.path = matches[4].length() ? matches[4].str() : "/";
             // Debug output
-            std::cout << "Parsed URL - Host: " << result.host << ", Port: " << result.port
-                    << ", Path: " << result.path
-                    << ", Secure: " << result.is_secure << std::endl;
+            LOG_DEBUG("CLIENT", "Parsed URL - Host: ", result.host, ", Port: ", result.port,
+                      ", Path: ", result.path, ", Secure: ", result.is_secure);
         } else {
             throw std::invalid_argument("Invalid WebSocket URL: " + url);
         }
@@ -336,28 +335,21 @@ namespace MiningPool {
     void PoolClient::on_read(beast::error_code ec, std::size_t bytes_transferred) {
         if (ec) {
             if (ec != websocket::error::closed) {
-                // Convert error message to UTF-8 if needed
                 std::string error_msg = ec.message();
 #ifdef _WIN32
-                // For now, just use the error code if the message has encoding issues
                 if (error_msg.find('\xd9') != std::string::npos || error_msg.find('\xda') != std::string::npos ||
                     error_msg.find('\xc6') != std::string::npos) {
                     error_msg = "Connection closed by remote host (error code: " + std::to_string(ec.value()) + ")";
                 }
 #endif
-                std::cerr << "Read error: " << error_msg << std::endl;
+                std::cerr << "[CLIENT] Read error: " << error_msg << std::endl;
             }
 
             connected_ = false;
             authenticated_ = false;
-
-            // Don't call disconnect() here to avoid deadlock
-            // Just notify the event handler
             event_handler_->on_disconnected(ec.message());
 
-            // Handle reconnection if configured
             if (running_.load() && config_.reconnect_attempts != 0) {
-                // Post reconnection attempt to io_context to avoid deadlock
                 net::post(ioc_, [this]() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
                     reconnect();
@@ -366,30 +358,40 @@ namespace MiningPool {
             return;
         }
 
-        // Parse the message
+        // Check if we're still connected before processing
+        if (!connected_.load()) {
+            std::cerr << "[CLIENT] Received data but not connected, ignoring" << std::endl;
+            return;
+        }
+
         std::string data = beast::buffers_to_string(buffer_.data());
         buffer_.consume(bytes_transferred);
 
         std::cout << "[CLIENT] Received " << bytes_transferred << " bytes" << std::endl;
-        std::cout << "[CLIENT] Raw data: " << data << std::endl;
-
         auto parsed = Message::deserialize(data);
         if (parsed) {
             std::cout << "[CLIENT] Successfully parsed message type: " << static_cast<int>(parsed->type) << ", id: " <<
-                    parsed->id << std::endl; {
-                std::lock_guard<std::mutex> lock(incoming_mutex_);
-                incoming_queue_.push(*parsed);
-                std::cout << "[CLIENT] Message queued, queue size: " << incoming_queue_.size() << std::endl;
+                    parsed->id << std::endl;
+
+            // Check for error messages that should stop further reading
+            if (parsed->type == MessageType::ERROR_PROBLEM) {
+                int error_code = parsed->payload.value("code", 0);
+                if (error_code == static_cast<int>(ErrorCode::INVALID_MESSAGE) ||
+                    error_code == static_cast<int>(ErrorCode::PROTOCOL_ERROR)) {
+                    std::cerr << "[CLIENT] Received fatal error, stopping reads" << std::endl;
+                    connected_ = false;
+                }
             }
 
+            std::lock_guard<std::mutex> lock(incoming_mutex_);
+            incoming_queue_.push(*parsed);
             incoming_cv_.notify_one();
-            std::cout << "[CLIENT] Notified message processor" << std::endl;
-        } else {
-            std::cerr << "[CLIENT] Failed to parse message from data: " << data << std::endl;
         }
 
-        // Continue reading
-        do_read();
+        // Continue reading only if still connected
+        if (connected_.load()) {
+            do_read();
+        }
     }
 
     void PoolClient::on_write(beast::error_code ec, std::size_t bytes_transferred) {
@@ -539,7 +541,6 @@ namespace MiningPool {
     }
 
     bool PoolClient::authenticate() {
-        // Add small delay to avoid triggering rate limits
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         AuthMessage auth;
@@ -548,11 +549,22 @@ namespace MiningPool {
         auth.password = config_.password;
         auth.session_id = session_id_;
 
+        std::cout << "[CLIENT] Sending AUTH message:" << std::endl;
+        std::cout << "  Method: " << (auth.method == AuthMethod::WORKER_PASS
+                                          ? "worker_pass"
+                                          : auth.method == AuthMethod::API_KEY
+                                                ? "api_key"
+                                                : "certificate") << std::endl;
+        std::cout << "  Username: " << auth.username << std::endl;
+        std::cout << "  Password: " << (auth.password.empty() ? "<empty>" : "<set>") << std::endl;
+
         Message msg;
         msg.type = MessageType::AUTH;
         msg.id = Utils::generate_message_id();
         msg.timestamp = Utils::current_timestamp_ms();
         msg.payload = auth.to_json();
+
+        std::cout << "[CLIENT] AUTH payload: " << msg.payload.dump() << std::endl;
 
         send_message(msg);
         return true;
@@ -718,6 +730,31 @@ namespace MiningPool {
         int error_code_int = msg.payload.value("code", 0);
         ErrorCode code = static_cast<ErrorCode>(error_code_int);
         std::string message = msg.payload.value("message", "Unknown error");
+        std::cerr << "[CLIENT] Received error from server - code: " << error_code_int << ", message: " << message <<
+                std::endl;
+        // Handle specific error codes
+        switch (code) {
+            case ErrorCode::INVALID_MESSAGE:
+            case ErrorCode::PROTOCOL_ERROR:
+                // These are fatal errors, disconnect
+                std::cerr << "[CLIENT] Fatal protocol error, disconnecting..." << std::endl;
+                connected_ = false;
+                authenticated_ = false;
+                // Close the websocket
+                if (ws_ && ws_->is_open()) {
+                    beast::error_code ec;
+                    ws_->close(websocket::close_code::protocol_error, ec);
+                }
+                break;
+            case ErrorCode::AUTH_FAILED:
+                authenticated_ = false;
+                break;
+            case ErrorCode::RATE_LIMITED:
+                // Back off for a bit
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                break;
+        }
+
         event_handler_->on_error(code, message);
     }
 

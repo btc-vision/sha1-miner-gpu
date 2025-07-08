@@ -470,9 +470,9 @@ void display_pool_stats(const MiningPool::PoolMiningSystem::PoolMiningStats &sta
     std::cout << "[POOL] ";
 
     if (!stats.connected) {
-        std::cout << "Disconnected - Attempting to reconnect...              ";
+        std::cout << "Disconnected - Attempting to reconnect..." << std::endl;
     } else if (!stats.authenticated) {
-        std::cout << "Connected - Authenticating...                         ";
+        std::cout << "Connected - Authentication pending..." << std::endl;
     } else {
         std::cout << "Worker: " << stats.worker_id << " | ";
         std::cout << "Diff: " << stats.current_difficulty << " | ";
