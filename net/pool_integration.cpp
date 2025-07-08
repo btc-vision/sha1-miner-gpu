@@ -4,8 +4,25 @@
 #include <iomanip>
 #include <algorithm>
 #include <chrono>
+#include <sstream>
 
 namespace MiningPool {
+    // Helper function to convert binary hash to hex string
+    static std::string hash_to_hex(const uint32_t hash[5]) {
+        std::stringstream ss;
+        for (int i = 0; i < 5; i++) {
+            ss << std::hex << std::setfill('0') << std::setw(8) << hash[i];
+        }
+        return ss.str();
+    }
+
+    // Helper function to convert hex string to binary
+    static void hex_to_hash(const std::string &hex, uint32_t hash[5]) {
+        for (int i = 0; i < 5 && i * 8 < hex.length(); i++) {
+            hash[i] = std::stoul(hex.substr(i * 8, 8), nullptr, 16);
+        }
+    }
+
     // PoolMiningSystem implementation
     PoolMiningSystem::PoolMiningSystem(const Config &config)
         : config_(config) {
@@ -147,10 +164,17 @@ namespace MiningPool {
             HashrateReportMessage report;
             report.hashrate = mining_stats.hash_rate;
             report.gpu_count = config_.use_all_gpus ? config_.gpu_ids.size() : 1;
-            report.shares_found = stats_.shares_submitted;
+            report.shares_submitted = stats_.shares_submitted;
+            report.shares_accepted = stats_.shares_accepted;
             report.uptime_seconds = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - start_time_
             ).count();
+
+            // Add GPU stats if needed
+            nlohmann::json gpu_stats;
+            gpu_stats["gpu_0"]["hashrate"] = mining_stats.hash_rate;
+            gpu_stats["gpu_0"]["temperature"] = 0; // Would need actual temp reading
+            report.gpu_stats = gpu_stats;
 
             pool_client_->report_hashrate(report);
 
@@ -197,14 +221,7 @@ namespace MiningPool {
         Share share;
         share.job_id = current_job_->job_id;
         share.nonce = result.nonce;
-        share.hash.resize(20);
-        // Convert uint32_t[5] to uint8_t[20]
-        for (int i = 0; i < 5; i++) {
-            share.hash[i * 4 + 0] = (result.hash[i] >> 24) & 0xFF;
-            share.hash[i * 4 + 1] = (result.hash[i] >> 16) & 0xFF;
-            share.hash[i * 4 + 2] = (result.hash[i] >> 8) & 0xFF;
-            share.hash[i * 4 + 3] = result.hash[i] & 0xFF;
-        }
+        share.hash = hash_to_hex(result.hash); // Convert to hex string
         share.matching_bits = result.matching_bits;
         share.found_time = std::chrono::steady_clock::now();
 
@@ -232,24 +249,16 @@ namespace MiningPool {
     MiningJob PoolMiningSystem::convert_to_mining_job(const JobMessage &job_msg) {
         MiningJob mining_job;
 
-        // Copy base message
-        if (job_msg.base_message.size() == 32) {
-            std::copy(job_msg.base_message.begin(), job_msg.base_message.end(),
-                      mining_job.base_message);
+        // Convert prefix data (hex string) to binary
+        auto prefix_bytes = Utils::hex_to_bytes(job_msg.prefix_data);
+        if (prefix_bytes.size() >= 32) {
+            std::copy(prefix_bytes.begin(), prefix_bytes.begin() + 32, mining_job.base_message);
         }
 
-        // Convert target hash from uint8_t[20] to uint32_t[5]
-        if (job_msg.target_hash.size() == 20) {
-            for (int i = 0; i < 5; i++) {
-                mining_job.target_hash[i] =
-                        (static_cast<uint32_t>(job_msg.target_hash[i * 4]) << 24) |
-                        (static_cast<uint32_t>(job_msg.target_hash[i * 4 + 1]) << 16) |
-                        (static_cast<uint32_t>(job_msg.target_hash[i * 4 + 2]) << 8) |
-                        static_cast<uint32_t>(job_msg.target_hash[i * 4 + 3]);
-            }
-        }
+        // Convert target pattern (hex string) to binary hash
+        hex_to_hash(job_msg.target_pattern, mining_job.target_hash);
 
-        mining_job.difficulty = job_msg.difficulty;
+        mining_job.difficulty = job_msg.target_difficulty;
         mining_job.nonce_offset = job_msg.nonce_start;
 
         return mining_job;
@@ -262,7 +271,7 @@ namespace MiningPool {
         current_mining_job_ = convert_to_mining_job(pool_job.job_data);
 
         // Update difficulty
-        current_difficulty_ = pool_job.job_data.difficulty;
+        current_difficulty_ = pool_job.job_data.target_difficulty;
 
         // Start mining if not already active
         mining_active_ = true;
@@ -426,7 +435,7 @@ namespace MiningPool {
 
     void PoolMiningSystem::on_new_job(const PoolJob &job) {
         std::cout << "New job received: " << job.job_id
-                << " (difficulty: " << job.job_data.difficulty << ")" << std::endl;
+                << " (difficulty: " << job.job_data.target_difficulty << ")" << std::endl;
 
         update_mining_job(job);
     }
@@ -448,7 +457,7 @@ namespace MiningPool {
         // Remove from pending
         {
             std::lock_guard<std::mutex> lock(shares_mutex_);
-            std::string share_id = result.job_id + "_" + result.share_id;
+            std::string share_id = result.job_id + "_" + std::to_string(result.share_value);
             pending_shares_.erase(share_id);
         }
 
@@ -465,7 +474,7 @@ namespace MiningPool {
         // Remove from pending
         {
             std::lock_guard<std::mutex> lock(shares_mutex_);
-            std::string share_id = result.job_id + "_" + result.share_id;
+            std::string share_id = result.job_id + "_" + std::to_string(result.share_value);
             pending_shares_.erase(share_id);
         }
 
@@ -486,11 +495,14 @@ namespace MiningPool {
     }
 
     void PoolMiningSystem::on_pool_status(const PoolStatusMessage &status) {
-        std::cout << "Pool status - Workers: " << status.active_workers
-                << ", Hashrate: " << status.pool_hashrate / 1e9 << " GH/s" << std::endl;
+        std::cout << "Pool status - Workers: " << status.connected_workers
+                << ", Hashrate: " << status.total_hashrate / 1e9 << " GH/s" << std::endl;
 
         std::lock_guard<std::mutex> lock(stats_mutex_);
-        stats_.pool_name = status.network_info.count("pool_name") ? status.network_info.at("pool_name") : "";
+        // Pool name might be in extra_info JSON
+        if (status.extra_info.contains("pool_name")) {
+            stats_.pool_name = status.extra_info["pool_name"];
+        }
     }
 
     // MultiPoolManager implementation
