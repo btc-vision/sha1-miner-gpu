@@ -96,27 +96,24 @@ set(NET_DIR ${CMAKE_CURRENT_SOURCE_DIR}/net)
 # uWebSockets configuration
 # Allow manual override via command line
 if (NOT UWEBSOCKETS_INCLUDE_DIR)
+    # First try to find with subdirectory structure (vcpkg style)
     find_path(UWEBSOCKETS_INCLUDE_DIR
             NAMES uWebSockets/App.h
             PATHS
-            ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets
             ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
             ${CMAKE_PREFIX_PATH}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/installed/x64-windows/include
             /usr/include
             /usr/local/include
     )
-    # If not found, try lowercase
+
+    # If not found, try direct App.h (manual installation style)
     if (NOT UWEBSOCKETS_INCLUDE_DIR)
         find_path(UWEBSOCKETS_INCLUDE_DIR
-                NAMES uwebsockets/App.h
+                NAMES App.h
                 PATHS
                 ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets/src
                 ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets
-                ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
-                ${CMAKE_PREFIX_PATH}/include
-                /usr/include
-                /usr/local/include
         )
     endif ()
 endif ()

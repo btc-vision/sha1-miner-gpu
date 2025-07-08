@@ -1,7 +1,7 @@
 #include "pool_client.hpp"
 #include <iostream>
 #include <regex>
-#include <App.h>
+#include "uws_wrapper.h"
 
 namespace MiningPool {
     // ParsedUrl implementation
@@ -92,7 +92,10 @@ namespace MiningPool {
         incoming_cv_.notify_all();
 
         // Join threads
-        if (io_thread_ && io_thread_->joinable()) {
+        if (io_thread_ &&io_thread_
+        ->
+        joinable()
+        ) {
             io_thread_->join();
         }
         if (message_processor_thread_.joinable()) {
