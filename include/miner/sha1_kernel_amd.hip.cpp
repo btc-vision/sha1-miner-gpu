@@ -359,8 +359,8 @@ extern "C" void launch_mining_kernel_amd(
     );
 
     // Check for errors
-    hipError_t err = hipGetLastError();
-    if (err != hipSuccess) {
-        fprintf(stderr, "AMD kernel launch failed: %s\n", hipGetErrorString(err));
+    hipError_t launch_err = hipGetLastError();
+    if (launch_err != hipSuccess) {
+        fprintf(stderr, "AMD kernel launch failed: %s\n", hipGetErrorString(launch_err));
     }
 }
