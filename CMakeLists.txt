@@ -53,7 +53,7 @@ if (POLICY CMP0167)
     cmake_policy(SET CMP0167 OLD)
 endif ()
 
-# Find Boost with vcpkg hints - Now we need Beast from Boost 1.88
+# Find Boost with vcpkg hints - Now we need Beast from Boost 1.70+
 if (WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE)
     # Help CMake find Boost from vcpkg
     set(BOOST_ROOT ${CMAKE_PREFIX_PATH})
@@ -63,13 +63,19 @@ if (WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE)
     set(Boost_USE_STATIC_RUNTIME OFF)
 endif ()
 
-# Find Boost 1.70+ which includes Beast
-find_package(Boost 1.70 REQUIRED COMPONENTS system thread program_options date_time regex random beast)
+# Find Boost 1.70+ which includes Beast (Beast is header-only, don't list it in components)
+find_package(Boost 1.70 REQUIRED COMPONENTS system thread program_options date_time regex random)
 if (Boost_FOUND)
     message(STATUS "Boost found:")
     message(STATUS "  Version: ${Boost_VERSION}")
     message(STATUS "  Include: ${Boost_INCLUDE_DIRS}")
     message(STATUS "  Libraries: ${Boost_LIBRARIES}")
+    # Check if Beast headers are available
+    if (EXISTS "${Boost_INCLUDE_DIRS}/boost/beast.hpp" OR EXISTS "${Boost_INCLUDE_DIR}/boost/beast.hpp")
+        message(STATUS "  Boost.Beast: Available (header-only)")
+    else ()
+        message(WARNING "  Boost.Beast headers not found in Boost include directory")
+    endif ()
 endif ()
 
 # Find zlib (optional but recommended)
@@ -384,7 +390,7 @@ if (GPU_BACKEND STREQUAL "CUDA")
     message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
 endif ()
 message(STATUS "  Boost version: ${Boost_VERSION}")
-message(STATUS "  Boost.Beast: Available (included in Boost ${Boost_VERSION})")
+message(STATUS "  Boost.Beast: Available (header-only library)")
 message(STATUS "  OpenSSL version: ${OPENSSL_VERSION}")
 message(STATUS "  zlib found: ${ZLIB_FOUND}")
 message(STATUS "")
