@@ -1,4 +1,3 @@
-// pool_integration.hpp - Integration of pool client with mining system
 #pragma once
 
 #include "pool_client.hpp"

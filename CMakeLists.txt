@@ -97,7 +97,7 @@ set(NET_DIR ${CMAKE_CURRENT_SOURCE_DIR}/net)
 # Allow manual override via command line
 if (NOT UWEBSOCKETS_INCLUDE_DIR)
     find_path(UWEBSOCKETS_INCLUDE_DIR
-            NAMES uwebsockets/App.h
+            NAMES uWebSockets/App.h
             PATHS
             ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets/src
             ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets
@@ -106,6 +106,19 @@ if (NOT UWEBSOCKETS_INCLUDE_DIR)
             /usr/include
             /usr/local/include
     )
+    # If not found, try lowercase
+    if (NOT UWEBSOCKETS_INCLUDE_DIR)
+        find_path(UWEBSOCKETS_INCLUDE_DIR
+                NAMES uwebsockets/App.h
+                PATHS
+                ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets/src
+                ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets
+                ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
+                ${CMAKE_PREFIX_PATH}/include
+                /usr/include
+                /usr/local/include
+        )
+    endif ()
 endif ()
 
 if (NOT USOCKETS_INCLUDE_DIR)
