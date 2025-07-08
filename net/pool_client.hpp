@@ -1,7 +1,9 @@
-// pool_client.hpp - High-performance pool client using uWebSockets
 #pragma once
 
+// Include pool_protocol first (before any OpenSSL headers)
 #include "pool_protocol.hpp"
+
+// Standard library headers
 #include <thread>
 #include <queue>
 #include <condition_variable>
@@ -9,15 +11,33 @@
 #include <unordered_map>
 #include <memory>
 
-// Forward declarations for uWebSockets
-namespace uWS {
-    template<bool SSL, bool isServer, typename USERDATA>
-    struct WebSocket;
-    struct Loop;
-}
+// Windows-specific defines
+#ifdef _WIN32
+#ifndef _WIN32_WINNT
+        #define _WIN32_WINNT 0x0A00  // Windows 10
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+#endif
+#endif
+
+// Boost.Beast includes - Works with Boost 1.88
+#include <boost/beast/core.hpp>
+#include <boost/beast/websocket.hpp>
+#include <boost/beast/ssl.hpp>
+#include <boost/asio.hpp>
+#include <boost/asio/ssl.hpp>
+#include <boost/asio/strand.hpp>
+
+namespace beast = boost::beast;
+namespace http = beast::http;
+namespace websocket = beast::websocket;
+namespace net = boost::asio;
+namespace ssl = boost::asio::ssl;
+using tcp = boost::asio::ip::tcp;
 
 namespace MiningPool {
-    class PoolClient {
+    class PoolClient : public std::enable_shared_from_this<PoolClient> {
     public:
         PoolClient(const PoolConfig &config, IPoolEventHandler *handler);
 
@@ -63,14 +83,18 @@ namespace MiningPool {
         std::string session_id_;
         std::string worker_id_;
 
-        // uWebSockets components
-        struct WebSocketData {
-            PoolClient *client;
-        };
+        // Boost.Beast WebSocket components
+        net::io_context ioc_;
+
+        // Plain WebSocket
+        std::unique_ptr<websocket::stream<tcp::socket> > ws_;
+
+        // SSL WebSocket - using ssl::stream from boost::asio::ssl
+        std::unique_ptr<websocket::stream<ssl::stream<tcp::socket> > > wss_;
+        ssl::context ssl_ctx_{ssl::context::tlsv12_client};
 
         std::unique_ptr<std::thread> io_thread_;
-        uWS::Loop *loop_ = nullptr;
-        void *ws_ = nullptr; // Changed to void* to avoid template issues
+        std::unique_ptr<net::executor_work_guard<net::io_context::executor_type> > work_guard_;
 
         // Threading
         std::thread keepalive_thread_;
@@ -104,7 +128,21 @@ namespace MiningPool {
 
         void message_processor_loop();
 
-        void setup_websocket_handlers();
+        void on_resolve(beast::error_code ec, tcp::resolver::results_type results);
+
+        void on_connect(beast::error_code ec, tcp::resolver::results_type::endpoint_type ep);
+
+        void on_ssl_handshake(beast::error_code ec);
+
+        void on_handshake(beast::error_code ec);
+
+        void on_write(beast::error_code ec, std::size_t bytes_transferred);
+
+        void on_read(beast::error_code ec, std::size_t bytes_transferred);
+
+        void do_read();
+
+        void do_write();
 
         // Message processing
         void process_message(const Message &msg);
@@ -135,48 +173,45 @@ namespace MiningPool {
         // Parse URL components
         struct ParsedUrl {
             std::string host;
-            int port;
+            std::string port;
             std::string path;
             bool is_secure;
         };
 
-        ParsedUrl parse_url(const std::string &url);
+        static ParsedUrl parse_url(const std::string &url);
+
+        // Buffer for reading messages
+        beast::flat_buffer buffer_;
     };
 
-    // Thread-safe pool client wrapper
+    // Thread-safe pool client wrapper (same as before)
     class PoolClientManager {
     public:
         PoolClientManager();
 
         ~PoolClientManager();
 
-        // Client management
         bool add_pool(const std::string &name, const PoolConfig &config,
                       IPoolEventHandler *handler);
 
         bool remove_pool(const std::string &name);
 
-        // Pool switching
         bool set_primary_pool(const std::string &name);
 
         std::string get_primary_pool() const;
 
-        // Failover support
         void enable_failover(bool enable);
 
         void set_failover_order(const std::vector<std::string> &pool_names);
 
-        // Get client
         std::shared_ptr<PoolClient> get_client(const std::string &name) const;
 
         std::shared_ptr<PoolClient> get_primary_client() const;
 
-        // Batch operations
         void connect_all();
 
         void disconnect_all();
 
-        // Statistics
         std::map<std::string, WorkerStats> get_all_stats() const;
 
     private:

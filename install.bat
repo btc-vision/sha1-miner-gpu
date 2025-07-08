@@ -1,6 +1,6 @@
 @echo off
 REM SHA-1 OP_NET Miner - Windows Dependencies Installer
-REM This script only installs dependencies (vcpkg packages and uWebSockets)
+REM This script installs dependencies with compatible versions
 
 setlocal enabledelayedexpansion
 
@@ -88,6 +88,12 @@ echo.
 
 cd /d "%INSTALL_DIR%"
 
+REM Clean up any existing vcpkg.json that might interfere
+if exist vcpkg.json (
+    echo %INFO% Removing existing vcpkg.json to avoid conflicts...
+    del vcpkg.json
+)
+
 REM Setup vcpkg
 echo %INFO% Setting up vcpkg for C++ dependencies...
 if exist "vcpkg\vcpkg.exe" (
@@ -110,73 +116,51 @@ if exist "vcpkg\vcpkg.exe" (
 )
 echo.
 
-REM Install dependencies
-echo %INFO% Installing C++ dependencies (this will take 10-30 minutes)...
+REM Use classic mode to install specific versions
+echo %INFO% Installing C++ dependencies with compatible versions...
+echo %INFO% This will take 10-30 minutes on first run...
 echo.
 
-REM Install OpenSSL
-echo %INFO% [1/5] Installing OpenSSL...
+REM Install dependencies one by one
+echo %INFO% [1/4] Installing OpenSSL...
 vcpkg\vcpkg install openssl:x64-windows
 if errorlevel 1 (
     echo %WARNING% OpenSSL installation had issues, but continuing...
 )
 
 echo.
-echo %INFO% [2/5] Installing Boost libraries...
-vcpkg\vcpkg install boost-system:x64-windows boost-thread:x64-windows boost-program-options:x64-windows
+echo %INFO% [2/4] Installing Boost (this will take a while)...
+echo %INFO% Installing Boost 1.88 with Beast support...
+
+REM Install Boost libraries including Beast
+vcpkg\vcpkg install boost:x64-windows
+
 if errorlevel 1 (
-    echo %WARNING% Boost installation had issues, but continuing...
+    echo %WARNING% Boost installation had issues, trying individual components...
+    vcpkg\vcpkg install boost-system:x64-windows
+    vcpkg\vcpkg install boost-thread:x64-windows
+    vcpkg\vcpkg install boost-program-options:x64-windows
+    vcpkg\vcpkg install boost-date-time:x64-windows
+    vcpkg\vcpkg install boost-regex:x64-windows
+    vcpkg\vcpkg install boost-random:x64-windows
+    vcpkg\vcpkg install boost-asio:x64-windows
+    vcpkg\vcpkg install boost-beast:x64-windows
+    vcpkg\vcpkg install boost-chrono:x64-windows
+    vcpkg\vcpkg install boost-atomic:x64-windows
 )
 
 echo.
-echo %INFO% [3/5] Installing nlohmann-json...
+echo %INFO% [3/4] Installing nlohmann-json...
 vcpkg\vcpkg install nlohmann-json:x64-windows
 if errorlevel 1 (
     echo %WARNING% JSON installation had issues, but continuing...
 )
 
 echo.
-echo %INFO% [4/5] Installing zlib...
+echo %INFO% [4/4] Installing zlib...
 vcpkg\vcpkg install zlib:x64-windows
 if errorlevel 1 (
     echo %WARNING% zlib installation had issues, but continuing...
-)
-
-echo.
-echo %INFO% [5/5] Installing uWebSockets...
-REM Try vcpkg first
-vcpkg\vcpkg install uwebsockets:x64-windows
-if errorlevel 1 (
-    echo %INFO% Installing uWebSockets manually...
-    if not exist "external" mkdir external
-    cd external
-
-    REM Clone uSockets (dependency)
-    if exist "uSockets" (
-        echo %INFO% uSockets already exists, updating...
-        cd uSockets
-        git pull origin master
-        cd ..
-    ) else (
-        echo %INFO% Cloning uSockets...
-        git clone https://github.com/uNetworking/uSockets.git
-    )
-
-    REM Clone uWebSockets
-    if exist "uWebSockets" (
-        echo %INFO% uWebSockets already exists, updating...
-        cd uWebSockets
-        git pull origin master
-        cd ..
-    ) else (
-        echo %INFO% Cloning uWebSockets...
-        git clone --recursive https://github.com/uNetworking/uWebSockets.git
-    )
-
-    cd ..
-    echo %SUCCESS% uWebSockets installed manually in external/
-) else (
-    echo %SUCCESS% uWebSockets installed via vcpkg
 )
 
 REM Integrate vcpkg
@@ -190,6 +174,11 @@ echo %INFO% Setting OPENSSL_ROOT_DIR environment variable...
 set "OPENSSL_ROOT_DIR=%INSTALL_DIR%\vcpkg\installed\x64-windows"
 setx OPENSSL_ROOT_DIR "%INSTALL_DIR%\vcpkg\installed\x64-windows" >nul 2>&1
 
+REM Check what Boost version we got
+echo.
+echo %INFO% Checking installed Boost version...
+vcpkg\vcpkg list boost
+
 echo.
 echo =====================================
 echo Dependencies Installation Complete!
@@ -197,20 +186,9 @@ echo =====================================
 echo.
 echo Installed packages:
 echo   - OpenSSL (SSL/TLS support)
-echo   - Boost (system, thread, program-options)
-echo   - nlohmann-json (JSON parsing)
-echo   - zlib (compression)
-echo   - uWebSockets (WebSocket client)
-echo.
-echo vcpkg location: %INSTALL_DIR%\vcpkg
-echo.
-echo To use these dependencies in your project:
-echo   1. Set CMAKE_TOOLCHAIN_FILE to:
-echo      %INSTALL_DIR%\vcpkg\scripts\buildsystems\vcpkg.cmake
-echo.
-echo   2. If using CMakePresets.json, it's already configured
-echo.
-echo   3. For manual builds:
-echo      cmake -DCMAKE_TOOLCHAIN_FILE="%INSTALL_DIR%\vcpkg\scripts\buildsystems\vcpkg.cmake" ..
-echo.
-pause
+echo   - Boost 1.88 libraries with Beast:
+echo     * boost-system
+echo     * boost-thread
+echo     * boost-program-options
+echo     * boost-asio
+echo     * boost-beast

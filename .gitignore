@@ -39,3 +39,6 @@ build_nvidia/*
 
 vcpkg
 vcpkg/*
+
+external
+external/*

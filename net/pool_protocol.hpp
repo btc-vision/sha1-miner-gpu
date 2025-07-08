@@ -30,7 +30,7 @@ namespace MiningPool {
         SHARE_RESULT = 0x14,
         DIFFICULTY_ADJUST = 0x15,
         POOL_STATUS = 0x16,
-        ERROR = 0x17,
+        ERROR_PROBLEM = 0x17,
         RECONNECT = 0x18
     };
 

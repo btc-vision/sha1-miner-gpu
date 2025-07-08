@@ -340,6 +340,8 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
     best_tracker_.reset();
     // Reset actual hash counter
     total_hashes_ = 0;
+    // Clear accumulated results
+    clearResults();
 
     // Start performance monitor
     monitor_thread_ = std::make_unique<std::thread>(
@@ -494,10 +496,16 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
     std::lock_guard<std::mutex> lock(timing_mutex_);
     timing_stats_.result_copy_time_ms += copy_time;
 
-    // Process results - only report new bests
+    // Process results
+    std::vector<MiningResult> valid_results;
+
     for (uint32_t i = 0; i < count; i++) {
         if (results[i].nonce == 0) continue;
 
+        // Store all valid results
+        valid_results.push_back(results[i]);
+
+        // Track best result
         if (best_tracker_.isNewBest(results[i].matching_bits)) {
             // Calculate elapsed time
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
@@ -521,6 +529,22 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
         }
 
         total_candidates_++;
+    }
+
+    // Store results for batch processing
+    if (!valid_results.empty()) {
+        {
+            std::lock_guard<std::mutex> results_lock(all_results_mutex_);
+            all_results_.insert(all_results_.end(), valid_results.begin(), valid_results.end());
+        }
+
+        // Call the callback if set
+        {
+            std::lock_guard<std::mutex> callback_lock(callback_mutex_);
+            if (result_callback_) {
+                result_callback_(valid_results);
+            }
+        }
     }
 
     // Reset pool count
@@ -658,6 +682,8 @@ void MiningSystem::cleanup() {
             gpuFree(pool.results);
         if (pool.count)
             gpuFree(pool.count);
+        if (pool.nonces_processed)
+            gpuFree(pool.nonces_processed);
     }
 
     for (auto &job: device_jobs_) {
@@ -748,8 +774,6 @@ uint64_t MiningSystem::getHashesPerKernel() const {
     return static_cast<uint64_t>(config_.blocks_per_stream) *
            static_cast<uint64_t>(config_.threads_per_block) *
            static_cast<uint64_t>(NONCES_PER_THREAD);
-
-    return config_.blocks_per_stream * config_.threads_per_block * NONCES_PER_THREAD;
 }
 
 void MiningSystem::optimizeForGPU() {
@@ -813,3 +837,4 @@ extern "C" void run_mining_loop(MiningJob job, uint32_t duration_seconds) {
 
     g_mining_system->runMiningLoop(job, duration_seconds);
 }
+

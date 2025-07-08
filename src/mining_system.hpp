@@ -8,12 +8,18 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <functional>
 
 #include "gpu_platform.hpp"
 #include "sha1_miner.cuh"
 
 // Forward declare the global shutdown flag
 extern std::atomic<bool> g_shutdown;
+
+/**
+ * Callback type for processing mining results in real-time
+ */
+using MiningResultCallback = std::function<void(const std::vector<MiningResult> &)>;
 
 /**
  * Thread-safe tracker for best mining results
@@ -80,6 +86,15 @@ public:
               , force_generic_kernel(false) {
         }
     };
+
+    /**
+     * Set a callback to be called whenever new results are found
+     * @param callback Function to call with new results
+     */
+    void setResultCallback(MiningResultCallback callback) {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        result_callback_ = callback;
+    }
 
     /**
      * Run a single batch of mining without the monitoring thread
@@ -152,6 +167,25 @@ public:
         start_time_ = std::chrono::steady_clock::now();
     }
 
+    /**
+     * Get all results found since last clear
+     * Used for batch processing
+     */
+    std::vector<MiningResult> getAllResults() {
+        std::lock_guard<std::mutex> lock(all_results_mutex_);
+        auto results = all_results_;
+        all_results_.clear();
+        return results;
+    }
+
+    /**
+     * Clear all accumulated results
+     */
+    void clearResults() {
+        std::lock_guard<std::mutex> lock(all_results_mutex_);
+        all_results_.clear();
+    }
+
     // Timing statistics structure
     struct TimingStats {
         double kernel_launch_time_ms = 0;
@@ -176,7 +210,7 @@ public:
 
     MiningStats getStats() const;
 
-private:
+protected:
     // Configuration and device properties
     Config config_;
     gpuDeviceProp device_props_;
@@ -204,12 +238,20 @@ private:
     std::unique_ptr<std::thread> monitor_thread_;
     mutable std::mutex system_mutex_;
 
+    // Callback management
+    mutable std::mutex callback_mutex_;
+    MiningResultCallback result_callback_;
+
+    // Result accumulation
+    mutable std::mutex all_results_mutex_;
+    std::vector<MiningResult> all_results_;
+
     // Private methods
     bool initializeGPUResources();
 
     void cleanup();
 
-    void processResultsOptimized(int stream_idx);
+    virtual void processResultsOptimized(int stream_idx);
 
     void performanceMonitor();
 

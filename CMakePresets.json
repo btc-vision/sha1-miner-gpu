@@ -34,7 +34,7 @@
     },
     {
       "name": "windows-ninja-release",
-      "displayName": "Windows Release (CUDA 12.9 + Ninja + uWebSockets)",
+      "displayName": "Windows Release (CUDA 12.9 + Ninja + Boost.Beast)",
       "inherits": "windows-vcpkg-base",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/release",
@@ -47,7 +47,7 @@
     },
     {
       "name": "windows-ninja-debug",
-      "displayName": "Windows Debug (CUDA 12.9 + Ninja + uWebSockets)",
+      "displayName": "Windows Debug (CUDA 12.9 + Ninja + Boost.Beast)",
       "inherits": "windows-vcpkg-base",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/debug",
@@ -60,7 +60,7 @@
     },
     {
       "name": "windows-vs2022-release",
-      "displayName": "Windows Release (VS 2022 + uWebSockets)",
+      "displayName": "Windows Release (VS 2022 + Boost.Beast)",
       "inherits": "windows-vcpkg-base",
       "generator": "Visual Studio 17 2022",
       "architecture": {
@@ -75,8 +75,24 @@
       }
     },
     {
+      "name": "windows-vs2022-debug",
+      "displayName": "Windows Debug (VS 2022 + Boost.Beast)",
+      "inherits": "windows-vcpkg-base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": {
+        "value": "x64",
+        "strategy": "set"
+      },
+      "binaryDir": "${sourceDir}/build/vs2022-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CUDA_ARCHITECTURES": "86",
+        "CMAKE_CUDA_STANDARD": "20"
+      }
+    },
+    {
       "name": "linux-gcc-release",
-      "displayName": "Linux Release (GCC + CUDA + uWebSockets)",
+      "displayName": "Linux Release (GCC + CUDA + Boost.Beast)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": {
@@ -89,8 +105,22 @@
       }
     },
     {
+      "name": "linux-gcc-debug",
+      "displayName": "Linux Debug (GCC + CUDA + Boost.Beast)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "CMAKE_CUDA_ARCHITECTURES": "86",
+        "CMAKE_CUDA_STANDARD": "20",
+        "CMAKE_CXX_STANDARD": "20"
+      }
+    },
+    {
       "name": "linux-clang-release",
-      "displayName": "Linux Release (Clang + CUDA + uWebSockets)",
+      "displayName": "Linux Release (Clang + CUDA + Boost.Beast)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/clang-release",
       "cacheVariables": {
@@ -105,7 +135,7 @@
     },
     {
       "name": "linux-hip-release",
-      "displayName": "Linux Release (HIP/ROCm + uWebSockets)",
+      "displayName": "Linux Release (HIP/ROCm + Boost.Beast)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/hip-release",
       "cacheVariables": {
@@ -115,7 +145,26 @@
         "CMAKE_CXX_STANDARD": "20",
         "USE_HIP": "ON",
         "ROCM_PATH": "/opt/rocm",
-        "HIP_ARCH": "gfx900,gfx906,gfx908,gfx90a,gfx1030,gfx1100"
+        "HIP_ARCH": "gfx900,gfx906,gfx908,gfx90a,gfx940,gfx1030,gfx1031,gfx1032,gfx1100,gfx1101,gfx1102,gfx1200,gfx1201"
+      },
+      "environment": {
+        "ROCM_PATH": "/opt/rocm",
+        "HIP_PATH": "/opt/rocm/hip"
+      }
+    },
+    {
+      "name": "linux-hip-debug",
+      "displayName": "Linux Debug (HIP/ROCm + Boost.Beast)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/hip-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CXX_STANDARD": "20",
+        "USE_HIP": "ON",
+        "ROCM_PATH": "/opt/rocm",
+        "HIP_ARCH": "gfx1030,gfx1100"
       },
       "environment": {
         "ROCM_PATH": "/opt/rocm",
@@ -125,8 +174,8 @@
   ],
   "buildPresets": [
     {
-      "name": "release",
-      "displayName": "Release Build",
+      "name": "windows-release",
+      "displayName": "Windows Release Build",
       "configurePreset": "windows-ninja-release",
       "jobs": 12,
       "targets": [
@@ -134,8 +183,8 @@
       ]
     },
     {
-      "name": "debug",
-      "displayName": "Debug Build",
+      "name": "windows-debug",
+      "displayName": "Windows Debug Build",
       "configurePreset": "windows-ninja-debug",
       "jobs": 12,
       "targets": [
@@ -143,10 +192,17 @@
       ]
     },
     {
-      "name": "release-vs",
-      "displayName": "Release Build (Visual Studio)",
+      "name": "windows-release-vs",
+      "displayName": "Windows Release Build (Visual Studio)",
       "configurePreset": "windows-vs2022-release",
       "configuration": "Release",
+      "jobs": 12
+    },
+    {
+      "name": "windows-debug-vs",
+      "displayName": "Windows Debug Build (Visual Studio)",
+      "configurePreset": "windows-vs2022-debug",
+      "configuration": "Debug",
       "jobs": 12
     },
     {
@@ -159,9 +215,27 @@
       ]
     },
     {
-      "name": "linux-hip",
-      "displayName": "Linux HIP/AMD Build",
+      "name": "linux-debug",
+      "displayName": "Linux Debug Build",
+      "configurePreset": "linux-gcc-debug",
+      "jobs": 12,
+      "targets": [
+        "sha1_miner"
+      ]
+    },
+    {
+      "name": "linux-hip-release",
+      "displayName": "Linux HIP/AMD Release Build",
       "configurePreset": "linux-hip-release",
+      "jobs": 12,
+      "targets": [
+        "sha1_miner"
+      ]
+    },
+    {
+      "name": "linux-hip-debug",
+      "displayName": "Linux HIP/AMD Debug Build",
+      "configurePreset": "linux-hip-debug",
       "jobs": 12,
       "targets": [
         "sha1_miner"
@@ -170,9 +244,17 @@
   ],
   "testPresets": [
     {
-      "name": "test-release",
-      "displayName": "Test Release",
+      "name": "test-windows-release",
+      "displayName": "Test Windows Release",
       "configurePreset": "windows-ninja-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-linux-release",
+      "displayName": "Test Linux Release",
+      "configurePreset": "linux-gcc-release",
       "output": {
         "outputOnFailure": true
       }

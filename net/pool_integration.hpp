@@ -2,10 +2,13 @@
 
 #include "pool_client.hpp"
 #include "../src/mining_system.hpp"
+#include "../include/multi_gpu_manager.hpp"
 #include "sha1_miner.cuh"
 #include <memory>
 #include <thread>
 #include <queue>
+#include <deque>
+#include <condition_variable>
 
 namespace MiningPool {
     // Pool-aware mining system that integrates with the existing miner
@@ -100,6 +103,7 @@ namespace MiningPool {
         Config config_;
         std::unique_ptr<PoolClient> pool_client_;
         std::unique_ptr<MiningSystem> mining_system_;
+        std::unique_ptr<MultiGPUManager> multi_gpu_manager_;
 
         // State
         std::atomic<bool> running_{false};
@@ -107,19 +111,25 @@ namespace MiningPool {
         std::atomic<uint32_t> current_difficulty_{50};
 
         // Current job
-        std::mutex job_mutex_;
+        mutable std::mutex job_mutex_;
+        std::condition_variable job_cv_;
         std::optional<PoolJob> current_job_;
         std::optional<MiningJob> current_mining_job_;
+        std::string current_job_id_for_mining_;
 
         // Share management
-        struct PendingShare {
-            Share share;
-            std::chrono::steady_clock::time_point submit_time;
-        };
-
-        std::mutex shares_mutex_;
+        std::mutex share_mutex_;
+        std::condition_variable share_cv_;
         std::queue<Share> share_queue_;
-        std::unordered_map<std::string, PendingShare> pending_shares_;
+        std::unordered_map<std::string, std::chrono::steady_clock::time_point> pending_shares_;
+
+        // Result accumulation for proper integration
+        std::mutex results_mutex_;
+        std::condition_variable results_cv_;
+        std::vector<MiningResult> current_mining_results_;
+
+        // Share timing for vardiff
+        std::deque<std::chrono::steady_clock::time_point> share_times_;
 
         // Statistics
         mutable std::mutex stats_mutex_;
@@ -149,6 +159,8 @@ namespace MiningPool {
         void process_mining_results(const std::vector<MiningResult> &results);
 
         void submit_share(const MiningResult &result);
+
+        void processAccumulatedResults();
 
         // Vardiff
         void adjust_local_difficulty();
@@ -261,4 +273,3 @@ namespace MiningPool {
         }
     }
 } // namespace MiningPool
-

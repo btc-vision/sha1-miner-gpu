@@ -1,10 +1,10 @@
-// pool_integration.cpp - Integration of pool client with mining system
 #include "pool_integration.hpp"
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
 #include <chrono>
 #include <sstream>
+#include <deque>
 
 namespace MiningPool {
     // Helper function to convert binary hash to hex string
@@ -46,24 +46,67 @@ namespace MiningPool {
         // Create pool client
         pool_client_ = std::make_unique<PoolClient>(config_.pool_config, this);
 
-        // Initialize mining system
+        // Initialize mining system with proper configuration
         MiningSystem::Config mining_config;
+
+        // Create result callback for share submission
+        auto result_callback = [this](const std::vector<MiningResult> &results) {
+            process_mining_results(results);
+        };
+
+        // Configure GPU setup
         if (config_.use_all_gpus) {
-            // Use all available GPUs
+            // For multi-GPU, we'll use a MultiGPUManager
             int device_count;
             gpuGetDeviceCount(&device_count);
-            mining_config.device_id = 0; // Primary GPU
-            // Note: For multi-GPU, we'd need to create multiple MiningSystem instances
+
+            if (device_count > 1) {
+                // Initialize multi-GPU manager
+                multi_gpu_manager_ = std::make_unique<MultiGPUManager>();
+                std::vector<int> gpu_ids;
+                for (int i = 0; i < device_count; i++) {
+                    gpu_ids.push_back(i);
+                }
+
+                if (!multi_gpu_manager_->initialize(gpu_ids)) {
+                    std::cerr << "Failed to initialize multi-GPU manager" << std::endl;
+                    return false;
+                }
+
+                // Set the result callback
+                multi_gpu_manager_->setResultCallback(result_callback);
+
+                std::cout << "Initialized " << device_count << " GPUs for pool mining" << std::endl;
+            } else {
+                // Single GPU fallback
+                mining_config.device_id = 0;
+            }
         } else if (!config_.gpu_ids.empty()) {
-            mining_config.device_id = config_.gpu_ids[0]; // Use first GPU for now
+            if (config_.gpu_ids.size() > 1) {
+                // Multiple specific GPUs
+                multi_gpu_manager_ = std::make_unique<MultiGPUManager>();
+                if (!multi_gpu_manager_->initialize(config_.gpu_ids)) {
+                    std::cerr << "Failed to initialize multi-GPU manager" << std::endl;
+                    return false;
+                }
+                multi_gpu_manager_->setResultCallback(result_callback);
+            } else {
+                // Single specific GPU
+                mining_config.device_id = config_.gpu_ids[0];
+            }
         } else {
+            // Single GPU specified by ID
             mining_config.device_id = config_.gpu_id;
         }
 
-        mining_system_ = std::make_unique<MiningSystem>(mining_config);
-        if (!mining_system_->initialize()) {
-            std::cerr << "Failed to initialize mining system" << std::endl;
-            return false;
+        // Initialize single GPU mining system if not using multi-GPU
+        if (!multi_gpu_manager_) {
+            mining_system_ = std::make_unique<MiningSystem>(mining_config);
+            if (!mining_system_->initialize()) {
+                std::cerr << "Failed to initialize mining system" << std::endl;
+                return false;
+            }
+            mining_system_->setResultCallback(result_callback);
         }
 
         // Connect to pool
@@ -92,13 +135,17 @@ namespace MiningPool {
         running_ = false;
         mining_active_ = false;
 
+        // Notify condition variables
+        job_cv_.notify_all();
+        share_cv_.notify_all();
+
         // Disconnect from pool
         if (pool_client_) {
             pool_client_->disconnect();
         }
 
         // Stop mining
-        if (mining_system_) {
+        if (mining_system_ || multi_gpu_manager_) {
             cleanup_mining_system();
         }
 
@@ -118,97 +165,155 @@ namespace MiningPool {
 
     void PoolMiningSystem::mining_loop() {
         while (running_.load()) {
-            if (!mining_active_.load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                continue;
-            }
-
+            // Wait for an active job
             std::unique_lock<std::mutex> lock(job_mutex_);
+            job_cv_.wait(lock, [this] {
+                return !running_.load() || (current_job_.has_value() && mining_active_.load());
+            });
+
+            if (!running_.load()) break;
+
             if (!current_mining_job_.has_value()) {
-                lock.unlock();
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
 
             auto job = current_mining_job_.value();
             lock.unlock();
 
-            // Run mining for a short period
-            const uint32_t mining_duration = 30; // 30 seconds per batch
-            mining_system_->runMiningLoop(job, mining_duration);
+            // Run mining based on system type
+            if (multi_gpu_manager_) {
+                // Multi-GPU mining with real-time result callbacks
+                const uint32_t batch_duration = 30; // 30 seconds per batch
 
-            // The share scanner will pick up any results
+                // Store current job ID for share submission
+                current_job_id_for_mining_ = current_job_->job_id;
+
+                // Run mining - results will be processed via callback
+                multi_gpu_manager_->runMining(job, batch_duration);
+            } else if (mining_system_) {
+                // Single GPU mining with real-time result callbacks
+                const uint32_t batch_duration = 30;
+
+                // Store current job ID for share submission
+                current_job_id_for_mining_ = current_job_->job_id;
+
+                // Run mining - results will be processed via callback
+                mining_system_->runMiningLoop(job, batch_duration);
+            }
         }
     }
 
     void PoolMiningSystem::share_scanner_loop() {
         while (running_.load()) {
-            scan_for_shares();
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(config_.share_scan_interval_ms)
-            );
+            std::unique_lock<std::mutex> lock(share_mutex_);
+            share_cv_.wait_for(lock, std::chrono::milliseconds(config_.share_scan_interval_ms), [this] {
+                return !running_.load() || !share_queue_.empty();
+            });
+
+            if (!running_.load()) break;
+
+            // Process all queued shares
+            while (!share_queue_.empty()) {
+                auto share = share_queue_.front();
+                share_queue_.pop();
+                lock.unlock();
+
+                // Submit to pool
+                pool_client_->submit_share(share);
+
+                // Track submission
+                {
+                    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+                    stats_.shares_submitted++;
+                }
+
+                lock.lock();
+            }
         }
     }
 
     void PoolMiningSystem::stats_reporter_loop() {
+        auto last_hashrate_report = std::chrono::steady_clock::now();
+        auto last_difficulty_check = std::chrono::steady_clock::now();
+
         while (running_.load()) {
-            // Report hashrate every 30 seconds
-            std::this_thread::sleep_for(std::chrono::seconds(30));
+            std::this_thread::sleep_for(std::chrono::seconds(5));
 
             if (!pool_client_->is_connected() || !mining_active_.load()) {
                 continue;
             }
 
-            auto mining_stats = mining_system_->getStats();
+            auto now = std::chrono::steady_clock::now();
 
-            HashrateReportMessage report;
-            report.hashrate = mining_stats.hash_rate;
-            report.gpu_count = config_.use_all_gpus ? config_.gpu_ids.size() : 1;
-            report.shares_submitted = stats_.shares_submitted;
-            report.shares_accepted = stats_.shares_accepted;
-            report.uptime_seconds = std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::steady_clock::now() - start_time_
-            ).count();
+            // Report hashrate periodically
+            if (now - last_hashrate_report >= std::chrono::seconds(30)) {
+                last_hashrate_report = now;
 
-            // Add GPU stats if needed
-            nlohmann::json gpu_stats;
-            gpu_stats["gpu_0"]["hashrate"] = mining_stats.hash_rate;
-            gpu_stats["gpu_0"]["temperature"] = 0; // Would need actual temp reading
-            report.gpu_stats = gpu_stats;
+                HashrateReportMessage report;
 
-            pool_client_->report_hashrate(report);
+                // Get mining stats
+                if (multi_gpu_manager_) {
+                    // Get stats from multi-GPU - need to calculate from elapsed time
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
+                    if (elapsed.count() > 0) {
+                        report.hashrate = stats_.hashrate; // Updated by update_stats()
+                    }
+                    report.gpu_count = config_.gpu_ids.empty() ? 1 : config_.gpu_ids.size();
+                } else if (mining_system_) {
+                    auto mining_stats = mining_system_->getStats();
+                    report.hashrate = mining_stats.hash_rate;
+                    report.gpu_count = 1;
+                }
 
-            // Update local stats
-            {
-                std::lock_guard<std::mutex> lock(stats_mutex_);
-                stats_.hashrate = mining_stats.hash_rate;
-                stats_.total_hashes = mining_stats.hashes_computed;
+                report.shares_submitted = stats_.shares_submitted;
+                report.shares_accepted = stats_.shares_accepted;
+                report.uptime_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - start_time_
+                ).count();
+
+                // Add GPU stats
+                nlohmann::json gpu_stats;
+                if (multi_gpu_manager_) {
+                    for (uint32_t i = 0; i < report.gpu_count; i++) {
+                        gpu_stats["gpu_" + std::to_string(i)]["hashrate"] = report.hashrate / report.gpu_count;
+                        gpu_stats["gpu_" + std::to_string(i)]["temperature"] = 0; // TODO: Add temp monitoring
+                    }
+                } else {
+                    gpu_stats["gpu_0"]["hashrate"] = report.hashrate;
+                    gpu_stats["gpu_0"]["temperature"] = 0; // TODO: Add temp monitoring
+                }
+                report.gpu_stats = gpu_stats;
+
+                pool_client_->report_hashrate(report);
             }
+
+            // Check for vardiff adjustment
+            if (config_.enable_vardiff && now - last_difficulty_check >= std::chrono::seconds(60)) {
+                last_difficulty_check = now;
+                adjust_local_difficulty();
+            }
+
+            // Update internal stats
+            update_stats();
         }
     }
 
     void PoolMiningSystem::scan_for_shares() {
-        if (!mining_system_ || !mining_active_.load()) {
-            return;
-        }
+        // Not needed with callback-based approach
+        // Shares are processed in real-time via process_mining_results
+    }
 
-        // Get current mining stats
-        auto mining_stats = mining_system_->getStats();
+    void PoolMiningSystem::processAccumulatedResults() {
+        // Not needed with callback-based approach
+    }
 
-        // Check if we have any candidates that meet pool difficulty
+    void PoolMiningSystem::process_mining_results(const std::vector<MiningResult> &results) {
         uint32_t pool_difficulty = current_difficulty_.load();
 
-        // In a real implementation, we'd need to access the mining system's
-        // result buffer directly. For now, we'll check based on the best match
-        if (mining_stats.best_match_bits >= pool_difficulty) {
-            // We found a share!
-            // In practice, we'd need to get the actual nonce and hash
-            MiningResult result;
-            result.matching_bits = mining_stats.best_match_bits;
-            // result.nonce would be set from actual mining results
-            // result.hash would be set from actual mining results
-
-            submit_share(result);
+        for (const auto &result: results) {
+            if (result.matching_bits >= pool_difficulty) {
+                submit_share(result);
+            }
         }
     }
 
@@ -221,28 +326,28 @@ namespace MiningPool {
         Share share;
         share.job_id = current_job_->job_id;
         share.nonce = result.nonce;
-        share.hash = hash_to_hex(result.hash); // Convert to hex string
+        share.hash = hash_to_hex(result.hash);
         share.matching_bits = result.matching_bits;
         share.found_time = std::chrono::steady_clock::now();
 
-        // Submit to pool
-        pool_client_->submit_share(share);
-
-        // Track pending share
+        // Queue share for submission
         {
-            std::lock_guard<std::mutex> lock(shares_mutex_);
-            PendingShare pending;
-            pending.share = share;
-            pending.submit_time = std::chrono::steady_clock::now();
-
-            std::string share_id = share.job_id + "_" + std::to_string(share.nonce);
-            pending_shares_[share_id] = pending;
+            std::lock_guard<std::mutex> share_lock(share_mutex_);
+            share_queue_.push(share);
+            share_cv_.notify_one();
         }
 
-        // Update stats
+        // Track locally
         {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            stats_.shares_submitted++;
+            std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+
+            // Track share timing for vardiff
+            share_times_.push_back(share.found_time);
+
+            // Keep only recent share times (last 100 shares)
+            if (share_times_.size() > 100) {
+                share_times_.pop_front();
+            }
         }
     }
 
@@ -275,6 +380,7 @@ namespace MiningPool {
 
         // Start mining if not already active
         mining_active_ = true;
+        job_cv_.notify_all();
     }
 
     PoolMiningSystem::PoolMiningStats PoolMiningSystem::get_stats() const {
@@ -304,19 +410,36 @@ namespace MiningPool {
 
     void PoolMiningSystem::cleanup_mining_system() {
         if (mining_system_) {
-            // The mining system will clean up in its destructor
             mining_system_.reset();
+        }
+        if (multi_gpu_manager_) {
+            multi_gpu_manager_.reset();
         }
     }
 
     void PoolMiningSystem::update_stats() {
-        if (!mining_system_) return;
+        double current_hashrate = 0.0;
+        uint64_t total_hashes = 0;
 
-        auto mining_stats = mining_system_->getStats();
+        if (multi_gpu_manager_) {
+            // Estimate based on share submission rate and difficulty
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - start_time_
+            );
+            if (elapsed.count() > 0 && stats_.shares_submitted > 0) {
+                // Better estimation: use share rate and difficulty
+                double shares_per_second = static_cast<double>(stats_.shares_submitted) / elapsed.count();
+                current_hashrate = shares_per_second * std::pow(2.0, static_cast<double>(current_difficulty_.load()));
+            }
+        } else if (mining_system_) {
+            auto mining_stats = mining_system_->getStats();
+            current_hashrate = mining_stats.hash_rate;
+            total_hashes = mining_stats.hashes_computed;
+        }
 
         std::lock_guard<std::mutex> lock(stats_mutex_);
-        stats_.hashrate = mining_stats.hash_rate;
-        stats_.total_hashes = mining_stats.hashes_computed;
+        stats_.hashrate = current_hashrate;
+        stats_.total_hashes = total_hashes;
     }
 
     void PoolMiningSystem::handle_reconnect() {
@@ -332,36 +455,49 @@ namespace MiningPool {
             current_mining_job_.reset();
         }
 
+        // Clear pending shares
+        {
+            std::lock_guard<std::mutex> lock(share_mutex_);
+            std::queue<Share> empty;
+            std::swap(share_queue_, empty);
+        }
+
         // Pool client will handle the actual reconnection
-        // We just need to wait for a new job
     }
 
     void PoolMiningSystem::adjust_local_difficulty() {
-        // Calculate share submission rate
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_).count();
+        std::lock_guard<std::mutex> lock(stats_mutex_);
 
-        if (elapsed > 0 && stats_.shares_submitted > 10) {
-            double shares_per_second = static_cast<double>(stats_.shares_submitted) / elapsed;
-            double seconds_per_share = 1.0 / shares_per_second;
+        if (share_times_.size() < 10) {
+            // Not enough data to adjust
+            return;
+        }
 
-            // Adjust difficulty to target share time
-            if (seconds_per_share < config_.target_share_time * 0.5) {
-                // Too many shares, increase difficulty
-                uint32_t new_diff = current_difficulty_ + 1;
-                if (new_diff <= 60) {
-                    // Reasonable upper limit
-                    current_difficulty_ = new_diff;
-                    std::cout << "Adjusting local difficulty up to " << new_diff << std::endl;
-                }
-            } else if (seconds_per_share > config_.target_share_time * 2.0) {
-                // Too few shares, decrease difficulty
-                uint32_t new_diff = current_difficulty_ - 1;
-                if (new_diff >= config_.min_share_difficulty) {
-                    current_difficulty_ = new_diff;
-                    std::cout << "Adjusting local difficulty down to " << new_diff << std::endl;
-                }
-            }
+        // Calculate average time between shares
+        double total_time = 0;
+        for (size_t i = 1; i < share_times_.size(); i++) {
+            auto time_diff = std::chrono::duration_cast<std::chrono::seconds>(
+                share_times_[i] - share_times_[i - 1]
+            ).count();
+            total_time += time_diff;
+        }
+
+        double avg_share_time = total_time / (share_times_.size() - 1);
+
+        // Adjust difficulty to target share time
+        if (avg_share_time < config_.target_share_time * 0.5) {
+            // Too many shares, request higher difficulty
+            uint32_t new_diff = current_difficulty_.load() + 1;
+            std::cout << "Requesting difficulty increase to " << new_diff
+                    << " (current avg share time: " << avg_share_time << "s)" << std::endl;
+
+            // Some pools support client-requested difficulty adjustments
+            // This would need protocol support
+        } else if (avg_share_time > config_.target_share_time * 2.0) {
+            // Too few shares, request lower difficulty
+            uint32_t new_diff = std::max(config_.min_share_difficulty, current_difficulty_.load() - 1);
+            std::cout << "Requesting difficulty decrease to " << new_diff
+                    << " (current avg share time: " << avg_share_time << "s)" << std::endl;
         }
     }
 
@@ -375,7 +511,7 @@ namespace MiningPool {
             uint32_t optimal_diff = config_.min_share_difficulty;
 
             while (optimal_diff < 60) {
-                double expected_hashes = std::pow(2.0, optimal_diff);
+                double expected_hashes = std::pow(2.0, static_cast<double>(optimal_diff));
                 if (expected_hashes > hashes_for_target_time) {
                     break;
                 }
@@ -385,15 +521,7 @@ namespace MiningPool {
             return optimal_diff;
         }
 
-        return current_difficulty_;
-    }
-
-    void PoolMiningSystem::process_mining_results(const std::vector<MiningResult> &results) {
-        for (const auto &result: results) {
-            if (result.matching_bits >= current_difficulty_) {
-                submit_share(result);
-            }
-        }
+        return current_difficulty_.load();
     }
 
     // IPoolEventHandler implementations
@@ -408,6 +536,7 @@ namespace MiningPool {
         std::cout << "Disconnected from pool: " << reason << std::endl;
 
         mining_active_ = false;
+        job_cv_.notify_all();
 
         std::lock_guard<std::mutex> lock(stats_mutex_);
         stats_.connected = false;
@@ -431,6 +560,9 @@ namespace MiningPool {
 
         std::lock_guard<std::mutex> lock(stats_mutex_);
         stats_.authenticated = false;
+
+        // Stop mining on auth failure
+        mining_active_ = false;
     }
 
     void PoolMiningSystem::on_new_job(const PoolJob &job) {
@@ -448,35 +580,26 @@ namespace MiningPool {
             current_job_.reset();
             current_mining_job_.reset();
             mining_active_ = false;
+            job_cv_.notify_all();
         }
     }
 
     void PoolMiningSystem::on_share_accepted(const ShareResultMessage &result) {
         std::cout << "Share accepted! Difficulty: " << result.difficulty_credited << std::endl;
 
-        // Remove from pending
-        {
-            std::lock_guard<std::mutex> lock(shares_mutex_);
-            std::string share_id = result.job_id + "_" + std::to_string(result.share_value);
-            pending_shares_.erase(share_id);
-        }
-
         // Update stats
         {
             std::lock_guard<std::mutex> lock(stats_mutex_);
             stats_.shares_accepted++;
+
+            if (!result.message.empty()) {
+                std::cout << "Pool message: " << result.message << std::endl;
+            }
         }
     }
 
     void PoolMiningSystem::on_share_rejected(const ShareResultMessage &result) {
         std::cout << "Share rejected: " << result.message << std::endl;
-
-        // Remove from pending
-        {
-            std::lock_guard<std::mutex> lock(shares_mutex_);
-            std::string share_id = result.job_id + "_" + std::to_string(result.share_value);
-            pending_shares_.erase(share_id);
-        }
 
         // Update stats
         {
@@ -496,7 +619,8 @@ namespace MiningPool {
 
     void PoolMiningSystem::on_pool_status(const PoolStatusMessage &status) {
         std::cout << "Pool status - Workers: " << status.connected_workers
-                << ", Hashrate: " << status.total_hashrate / 1e9 << " GH/s" << std::endl;
+                << ", Hashrate: " << status.total_hashrate / 1e9 << " GH/s"
+                << ", Round shares: " << status.current_round_shares << std::endl;
 
         std::lock_guard<std::mutex> lock(stats_mutex_);
         // Pool name might be in extra_info JSON

@@ -136,6 +136,45 @@ void MultiGPUManager::workerThread(GPUWorker *worker, const MiningJob &job, uint
 
     std::cout << "[GPU " << worker->device_id << "] Worker thread started\n";
 
+    // Set result callback for this worker
+    auto worker_callback = [this, worker](const std::vector<MiningResult> &results) {
+        // Update worker stats
+        worker->candidates_found += results.size();
+        // Check for new best and forward to global callback
+        for (const auto &result: results) {
+            if (result.matching_bits > worker->best_match_bits) {
+                worker->best_match_bits = result.matching_bits;
+                // Check if this is a global best
+                if (global_best_tracker_.isNewBest(result.matching_bits)) {
+                    std::lock_guard<std::mutex> lock(stats_mutex_);
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now() - start_time_
+                    );
+                    std::cout << "\n[GPU " << worker->device_id << " - NEW BEST!] Time: " << elapsed.count() << "s\n";
+                    std::cout << "  Nonce: 0x" << std::hex << result.nonce << std::dec << "\n";
+                    std::cout << "  Matching bits: " << result.matching_bits << "\n";
+                    std::cout << "  Hash: ";
+                    for (int j = 0; j < 5; j++) {
+                        std::cout << std::hex << std::setw(8) << std::setfill('0')
+                                << result.hash[j];
+                        if (j < 4) std::cout << " ";
+                    }
+                    std::cout << std::dec << "\n\n";
+                }
+            }
+        }
+
+        // Forward to global callback
+        {
+            std::lock_guard<std::mutex> lock(callback_mutex_);
+            if (result_callback_) {
+                result_callback_(results);
+            }
+        }
+    };
+
+    worker->mining_system->setResultCallback(worker_callback);
+
     // For problematic GPUs, add extra error handling
     bool has_errors = false;
     int consecutive_errors = 0;
@@ -171,35 +210,6 @@ void MultiGPUManager::workerThread(GPUWorker *worker, const MiningJob &job, uint
             if (nonces_used_in_batch >= NONCE_BATCH_SIZE * 0.9) {
                 current_nonce_base = getNextNonceBatch();
                 nonces_used_in_batch = 0;
-            }
-
-            // Get any results from this batch
-            auto results = worker->mining_system->getLastResults();
-            worker->candidates_found += results.size();
-
-            // Check for new best
-            for (const auto &result: results) {
-                if (result.matching_bits > worker->best_match_bits) {
-                    worker->best_match_bits = result.matching_bits;
-                    // Check if this is a global best
-                    if (global_best_tracker_.isNewBest(result.matching_bits)) {
-                        std::lock_guard<std::mutex> lock(stats_mutex_);
-                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                            std::chrono::steady_clock::now() - start_time_
-                        );
-                        std::cout << "\n[GPU " << worker->device_id << " - NEW BEST!] Time: " << elapsed.count() <<
-                                "s\n";
-                        std::cout << "  Nonce: 0x" << std::hex << result.nonce << std::dec << "\n";
-                        std::cout << "  Matching bits: " << result.matching_bits << "\n";
-                        std::cout << "  Hash: ";
-                        for (int j = 0; j < 5; j++) {
-                            std::cout << std::hex << std::setw(8) << std::setfill('0')
-                                    << result.hash[j];
-                            if (j < 4) std::cout << " ";
-                        }
-                        std::cout << std::dec << "\n\n";
-                    }
-                }
             }
 
             // Reset error counter on success

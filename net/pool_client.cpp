@@ -1,20 +1,24 @@
 #include "pool_client.hpp"
 #include <iostream>
 #include <regex>
-#include "uws_wrapper.h"
+
+// Make sure OpenSSL SHA1 doesn't conflict with our SHA1
+#ifdef SHA1
+#undef SHA1
+#endif
 
 namespace MiningPool {
     // ParsedUrl implementation
     PoolClient::ParsedUrl PoolClient::parse_url(const std::string &url) {
         ParsedUrl result;
 
-        std::regex url_regex(R"(^(wss?):\/\/([^:\/]+)(?::(\d+))?(\/.*)?$)");
+        const std::regex url_regex(R"(^(wss?):\/\/([^:\/]+)(?::(\d+))?(\/.*)?$)");
         std::smatch matches;
 
         if (std::regex_match(url, matches, url_regex)) {
             result.is_secure = (matches[1].str() == "wss");
             result.host = matches[2].str();
-            result.port = matches[3].length() ? std::stoi(matches[3].str()) : (result.is_secure ? 443 : 80);
+            result.port = matches[3].length() ? matches[3].str() : (result.is_secure ? "443" : "80");
             result.path = matches[4].length() ? matches[4].str() : "/";
         } else {
             throw std::invalid_argument("Invalid WebSocket URL: " + url);
@@ -28,6 +32,9 @@ namespace MiningPool {
         : config_(config), event_handler_(handler) {
         worker_stats_.worker_id = config.worker_name;
         worker_stats_.connected_since = std::chrono::steady_clock::now();
+
+        // Initialize work guard to keep io_context running
+        work_guard_ = std::make_unique<net::executor_work_guard<net::io_context::executor_type> >(ioc_.get_executor());
     }
 
     // PoolClient destructor
@@ -45,22 +52,84 @@ namespace MiningPool {
         try {
             auto parsed = parse_url(config_.url);
 
-            // Start IO thread with uWebSockets event loop
-            io_thread_ = std::make_unique<std::thread>(&PoolClient::io_loop, this);
-
-            // Start auxiliary threads
+            // Start auxiliary threads first
             message_processor_thread_ = std::thread(&PoolClient::message_processor_loop, this);
             keepalive_thread_ = std::thread(&PoolClient::keepalive_loop, this);
 
-            // Wait for connection with timeout
-            auto start = std::chrono::steady_clock::now();
-            while (!connected_.load() &&
-                   std::chrono::steady_clock::now() - start <
-                   std::chrono::seconds(config_.response_timeout_ms / 1000)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // Start IO thread
+            io_thread_ = std::make_unique<std::thread>(&PoolClient::io_loop, this);
+
+            // Resolve host
+            tcp::resolver resolver{ioc_};
+            auto const results = resolver.resolve(parsed.host, parsed.port);
+
+            if (config_.use_tls) {
+                // Initialize SSL context
+                ssl_ctx_.set_verify_mode(config_.verify_server_cert ? ssl::verify_peer : ssl::verify_none);
+                if (!config_.tls_cert_file.empty() && !config_.tls_key_file.empty()) {
+                    ssl_ctx_.use_certificate_file(config_.tls_cert_file, ssl::context::pem);
+                    ssl_ctx_.use_private_key_file(config_.tls_key_file, ssl::context::pem);
+                }
+
+                // Create SSL stream
+                wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket> > >(ioc_, ssl_ctx_);
+
+                // Connect TCP socket - use begin() to get first endpoint
+                beast::get_lowest_layer(*wss_).connect(results.begin()->endpoint());
+
+                // Perform SSL handshake
+                wss_->next_layer().handshake(ssl::stream_base::client);
+
+                // Set WebSocket options
+                wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+                wss_->set_option(websocket::stream_base::decorator(
+                    [](websocket::request_type &req) {
+                        req.set(http::field::user_agent, "SHA1-Miner/1.0 Boost.Beast");
+                    }));
+
+                // Perform WebSocket handshake
+                wss_->handshake(parsed.host, parsed.path);
+            } else {
+                // Create plain WebSocket stream
+                ws_ = std::make_unique<websocket::stream<tcp::socket> >(ioc_);
+
+                // Connect TCP socket - use begin() to get first endpoint
+                beast::get_lowest_layer(*ws_).connect(results.begin()->endpoint());
+
+                // Set WebSocket options
+                ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+                ws_->set_option(websocket::stream_base::decorator(
+                    [](websocket::request_type &req) {
+                        req.set(http::field::user_agent, "SHA1-Miner/1.0 Boost.Beast");
+                    }));
+
+                // Perform WebSocket handshake
+                ws_->handshake(parsed.host, parsed.path);
             }
 
-            return connected_.load();
+            connected_ = true;
+            worker_stats_.connected_since = std::chrono::steady_clock::now();
+            event_handler_->on_connected();
+
+            // Send hello message
+            HelloMessage hello;
+            hello.protocol_version = PROTOCOL_VERSION;
+            hello.client_version = "SHA1-Miner/1.0";
+            hello.capabilities = {"gpu", "multi-gpu", "vardiff"};
+            hello.user_agent = "SHA1-Miner";
+
+            Message msg;
+            msg.type = MessageType::HELLO;
+            msg.id = Utils::generate_message_id();
+            msg.timestamp = Utils::current_timestamp_ms();
+            msg.payload = hello.to_json();
+
+            send_message(msg);
+
+            // Start read loop
+            do_read();
+
+            return true;
         } catch (const std::exception &e) {
             std::cerr << "Connection error: " << e.what() << std::endl;
             running_ = false;
@@ -78,24 +147,34 @@ namespace MiningPool {
         authenticated_ = false;
 
         // Close WebSocket connection
-        if (ws_) {
-            if (config_.use_tls) {
-                reinterpret_cast<uWS::WebSocket<true, true, WebSocketData> *>(ws_)->close();
-            } else {
-                reinterpret_cast<uWS::WebSocket<false, true, WebSocketData> *>(ws_)->close();
+        try {
+            if (config_.use_tls && wss_) {
+                if (wss_->is_open()) {
+                    // Use the numeric value directly to avoid Windows macro conflicts
+                    wss_->close(static_cast<websocket::close_code>(1000)); // 1000 is normal closure
+                }
+            } else if (ws_) {
+                if (ws_->is_open()) {
+                    // Use the numeric value directly to avoid Windows macro conflicts
+                    ws_->close(static_cast<websocket::close_code>(1000)); // 1000 is normal closure
+                }
             }
-            ws_ = nullptr;
+        } catch (const std::exception &e) {
+            // Ignore errors during shutdown
         }
+
+        // Stop io_context
+        if (work_guard_) {
+            work_guard_.reset();
+        }
+        ioc_.stop();
 
         // Notify condition variables
         outgoing_cv_.notify_all();
         incoming_cv_.notify_all();
 
         // Join threads
-        if (io_thread_ &&io_thread_
-        ->
-        joinable()
-        ) {
+        if (io_thread_ && io_thread_->joinable()) {
             io_thread_->join();
         }
         if (message_processor_thread_.joinable()) {
@@ -107,257 +186,15 @@ namespace MiningPool {
     }
 
     void PoolClient::io_loop() {
-        auto parsed = parse_url(config_.url);
-
-        // Create and run the appropriate app (SSL or non-SSL)
-        if (config_.use_tls) {
-            // Configure SSL options using uWS::SocketContextOptions
-            uWS::SocketContextOptions ssl_options = {};
-            if (!config_.tls_cert_file.empty()) {
-                ssl_options.cert_file_name = config_.tls_cert_file.c_str();
-            }
-            if (!config_.tls_key_file.empty()) {
-                ssl_options.key_file_name = config_.tls_key_file.c_str();
-            }
-
-            // Create SSL app with options
-            uWS::SSLApp app(ssl_options);
-
-            // Configure WebSocket behavior for SSL
-            app.ws<WebSocketData>("/*", {
-                                      .compression = uWS::SHARED_COMPRESSOR,
-                                      .maxPayloadLength = 16 * 1024 * 1024,
-                                      .idleTimeout = static_cast<unsigned short>(config_.keepalive_interval_s * 2),
-                                      .maxBackpressure = 1 * 1024 * 1024,
-                                      .closeOnBackpressureLimit = false,
-                                      .resetIdleTimeoutOnSend = true,
-                                      .sendPingsAutomatically = true,
-
-                                      .open = [this](auto *ws) {
-                                          ws->getUserData()->client = this;
-                                          this->ws_ = ws;
-                                          connected_ = true;
-
-                                          // Update stats
-                                          {
-                                              std::lock_guard<std::mutex> lock(stats_mutex_);
-                                              worker_stats_.connected_since = std::chrono::steady_clock::now();
-                                          }
-
-                                          event_handler_->on_connected();
-
-                                          // Send hello message
-                                          HelloMessage hello;
-                                          hello.protocol_version = PROTOCOL_VERSION;
-                                          hello.client_version = "SHA1-Miner/1.0";
-                                          hello.capabilities = {"gpu", "multi-gpu", "vardiff"};
-
-                                          Message msg;
-                                          msg.type = MessageType::HELLO;
-                                          msg.id = Utils::generate_message_id();
-                                          msg.timestamp = Utils::current_timestamp_ms();
-                                          msg.payload = hello.to_json();
-
-                                          send_message(msg);
-                                      },
-
-                                      .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
-                                          if (opCode == uWS::OpCode::TEXT) {
-                                              auto parsed = Message::deserialize(std::string(message));
-                                              if (parsed) {
-                                                  std::lock_guard<std::mutex> lock(incoming_mutex_);
-                                                  incoming_queue_.push(*parsed);
-                                                  incoming_cv_.notify_one();
-                                              }
-                                          }
-                                      },
-
-                                      .drain = [this](auto *ws) {
-                                          // Handle backpressure
-                                          auto bufferedAmount = ws->getBufferedAmount();
-                                          if (bufferedAmount > 5 * 1024 * 1024) {
-                                              std::cerr << "WebSocket backpressure high: " << bufferedAmount <<
-                                                      " bytes buffered" << std::endl;
-                                          }
-                                      },
-
-                                      .ping = [this](auto *ws, std::string_view data) {
-                                          // Ping received
-                                          if (config_.debug_mode) {
-                                              std::cout << "Ping received from server" << std::endl;
-                                          }
-                                      },
-
-                                      .pong = [this](auto *ws, std::string_view data) {
-                                          // Pong received
-                                          if (config_.debug_mode) {
-                                              std::cout << "Pong received from server" << std::endl;
-                                          }
-                                      },
-
-                                      .close = [this](auto *ws, int code, std::string_view message) {
-                                          connected_ = false;
-                                          authenticated_ = false;
-                                          ws_ = nullptr;
-
-                                          std::string reason = message.empty()
-                                                                   ? "Connection closed"
-                                                                   : std::string(message);
-                                          event_handler_->on_disconnected(reason);
-
-                                          // Handle reconnection if configured
-                                          if (running_.load() && config_.reconnect_attempts != 0) {
-                                              std::this_thread::sleep_for(
-                                                  std::chrono::milliseconds(config_.reconnect_delay_ms));
-                                              reconnect();
-                                          }
-                                      }
-                                  });
-
-            // Connect to the WebSocket endpoint
-            app.get("/*", [this, parsed](auto *res, auto *req) {
-                // Get the host header for the WebSocket handshake
-                std::string host_header = parsed.host + ":" + std::to_string(parsed.port);
-
-                res->template upgrade<WebSocketData>(
-                    {this}, // user data
-                    req->getHeader("sec-websocket-key"),
-                    req->getHeader("sec-websocket-protocol"),
-                    req->getHeader("sec-websocket-extensions"),
-                    (us_socket_context_t *) nullptr // use default context
-                );
-            });
-
-            // Listen on all interfaces
-            app.listen(0, [this, parsed](auto *token) {
-                if (token) {
-                    // Now connect as a client
-                    // Note: uWebSockets doesn't have a direct client API, so we need to use
-                    // the HTTP client functionality to upgrade to WebSocket
-                    std::cout << "Connecting to " << parsed.host << ":" << parsed.port << std::endl;
-                }
-            }).run();
-        } else {
-            // Create non-SSL app
-            uWS::App app;
-
-            // Configure WebSocket behavior for non-SSL
-            app.ws<WebSocketData>("/*", {
-                                      .compression = uWS::SHARED_COMPRESSOR,
-                                      .maxPayloadLength = 16 * 1024 * 1024,
-                                      .idleTimeout = static_cast<unsigned short>(config_.keepalive_interval_s * 2),
-                                      .maxBackpressure = 1 * 1024 * 1024,
-                                      .closeOnBackpressureLimit = false,
-                                      .resetIdleTimeoutOnSend = true,
-                                      .sendPingsAutomatically = true,
-
-                                      .open = [this](auto *ws) {
-                                          ws->getUserData()->client = this;
-                                          this->ws_ = ws;
-                                          connected_ = true;
-
-                                          // Update stats
-                                          {
-                                              std::lock_guard<std::mutex> lock(stats_mutex_);
-                                              worker_stats_.connected_since = std::chrono::steady_clock::now();
-                                          }
-
-                                          event_handler_->on_connected();
-
-                                          // Send hello message
-                                          HelloMessage hello;
-                                          hello.protocol_version = PROTOCOL_VERSION;
-                                          hello.client_version = "SHA1-Miner/1.0";
-                                          hello.capabilities = {"gpu", "multi-gpu", "vardiff"};
-
-                                          Message msg;
-                                          msg.type = MessageType::HELLO;
-                                          msg.id = Utils::generate_message_id();
-                                          msg.timestamp = Utils::current_timestamp_ms();
-                                          msg.payload = hello.to_json();
-
-                                          send_message(msg);
-                                      },
-
-                                      .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
-                                          if (opCode == uWS::OpCode::TEXT) {
-                                              auto parsed = Message::deserialize(std::string(message));
-                                              if (parsed) {
-                                                  std::lock_guard<std::mutex> lock(incoming_mutex_);
-                                                  incoming_queue_.push(*parsed);
-                                                  incoming_cv_.notify_one();
-                                              }
-                                          }
-                                      },
-
-                                      .drain = [this](auto *ws) {
-                                          // Handle backpressure
-                                          auto bufferedAmount = ws->getBufferedAmount();
-                                          if (bufferedAmount > 5 * 1024 * 1024) {
-                                              std::cerr << "WebSocket backpressure high: " << bufferedAmount <<
-                                                      " bytes buffered" << std::endl;
-                                          }
-                                      },
-
-                                      .ping = [this](auto *ws, std::string_view data) {
-                                          // Ping received
-                                          if (config_.debug_mode) {
-                                              std::cout << "Ping received from server" << std::endl;
-                                          }
-                                      },
-
-                                      .pong = [this](auto *ws, std::string_view data) {
-                                          // Pong received
-                                          if (config_.debug_mode) {
-                                              std::cout << "Pong received from server" << std::endl;
-                                          }
-                                      },
-
-                                      .close = [this](auto *ws, int code, std::string_view message) {
-                                          connected_ = false;
-                                          authenticated_ = false;
-                                          ws_ = nullptr;
-
-                                          std::string reason = message.empty()
-                                                                   ? "Connection closed"
-                                                                   : std::string(message);
-                                          event_handler_->on_disconnected(reason);
-
-                                          // Handle reconnection if configured
-                                          if (running_.load() && config_.reconnect_attempts != 0) {
-                                              std::this_thread::sleep_for(
-                                                  std::chrono::milliseconds(config_.reconnect_delay_ms));
-                                              reconnect();
-                                          }
-                                      }
-                                  });
-
-            // Connect to the WebSocket endpoint
-            app.get("/*", [this, parsed](auto *res, auto *req) {
-                // Get the host header for the WebSocket handshake
-                std::string host_header = parsed.host + ":" + std::to_string(parsed.port);
-
-                res->template upgrade<WebSocketData>(
-                    {this}, // user data
-                    req->getHeader("sec-websocket-key"),
-                    req->getHeader("sec-websocket-protocol"),
-                    req->getHeader("sec-websocket-extensions"),
-                    (us_socket_context_t *) nullptr // use default context
-                );
-            });
-
-            // Listen on all interfaces
-            app.listen(0, [this, parsed](auto *token) {
-                if (token) {
-                    // Now connect as a client
-                    std::cout << "Connecting to " << parsed.host << ":" << parsed.port << std::endl;
-                }
-            }).run();
+        try {
+            ioc_.run();
+        } catch (const std::exception &e) {
+            std::cerr << "IO loop error: " << e.what() << std::endl;
         }
     }
 
     void PoolClient::send_message(const Message &msg) {
-        if (!connected_.load() || !ws_) {
+        if (!connected_.load()) {
             return;
         }
 
@@ -371,13 +208,101 @@ namespace MiningPool {
             pending_requests_[msg.id] = std::chrono::steady_clock::now();
         }
 
-        // Send message based on SSL/non-SSL
-        if (config_.use_tls) {
-            auto *ssl_ws = reinterpret_cast<uWS::WebSocket<true, true, WebSocketData> *>(ws_);
-            ssl_ws->send(payload, uWS::OpCode::TEXT);
-        } else {
-            auto *ws = reinterpret_cast<uWS::WebSocket<false, true, WebSocketData> *>(ws_);
-            ws->send(payload, uWS::OpCode::TEXT);
+        // Queue message for sending
+        {
+            std::lock_guard<std::mutex> lock(outgoing_mutex_);
+            outgoing_queue_.push(msg);
+            outgoing_cv_.notify_one();
+        }
+
+        // Trigger write if not already writing
+        net::post(ioc_, [this]() { do_write(); });
+    }
+
+    void PoolClient::do_read() {
+        auto self = shared_from_this();
+
+        auto read_handler = [this, self](beast::error_code ec, std::size_t bytes_transferred) {
+            on_read(ec, bytes_transferred);
+        };
+
+        if (config_.use_tls && wss_) {
+            wss_->async_read(buffer_, read_handler);
+        } else if (ws_) {
+            ws_->async_read(buffer_, read_handler);
+        }
+    }
+
+    void PoolClient::do_write() {
+        if (!connected_.load()) {
+            return;
+        }
+
+        std::unique_lock<std::mutex> lock(outgoing_mutex_);
+        if (outgoing_queue_.empty()) {
+            return;
+        }
+
+        Message msg = outgoing_queue_.front();
+        outgoing_queue_.pop();
+        lock.unlock();
+
+        std::string payload = msg.serialize();
+        auto self = shared_from_this();
+
+        auto write_handler = [this, self](beast::error_code ec, std::size_t bytes_transferred) {
+            on_write(ec, bytes_transferred);
+        };
+
+        if (config_.use_tls && wss_) {
+            wss_->async_write(net::buffer(payload), write_handler);
+        } else if (ws_) {
+            ws_->async_write(net::buffer(payload), write_handler);
+        }
+    }
+
+    void PoolClient::on_read(beast::error_code ec, std::size_t bytes_transferred) {
+        if (ec) {
+            if (ec != websocket::error::closed) {
+                std::cerr << "Read error: " << ec.message() << std::endl;
+            }
+            connected_ = false;
+            authenticated_ = false;
+            event_handler_->on_disconnected(ec.message());
+
+            // Handle reconnection if configured
+            if (running_.load() && config_.reconnect_attempts != 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
+                reconnect();
+            }
+            return;
+        }
+
+        // Parse the message
+        std::string data = beast::buffers_to_string(buffer_.data());
+        buffer_.consume(bytes_transferred);
+
+        auto parsed = Message::deserialize(data);
+        if (parsed) {
+            std::lock_guard<std::mutex> lock(incoming_mutex_);
+            incoming_queue_.push(*parsed);
+            incoming_cv_.notify_one();
+        }
+
+        // Continue reading
+        do_read();
+    }
+
+    void PoolClient::on_write(beast::error_code ec, std::size_t bytes_transferred) {
+        if (ec) {
+            std::cerr << "Write error: " << ec.message() << std::endl;
+            return;
+        }
+
+        // Check if more messages to send
+        std::lock_guard<std::mutex> lock(outgoing_mutex_);
+        if (!outgoing_queue_.empty()) {
+            net::post(ioc_, [this]() { do_write(); });
         }
     }
 
@@ -444,7 +369,7 @@ namespace MiningPool {
                 case MessageType::POOL_STATUS:
                     handle_pool_status(PoolStatusMessage::from_json(msg.payload));
                     break;
-                case static_cast<MessageType>(0x17): // ERROR type without using the enum
+                case MessageType::ERROR_PROBLEM:
                     handle_error(msg);
                     break;
                 case MessageType::RECONNECT:
@@ -651,7 +576,8 @@ namespace MiningPool {
     }
 
     void PoolClient::handle_error(const Message &msg) {
-        ErrorCode code = static_cast<ErrorCode>(msg.payload.value("code", 0));
+        int error_code_int = msg.payload.value("code", 0);
+        ErrorCode code = static_cast<ErrorCode>(error_code_int);
         std::string message = msg.payload.value("message", "Unknown error");
         event_handler_->on_error(code, message);
     }
@@ -750,28 +676,11 @@ namespace MiningPool {
 
         std::cout << "Attempting to reconnect..." << std::endl;
 
-        // Close current connection
-        if (ws_) {
-            if (config_.use_tls) {
-                reinterpret_cast<uWS::WebSocket<true, true, WebSocketData> *>(ws_)->close();
-            } else {
-                reinterpret_cast<uWS::WebSocket<false, true, WebSocketData> *>(ws_)->close();
-            }
-            ws_ = nullptr;
-        }
-
-        connected_ = false;
-        authenticated_ = false;
-
-        // Clear state
-        {
-            std::lock_guard<std::mutex> lock(jobs_mutex_);
-            active_jobs_.clear();
-            current_job_id_.clear();
-        }
-
-        // Attempt reconnection
-        // The close handler in io_loop will handle the actual reconnection
+        // The disconnect will trigger reconnection through on_close handler
+        disconnect();
+        // Try to reconnect after a delay
+        std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
+        connect();
     }
 
     // PoolClientManager implementation

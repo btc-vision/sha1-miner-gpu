@@ -53,7 +53,7 @@ if (POLICY CMP0167)
     cmake_policy(SET CMP0167 OLD)
 endif ()
 
-# Find Boost with vcpkg hints - ADDED program_options
+# Find Boost with vcpkg hints - Now we need Beast from Boost 1.88
 if (WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE)
     # Help CMake find Boost from vcpkg
     set(BOOST_ROOT ${CMAKE_PREFIX_PATH})
@@ -63,7 +63,8 @@ if (WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE)
     set(Boost_USE_STATIC_RUNTIME OFF)
 endif ()
 
-find_package(Boost 1.70 REQUIRED COMPONENTS system thread program_options)
+# Find Boost 1.70+ which includes Beast
+find_package(Boost 1.70 REQUIRED COMPONENTS system thread program_options date_time regex random beast)
 if (Boost_FOUND)
     message(STATUS "Boost found:")
     message(STATUS "  Version: ${Boost_VERSION}")
@@ -71,7 +72,7 @@ if (Boost_FOUND)
     message(STATUS "  Libraries: ${Boost_LIBRARIES}")
 endif ()
 
-# Find zlib (required by uWebSockets)
+# Find zlib (optional but recommended)
 find_package(ZLIB REQUIRED)
 
 # Platform-specific optimization flags
@@ -93,100 +94,6 @@ set(MINER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include/miner)
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(NET_DIR ${CMAKE_CURRENT_SOURCE_DIR}/net)
 
-# uWebSockets configuration
-# Allow manual override via command line
-if (NOT UWEBSOCKETS_INCLUDE_DIR)
-    # First try to find with subdirectory structure (vcpkg style)
-    find_path(UWEBSOCKETS_INCLUDE_DIR
-            NAMES uWebSockets/App.h
-            PATHS
-            ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
-            ${CMAKE_PREFIX_PATH}/include
-            ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/installed/x64-windows/include
-            /usr/include
-            /usr/local/include
-    )
-
-    # If not found, try direct App.h (manual installation style)
-    if (NOT UWEBSOCKETS_INCLUDE_DIR)
-        find_path(UWEBSOCKETS_INCLUDE_DIR
-                NAMES App.h
-                PATHS
-                ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets/src
-                ${CMAKE_CURRENT_SOURCE_DIR}/external/uWebSockets
-        )
-    endif ()
-endif ()
-
-if (NOT USOCKETS_INCLUDE_DIR)
-    find_path(USOCKETS_INCLUDE_DIR
-            NAMES libusockets.h
-            PATHS
-            ${CMAKE_CURRENT_SOURCE_DIR}/external/uSockets/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/external/uSockets
-            ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
-            ${CMAKE_PREFIX_PATH}/include
-            /usr/include
-            /usr/local/include
-    )
-endif ()
-
-# Find uSockets library
-if (NOT USOCKETS_LIB)
-    find_library(USOCKETS_LIB
-            NAMES uSockets usockets
-            PATHS
-            ${CMAKE_CURRENT_SOURCE_DIR}/external/uSockets
-            ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib
-            ${CMAKE_PREFIX_PATH}/lib
-            /usr/local/lib
-            /usr/lib
-    )
-endif ()
-
-# Find libuv (required by uSockets)
-find_package(libuv CONFIG QUIET)
-if (libuv_FOUND)
-    # Check if static library target exists
-    if (TARGET libuv::uv_a)
-        set(LIBUV_LIB libuv::uv_a)
-    elseif (TARGET libuv::uv)
-        set(LIBUV_LIB libuv::uv)
-    else ()
-        # Fallback to manual search
-        set(libuv_FOUND FALSE)
-    endif ()
-endif ()
-
-if (NOT libuv_FOUND)
-    find_library(LIBUV_LIB
-            NAMES uv_a uv libuv
-            PATHS
-            ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib
-            ${CMAKE_PREFIX_PATH}/lib
-    )
-    find_path(LIBUV_INCLUDE_DIR
-            NAMES uv.h
-            PATHS
-            ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
-            ${CMAKE_PREFIX_PATH}/include
-    )
-
-    if (NOT LIBUV_LIB)
-        message(FATAL_ERROR "libuv not found. Please install it via: vcpkg install libuv:x64-windows")
-    endif ()
-endif ()
-
-if (UWEBSOCKETS_INCLUDE_DIR AND USOCKETS_INCLUDE_DIR)
-    message(STATUS "Found uWebSockets at: ${UWEBSOCKETS_INCLUDE_DIR}")
-    message(STATUS "Found uSockets at: ${USOCKETS_INCLUDE_DIR}")
-    if (USOCKETS_LIB)
-        message(STATUS "Found uSockets library: ${USOCKETS_LIB}")
-    endif ()
-else ()
-    message(FATAL_ERROR "uWebSockets not found. Please run install_uwebsockets.bat")
-endif ()
-
 # nlohmann/json
 find_package(nlohmann_json 3.2.0 QUIET)
 if (NOT nlohmann_json_FOUND)
@@ -198,9 +105,10 @@ if (NOT nlohmann_json_FOUND)
             /usr/local/include
             ${CMAKE_CURRENT_SOURCE_DIR}/external/json/include
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/installed/x64-windows/include
     )
     if (NOT NLOHMANN_JSON_INCLUDE_DIR)
-        message(FATAL_ERROR "nlohmann/json not found. Please install it (e.g., 'apt install nlohmann-json3-dev' or download from https://github.com/nlohmann/json)")
+        message(FATAL_ERROR "nlohmann/json not found. Please install it (e.g., 'apt install nlohmann-json3-dev' or via vcpkg)")
     endif ()
 endif ()
 
@@ -315,7 +223,7 @@ else ()
             CUDA_STANDARD_REQUIRED ON
             POSITION_INDEPENDENT_CODE ON
     )
-    target_include_directories(gpu_kernel PRIVATE ${INCLUDE_DIR} ${MINER_DIR})
+    target_include_directories(gpu_kernel PRIVATE ${INCLUDE_DIR} ${MINER_DIR} ${OPENSSL_INCLUDE_DIR})
 
     # Additional CUDA optimizations
     target_compile_options(gpu_kernel PRIVATE
@@ -366,21 +274,9 @@ target_include_directories(sha1_miner PRIVATE
         ${MINER_DIR}
         ${NET_DIR}
         ${GPU_INCLUDES}
-        ${UWEBSOCKETS_INCLUDE_DIR}
-        ${USOCKETS_INCLUDE_DIR}
         ${Boost_INCLUDE_DIRS}
         ${ZLIB_INCLUDE_DIRS}
 )
-
-# Debug: Print include directories
-message(STATUS "Include directories for sha1_miner:")
-message(STATUS "  UWEBSOCKETS_INCLUDE_DIR: ${UWEBSOCKETS_INCLUDE_DIR}")
-message(STATUS "  USOCKETS_INCLUDE_DIR: ${USOCKETS_INCLUDE_DIR}")
-
-# Add libuv include directory if found
-if (LIBUV_INCLUDE_DIR)
-    target_include_directories(sha1_miner PRIVATE ${LIBUV_INCLUDE_DIR})
-endif ()
 
 # If nlohmann/json was found manually, add include directory
 if (NLOHMANN_JSON_INCLUDE_DIR)
@@ -391,8 +287,18 @@ endif ()
 target_compile_definitions(sha1_miner PRIVATE
         ${GPU_DEFINES}
         BOOST_BIND_GLOBAL_PLACEHOLDERS
-        _WEBSOCKETPP_CPP11_STL_
+        BOOST_BEAST_USE_STD_STRING_VIEW
+        # Boost.ASIO
+        BOOST_ALL_NO_LIB  # Disable auto-linking on Windows
 )
+
+# Windows-specific definitions
+if (WIN32)
+    target_compile_definitions(sha1_miner PRIVATE
+            _WIN32_WINNT=0x0A00  # Windows 10 or later
+            WIN32_LEAN_AND_MEAN  # Exclude rarely-used stuff from Windows headers
+    )
+endif ()
 
 # Apply C++ optimizations
 if (NOT MSVC)
@@ -409,8 +315,6 @@ if (GPU_BACKEND STREQUAL "HIP")
             ${KERNEL_OBJECT}
             ${GPU_LIBRARIES}
             ${Boost_LIBRARIES}
-            ${USOCKETS_LIB}
-            ${LIBUV_LIB}
             ZLIB::ZLIB
             OpenSSL::SSL
             OpenSSL::Crypto
@@ -420,8 +324,6 @@ else ()
     target_link_libraries(sha1_miner PRIVATE
             ${GPU_LIBRARIES}
             ${Boost_LIBRARIES}
-            ${USOCKETS_LIB}
-            ${LIBUV_LIB}
             ZLIB::ZLIB
             OpenSSL::SSL
             OpenSSL::Crypto
@@ -481,9 +383,8 @@ message(STATUS "  C++ Compiler: ${CMAKE_CXX_COMPILER}")
 if (GPU_BACKEND STREQUAL "CUDA")
     message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
 endif ()
-message(STATUS "  uWebSockets found at: ${UWEBSOCKETS_INCLUDE_DIR}")
 message(STATUS "  Boost version: ${Boost_VERSION}")
+message(STATUS "  Boost.Beast: Available (included in Boost ${Boost_VERSION})")
 message(STATUS "  OpenSSL version: ${OPENSSL_VERSION}")
 message(STATUS "  zlib found: ${ZLIB_FOUND}")
-message(STATUS "  libuv found: ${LIBUV_LIB}")
 message(STATUS "")
