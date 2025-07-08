@@ -12,14 +12,24 @@ namespace MiningPool {
     PoolClient::ParsedUrl PoolClient::parse_url(const std::string &url) {
         ParsedUrl result;
 
+        // Updated regex that properly handles localhost and other hostnames
         const std::regex url_regex(R"(^(wss?):\/\/([^:\/]+)(?::(\d+))?(\/.*)?$)");
         std::smatch matches;
 
         if (std::regex_match(url, matches, url_regex)) {
             result.is_secure = (matches[1].str() == "wss");
             result.host = matches[2].str();
-            result.port = matches[3].length() ? matches[3].str() : (result.is_secure ? "443" : "80");
+            // Extract port with proper defaults
+            if (matches[3].length()) {
+                result.port = matches[3].str();
+            } else {
+                result.port = result.is_secure ? "443" : "80";
+            }
             result.path = matches[4].length() ? matches[4].str() : "/";
+            // Debug output
+            std::cout << "Parsed URL - Host: " << result.host << ", Port: " << result.port
+                    << ", Path: " << result.path
+                    << ", Secure: " << result.is_secure << std::endl;
         } else {
             throw std::invalid_argument("Invalid WebSocket URL: " + url);
         }
@@ -59,9 +69,27 @@ namespace MiningPool {
             // Start IO thread
             io_thread_ = std::make_unique<std::thread>(&PoolClient::io_loop, this);
 
+            // Add DNS resolution debugging
+            std::cout << "Resolving host: " << parsed.host << ":" << parsed.port << std::endl;
+
             // Resolve host
             tcp::resolver resolver{ioc_};
-            auto const results = resolver.resolve(parsed.host, parsed.port);
+            boost::system::error_code ec;
+            auto const results = resolver.resolve(parsed.host, parsed.port, ec);
+
+            if (ec) {
+                throw std::runtime_error("Failed to resolve host: " + parsed.host + " - " + ec.message());
+            }
+
+            if (results.empty()) {
+                throw std::runtime_error("Failed to resolve host: " + parsed.host);
+            }
+
+            // Print resolved addresses
+            for (auto const &endpoint: results) {
+                std::cout << "Resolved to: " << endpoint.endpoint().address().to_string()
+                        << ":" << endpoint.endpoint().port() << std::endl;
+            }
 
             if (config_.use_tls) {
                 // Initialize SSL context
@@ -74,7 +102,7 @@ namespace MiningPool {
                 // Create SSL stream
                 wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket> > >(ioc_, ssl_ctx_);
 
-                // Connect TCP socket - use begin() to get first endpoint
+                // Connect TCP socket
                 beast::get_lowest_layer(*wss_).connect(results.begin()->endpoint());
 
                 // Perform SSL handshake
@@ -93,7 +121,7 @@ namespace MiningPool {
                 // Create plain WebSocket stream
                 ws_ = std::make_unique<websocket::stream<tcp::socket> >(ioc_);
 
-                // Connect TCP socket - use begin() to get first endpoint
+                // Connect TCP socket
                 beast::get_lowest_layer(*ws_).connect(results.begin()->endpoint());
 
                 // Set WebSocket options
@@ -103,15 +131,18 @@ namespace MiningPool {
                         req.set(http::field::user_agent, "SHA1-Miner/1.0 Boost.Beast");
                     }));
 
-                // Perform WebSocket handshake
-                ws_->handshake(parsed.host, parsed.path);
+                // Perform WebSocket handshake with host header
+                // Use the original host from URL, not the resolved IP
+                ws_->handshake(parsed.host + ":" + parsed.port, parsed.path);
             }
 
             connected_ = true;
             worker_stats_.connected_since = std::chrono::steady_clock::now();
             event_handler_->on_connected();
 
-            // Send hello message
+            // Send hello message after a small delay to avoid rate limiting
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
             HelloMessage hello;
             hello.protocol_version = PROTOCOL_VERSION;
             hello.client_version = "SHA1-Miner/1.0";
@@ -133,6 +164,7 @@ namespace MiningPool {
         } catch (const std::exception &e) {
             std::cerr << "Connection error: " << e.what() << std::endl;
             running_ = false;
+            connected_ = false;
             return false;
         }
     }
@@ -406,6 +438,9 @@ namespace MiningPool {
     }
 
     bool PoolClient::authenticate() {
+        // Add small delay to avoid triggering rate limits
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
         AuthMessage auth;
         auth.method = config_.auth_method;
         auth.username = config_.username + "." + config_.worker_name;
@@ -442,6 +477,9 @@ namespace MiningPool {
     }
 
     void PoolClient::request_job() {
+        // Add small delay to avoid triggering rate limits
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
         Message msg;
         msg.type = MessageType::GET_JOB;
         msg.id = Utils::generate_message_id();
