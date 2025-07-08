@@ -1,7 +1,6 @@
 // sha1_kernel_amd.hip.cpp - Highly optimized AMD HIP SHA-1 near-collision mining kernel
 #include "sha1_miner.cuh"
 #include "gpu_platform.hpp"
-#include "utilities.hpp"
 
 // SHA-1 constants in constant memory
 __constant__ uint32_t K[4] = {
@@ -24,7 +23,7 @@ __device__ __forceinline__ uint32_t count_leading_zeros_160bit_amd(
     const uint32_t target[5]
 ) {
     uint32_t total_bits = 0;
-    // Use vector operations where possible
+ // Use vector operations where possible
 #pragma unroll
     for (int i = 0; i < 5; i++) {
         uint32_t xor_val = hash[i] ^ target[i];
@@ -41,11 +40,12 @@ __device__ __forceinline__ uint32_t count_leading_zeros_160bit_amd(
 
 /**
  * SHA-1 F-functions optimized for AMD
- * Use bitselect operations which map to single V_BFI_B32 instruction
+ * Use standard operations that compiler can optimize
  */
 __device__ __forceinline__ uint32_t amd_f1(uint32_t b, uint32_t c, uint32_t d) {
-    // (b & c) | (~b & d) -> bitselect(d, c, b)
-    return __builtin_amdgcn_bitselect(d, c, b);
+    // (b & c) | (~b & d)
+    // This pattern is recognized by the compiler and optimized to V_BFI_B32 on GCN
+    return (b & c) | (~b & d);
 }
 
 __device__ __forceinline__ uint32_t amd_f2(uint32_t b, uint32_t c, uint32_t d) {
@@ -62,8 +62,8 @@ __device__ __forceinline__ uint32_t amd_f3(uint32_t b, uint32_t c, uint32_t d) {
  * AMD-optimized rotation using native rotate instruction
  */
 __device__ __forceinline__ uint32_t amd_rotl32(uint32_t x, uint32_t n) {
-    // Maps to V_ALIGNBIT_B32 instruction
-    return __builtin_amdgcn_alignbit(x, x, 32 - n);
+    // Standard rotate left - compiler will optimize this
+    return (x << n) | (x >> (32 - n));
 }
 
 /**
@@ -310,7 +310,11 @@ extern "C" void launch_mining_kernel_amd(
 ) {
     // Get device properties for optimal configuration
     hipDeviceProp_t props;
-    hipGetDeviceProperties(&props, 0);
+    hipError_t err = hipGetDeviceProperties(&props, 0);
+    if (err != hipSuccess) {
+        fprintf(stderr, "Failed to get device properties: %s\n", hipGetErrorString(err));
+        return;
+    }
 
     // Get AMD-optimized configuration
     AMDKernelConfig amd_config = AMDKernelConfig::get_optimal_config(props);
@@ -323,7 +327,11 @@ extern "C" void launch_mining_kernel_amd(
     uint32_t nonces_per_thread = 32; // Reduced from default
 
     // Reset result count
-    hipMemsetAsync(pool.count, 0, sizeof(uint32_t), config.stream);
+    err = hipMemsetAsync(pool.count, 0, sizeof(uint32_t), config.stream);
+    if (err != hipSuccess) {
+        fprintf(stderr, "Failed to reset result count: %s\n", hipGetErrorString(err));
+        return;
+    }
 
     // Launch configuration
     dim3 gridDim(blocks);
