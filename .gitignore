@@ -36,3 +36,6 @@ build_nvidia
 
 build_amd/*
 build_nvidia/*
+
+vcpkg
+vcpkg/*
