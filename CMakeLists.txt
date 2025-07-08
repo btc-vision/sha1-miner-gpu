@@ -375,6 +375,11 @@ target_include_directories(sha1_miner PRIVATE
         ${ZLIB_INCLUDE_DIRS}
 )
 
+# Debug: Print include directories
+message(STATUS "Include directories for sha1_miner:")
+message(STATUS "  UWEBSOCKETS_INCLUDE_DIR: ${UWEBSOCKETS_INCLUDE_DIR}")
+message(STATUS "  USOCKETS_INCLUDE_DIR: ${USOCKETS_INCLUDE_DIR}")
+
 # Add libuv include directory if found
 if (LIBUV_INCLUDE_DIR)
     target_include_directories(sha1_miner PRIVATE ${LIBUV_INCLUDE_DIR})

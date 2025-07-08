@@ -1,7 +1,7 @@
 #include "pool_client.hpp"
 #include <iostream>
 #include <regex>
-#include <uWebSockets/App.h>
+#include <App.h>
 
 namespace MiningPool {
     // ParsedUrl implementation
