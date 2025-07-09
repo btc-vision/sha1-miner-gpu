@@ -12,16 +12,11 @@ namespace MiningPool {
     static std::string hash_to_hex(const uint32_t hash[5]) {
         std::stringstream ss;
         for (int i = 0; i < 5; i++) {
-            ss << std::hex << std::setfill('0') << std::setw(8) << hash[i];
+            // Each uint32_t needs to be converted to big-endian bytes
+            uint32_t word = hash[i];
+            ss << std::hex << std::setfill('0') << std::setw(8) << word;
         }
         return ss.str();
-    }
-
-    // Helper function to convert hex string to binary
-    static void hex_to_hash(const std::string &hex, uint32_t hash[5]) {
-        for (int i = 0; i < 5 && i * 8 < hex.length(); i++) {
-            hash[i] = std::stoul(hex.substr(i * 8, 8), nullptr, 16);
-        }
     }
 
     // PoolMiningSystem implementation
@@ -354,18 +349,42 @@ namespace MiningPool {
 
     MiningJob PoolMiningSystem::convert_to_mining_job(const JobMessage &job_msg) {
         MiningJob mining_job;
-
-        // Convert prefix data (hex string) to binary
+        // The pool sends prefix_data which should be the base message to hash
+        // This needs to be exactly 32 bytes for the SHA-1 miner
         auto prefix_bytes = Utils::hex_to_bytes(job_msg.prefix_data);
+        // Ensure we have exactly 32 bytes for the base message
         if (prefix_bytes.size() >= 32) {
             std::copy(prefix_bytes.begin(), prefix_bytes.begin() + 32, mining_job.base_message);
+        } else {
+            // Pad with zeros if too short
+            std::copy(prefix_bytes.begin(), prefix_bytes.end(), mining_job.base_message);
+            std::fill(mining_job.base_message + prefix_bytes.size(), mining_job.base_message + 32, 0);
         }
-
         // Convert target pattern (hex string) to binary hash
-        hex_to_hash(job_msg.target_pattern, mining_job.target_hash);
-
+        // The target_pattern should be a 40-character hex string (20 bytes, 160 bits)
+        auto target_bytes = Utils::hex_to_bytes(job_msg.target_pattern);
+        // Convert to uint32_t array (5 * 32 bits = 160 bits)
+        // SHA-1 produces 5 32-bit words
+        for (int i = 0; i < 5; i++) {
+            if (i * 4 < target_bytes.size()) {
+                // Convert from big-endian bytes to uint32_t
+                mining_job.target_hash[i] = (static_cast<uint32_t>(target_bytes[i * 4]) << 24) |
+                                            (static_cast<uint32_t>(target_bytes[i * 4 + 1]) << 16) |
+                                            (static_cast<uint32_t>(target_bytes[i * 4 + 2]) << 8) |
+                                            static_cast<uint32_t>(target_bytes[i * 4 + 3]);
+            } else {
+                mining_job.target_hash[i] = 0;
+            }
+        }
         mining_job.difficulty = job_msg.target_difficulty;
         mining_job.nonce_offset = job_msg.nonce_start;
+        // Debug output
+        LOG_DEBUG("POOL", "Converted mining job:");
+        LOG_DEBUG("POOL", "  Base message (first 8 bytes): ", Utils::bytes_to_hex(mining_job.base_message, 8));
+        LOG_DEBUG("POOL", "  Target hash: ",
+                  Utils::bytes_to_hex(reinterpret_cast<uint8_t*>(mining_job.target_hash), 20));
+        LOG_DEBUG("POOL", "  Difficulty: ", mining_job.difficulty);
+        LOG_DEBUG("POOL", "  Nonce offset: ", mining_job.nonce_offset);
 
         return mining_job;
     }
