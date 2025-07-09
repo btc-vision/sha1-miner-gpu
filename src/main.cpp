@@ -480,12 +480,12 @@ void display_pool_stats(const MiningPool::PoolMiningSystem::PoolMiningStats &sta
 
     if (!stats.connected) {
         std::cout << Color::YELLOW << "[POOL] " << Color::RED
-                << "Disconnected - Attempting to reconnect..."
-                << Color::RESET << std::string(20, ' ') << std::flush;
+                << "Disconnected - Attempting to reconnect...\n"
+                << Color::RESET << std::flush;
     } else if (!stats.authenticated) {
         std::cout << Color::YELLOW << "[POOL] " << Color::YELLOW
-                << "Connected - Authentication pending..."
-                << Color::RESET << std::string(20, ' ') << std::flush;
+                << "Connected - Authentication pending...\n"
+                << Color::RESET << std::flush;
     } else {
         std::cout << Color::YELLOW << "[POOL] " << Color::RESET
                 << "Worker: " << Color::BRIGHT_CYAN << stats.worker_id << Color::RESET << " | "
@@ -506,8 +506,8 @@ void display_pool_stats(const MiningPool::PoolMiningSystem::PoolMiningStats &sta
                     << success_rate << "%" << Color::RESET << ")";
         }
 
-        std::cout << " | Up: " << Color::DIM << stats.uptime.count() << "s"
-                << Color::RESET << std::string(10, ' ');
+        std::cout << " | Up: " << Color::DIM << stats.uptime.count() << "s\n"
+                << Color::RESET;
     }
 
     std::cout << std::flush;
