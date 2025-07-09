@@ -14,6 +14,10 @@
 #include "gpu_platform.hpp"
 #include "sha1_miner.cuh"
 
+#ifdef USE_HIP
+#include "gpu_architecture.hpp"
+#endif
+
 // Forward declare the global shutdown flag
 extern std::atomic<bool> g_shutdown;
 

@@ -93,11 +93,12 @@ struct DeviceMiningJob {
         if (err != gpuSuccess) {
             fprintf(stderr, "Failed to allocate device memory for target_hash: %s\n",
                     gpuGetErrorString(err));
-            gpuFree(base_message);
+            (void)gpuFree(base_message);  // Explicitly ignore return value
             base_message = nullptr;
             target_hash = nullptr;
         }
     }
+
 
     void free() {
         if (base_message) {
