@@ -1,4 +1,5 @@
 #include "pool_integration.hpp"
+#include "../logging/logger.hpp"
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
@@ -41,7 +42,7 @@ namespace MiningPool {
             return true;
         }
 
-        std::cout << "Starting pool mining system..." << std::endl;
+        LOG_INFO("POOL", "Starting pool mining system...");
 
         // Create pool client
         pool_client_ = std::make_unique<PoolClient>(config_.pool_config, this);
@@ -69,14 +70,14 @@ namespace MiningPool {
                 }
 
                 if (!multi_gpu_manager_->initialize(gpu_ids)) {
-                    std::cerr << "Failed to initialize multi-GPU manager" << std::endl;
+                    LOG_ERROR("POOL", "Failed to initialize multi-GPU manager");
                     return false;
                 }
 
                 // Set the result callback
                 multi_gpu_manager_->setResultCallback(result_callback);
 
-                std::cout << "Initialized " << device_count << " GPUs for pool mining" << std::endl;
+                LOG_INFO("POOL", "Initialized ", device_count, " GPUs for pool mining");
             } else {
                 // Single GPU fallback
                 mining_config.device_id = 0;
@@ -86,7 +87,7 @@ namespace MiningPool {
                 // Multiple specific GPUs
                 multi_gpu_manager_ = std::make_unique<MultiGPUManager>();
                 if (!multi_gpu_manager_->initialize(config_.gpu_ids)) {
-                    std::cerr << "Failed to initialize multi-GPU manager" << std::endl;
+                    LOG_ERROR("POOL", "Failed to initialize multi-GPU manager");
                     return false;
                 }
                 multi_gpu_manager_->setResultCallback(result_callback);
@@ -103,7 +104,7 @@ namespace MiningPool {
         if (!multi_gpu_manager_) {
             mining_system_ = std::make_unique<MiningSystem>(mining_config);
             if (!mining_system_->initialize()) {
-                std::cerr << "Failed to initialize mining system" << std::endl;
+                LOG_ERROR("POOL", "Failed to initialize mining system");
                 return false;
             }
             mining_system_->setResultCallback(result_callback);
@@ -111,7 +112,7 @@ namespace MiningPool {
 
         // Connect to pool
         if (!pool_client_->connect()) {
-            std::cerr << "Failed to connect to pool" << std::endl;
+            LOG_ERROR("POOL", "Failed to connect to pool");
             return false;
         }
 
@@ -130,7 +131,7 @@ namespace MiningPool {
             return;
         }
 
-        std::cout << "Stopping pool mining system..." << std::endl;
+        LOG_INFO("POOL", "Stopping pool mining system...");
 
         running_ = false;
         mining_active_ = false;
@@ -160,7 +161,7 @@ namespace MiningPool {
             stats_reporter_thread_.join();
         }
 
-        std::cout << "Pool mining system stopped" << std::endl;
+        LOG_INFO("POOL", "Pool mining system stopped");
     }
 
     void PoolMiningSystem::mining_loop() {
@@ -443,7 +444,7 @@ namespace MiningPool {
     }
 
     void PoolMiningSystem::handle_reconnect() {
-        std::cout << "Handling reconnection..." << std::endl;
+        LOG_INFO("POOL", "Handling reconnection...");
 
         // Stop mining temporarily
         mining_active_ = false;
@@ -488,16 +489,16 @@ namespace MiningPool {
         if (avg_share_time < config_.target_share_time * 0.5) {
             // Too many shares, request higher difficulty
             uint32_t new_diff = current_difficulty_.load() + 1;
-            std::cout << "Requesting difficulty increase to " << new_diff
-                    << " (current avg share time: " << avg_share_time << "s)" << std::endl;
+            LOG_INFO("POOL", "Requesting difficulty increase to ", new_diff,
+                     " (current avg share time: ", avg_share_time, "s)");
 
             // Some pools support client-requested difficulty adjustments
             // This would need protocol support
         } else if (avg_share_time > config_.target_share_time * 2.0) {
             // Too few shares, request lower difficulty
             uint32_t new_diff = std::max(config_.min_share_difficulty, current_difficulty_.load() - 1);
-            std::cout << "Requesting difficulty decrease to " << new_diff
-                    << " (current avg share time: " << avg_share_time << "s)" << std::endl;
+            LOG_INFO("POOL", "Requesting difficulty decrease to ", new_diff,
+                     " (current avg share time: ", avg_share_time, "s)");
         }
     }
 
@@ -526,14 +527,14 @@ namespace MiningPool {
 
     // IPoolEventHandler implementations
     void PoolMiningSystem::on_connected() {
-        std::cout << "Connected to mining pool" << std::endl;
+        LOG_INFO("POOL", Color::GREEN, "Connected to mining pool", Color::RESET);
 
         std::lock_guard<std::mutex> lock(stats_mutex_);
         stats_.connected = true;
     }
 
     void PoolMiningSystem::on_disconnected(const std::string &reason) {
-        std::cout << "Disconnected from pool: " << reason << std::endl;
+        LOG_WARN("POOL", Color::RED, "Disconnected from pool: ", reason, Color::RESET);
 
         mining_active_ = false;
         job_cv_.notify_all();
@@ -544,11 +545,11 @@ namespace MiningPool {
     }
 
     void PoolMiningSystem::on_error(ErrorCode code, const std::string &message) {
-        std::cerr << "Pool error (" << static_cast<int>(code) << "): " << message << std::endl;
+        LOG_ERROR("POOL", "Pool error (", static_cast<int>(code), "): ", message);
     }
 
     void PoolMiningSystem::on_authenticated(const std::string &worker_id) {
-        std::cout << "Authenticated as worker: " << worker_id << std::endl;
+        LOG_INFO("POOL", Color::GREEN, "Authenticated as worker: ", worker_id, Color::RESET);
 
         std::lock_guard<std::mutex> lock(stats_mutex_);
         stats_.authenticated = true;
@@ -556,7 +557,7 @@ namespace MiningPool {
     }
 
     void PoolMiningSystem::on_auth_failed(ErrorCode code, const std::string &reason) {
-        std::cerr << "Authentication failed: " << reason << std::endl;
+        LOG_ERROR("POOL", Color::RED, "Authentication failed: ", reason, Color::RESET);
 
         std::lock_guard<std::mutex> lock(stats_mutex_);
         stats_.authenticated = false;
@@ -566,14 +567,14 @@ namespace MiningPool {
     }
 
     void PoolMiningSystem::on_new_job(const PoolJob &job) {
-        std::cout << "New job received: " << job.job_id
-                << " (difficulty: " << job.job_data.target_difficulty << ")" << std::endl;
+        LOG_INFO("POOL", Color::BRIGHT_CYAN, "New job received: ", job.job_id,
+                 " (difficulty: ", job.job_data.target_difficulty, ")", Color::RESET);
 
         update_mining_job(job);
     }
 
     void PoolMiningSystem::on_job_cancelled(const std::string &job_id) {
-        std::cout << "Job cancelled: " << job_id << std::endl;
+        LOG_INFO("POOL", "Job cancelled: ", job_id);
 
         std::lock_guard<std::mutex> lock(job_mutex_);
         if (current_job_.has_value() && current_job_->job_id == job_id) {
@@ -585,7 +586,8 @@ namespace MiningPool {
     }
 
     void PoolMiningSystem::on_share_accepted(const ShareResultMessage &result) {
-        std::cout << "Share accepted! Difficulty: " << result.difficulty_credited << std::endl;
+        LOG_INFO("POOL", Color::BRIGHT_GREEN, "Share accepted! Difficulty: ",
+                 result.difficulty_credited, Color::RESET);
 
         // Update stats
         {
@@ -593,13 +595,13 @@ namespace MiningPool {
             stats_.shares_accepted++;
 
             if (!result.message.empty()) {
-                std::cout << "Pool message: " << result.message << std::endl;
+                LOG_INFO("POOL", Color::BRIGHT_YELLOW, "Pool message: ", result.message, Color::RESET);
             }
         }
     }
 
     void PoolMiningSystem::on_share_rejected(const ShareResultMessage &result) {
-        std::cout << "Share rejected: " << result.message << std::endl;
+        LOG_WARN("POOL", Color::RED, "Share rejected: ", result.message, Color::RESET);
 
         // Update stats
         {
@@ -609,7 +611,7 @@ namespace MiningPool {
     }
 
     void PoolMiningSystem::on_difficulty_changed(uint32_t new_difficulty) {
-        std::cout << "Difficulty adjusted to: " << new_difficulty << std::endl;
+        LOG_INFO("POOL", Color::BRIGHT_MAGENTA, "Difficulty adjusted to: ", new_difficulty, Color::RESET);
 
         current_difficulty_ = new_difficulty;
 
@@ -618,9 +620,9 @@ namespace MiningPool {
     }
 
     void PoolMiningSystem::on_pool_status(const PoolStatusMessage &status) {
-        std::cout << "Pool status - Workers: " << status.connected_workers
-                << ", Hashrate: " << status.total_hashrate / 1e9 << " GH/s"
-                << ", Round shares: " << status.current_round_shares << std::endl;
+        LOG_INFO("POOL", "Pool status - Workers: ", status.connected_workers,
+                 ", Hashrate: ", status.total_hashrate / 1e9, " GH/s",
+                 ", Round shares: ", status.current_round_shares);
 
         std::lock_guard<std::mutex> lock(stats_mutex_);
         // Pool name might be in extra_info JSON
@@ -690,7 +692,7 @@ namespace MiningPool {
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (pools_.empty()) {
-            std::cerr << "No pools configured" << std::endl;
+            LOG_ERROR("MULTI_POOL", "No pools configured");
             return false;
         }
 
@@ -699,7 +701,7 @@ namespace MiningPool {
 
         // Try to start with the first enabled pool
         if (!try_next_pool()) {
-            std::cerr << "Failed to connect to any pool" << std::endl;
+            LOG_ERROR("MULTI_POOL", "Failed to connect to any pool");
             running_ = false;
             return false;
         }
@@ -765,7 +767,7 @@ namespace MiningPool {
             if (it != pools_.end() && it->mining_system) {
                 auto stats = it->mining_system->get_stats();
                 if (!stats.connected || !stats.authenticated) {
-                    std::cout << "Pool " << active_pool_ << " disconnected, failing over..." << std::endl;
+                    LOG_WARN("MULTI_POOL", "Pool ", active_pool_, " disconnected, failing over...");
                     try_next_pool();
                 }
             }
@@ -787,7 +789,7 @@ namespace MiningPool {
                 continue;
             }
 
-            std::cout << "Trying pool: " << pool.name << std::endl;
+            LOG_INFO("MULTI_POOL", "Trying pool: ", pool.name);
 
             // Create mining config for this pool
             auto config = base_mining_config_;
@@ -797,7 +799,7 @@ namespace MiningPool {
             pool.mining_system = std::make_unique<PoolMiningSystem>(config);
             if (pool.mining_system->start()) {
                 active_pool_ = pool.name;
-                std::cout << "Connected to pool: " << pool.name << std::endl;
+                LOG_INFO("MULTI_POOL", Color::GREEN, "Connected to pool: ", pool.name, Color::RESET);
                 return true;
             }
 

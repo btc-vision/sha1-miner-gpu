@@ -1,3 +1,4 @@
+// logger.hpp - Enhanced logging system with colors and debug levels
 #pragma once
 
 #include <iostream>
@@ -5,6 +6,7 @@
 #include <mutex>
 #include <iomanip>
 #include <sstream>
+#include <chrono>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -146,13 +148,18 @@ namespace MiningPool {
             std::lock_guard<std::mutex> lock(mutex_);
 
             // Timestamp
-            std::cout << Color::DIM << "[" << get_timestamp() << "] " << Color::RESET;
+            if (colors_enabled_) std::cout << Color::DIM;
+            std::cout << "[" << get_timestamp() << "] ";
+            if (colors_enabled_) std::cout << Color::RESET;
 
             // Level with color
-            std::cout << get_level_color(level) << "[" << get_level_string(level) << "] " << Color::RESET;
+            std::cout << get_level_color(level) << "[" << get_level_string(level) << "] ";
+            if (colors_enabled_) std::cout << Color::RESET;
 
             // Component
-            std::cout << Color::BRIGHT_BLUE << "[" << component << "] " << Color::RESET;
+            if (colors_enabled_) std::cout << Color::BRIGHT_BLUE;
+            std::cout << "[" << component << "] ";
+            if (colors_enabled_) std::cout << Color::RESET;
 
             // Message
             ((std::cout << args), ...);
@@ -198,9 +205,16 @@ namespace MiningPool {
 #endif
 
     // Convenience macros
-#define LOG_ERROR(component, ...) Logger::error(component, __VA_ARGS__)
-#define LOG_WARN(component, ...) Logger::warn(component, __VA_ARGS__)
-#define LOG_INFO(component, ...) Logger::info(component, __VA_ARGS__)
-#define LOG_DEBUG(component, ...) Logger::debug(component, __VA_ARGS__)
-#define LOG_TRACE(component, ...) Logger::trace(component, __VA_ARGS__)
+#define LOG_ERROR(component, ...) MiningPool::Logger::error(component, __VA_ARGS__)
+#define LOG_WARN(component, ...) MiningPool::Logger::warn(component, __VA_ARGS__)
+#define LOG_INFO(component, ...) MiningPool::Logger::info(component, __VA_ARGS__)
+#define LOG_DEBUG(component, ...) MiningPool::Logger::debug(component, __VA_ARGS__)
+#define LOG_TRACE(component, ...) MiningPool::Logger::trace(component, __VA_ARGS__)
 } // namespace MiningPool
+
+// Global namespace convenience functions for use outside MiningPool namespace
+using MiningPool::Logger;
+using MiningPool::LogLevel;
+
+// Create a global Color namespace alias for easier access
+namespace Color = MiningPool::Color;

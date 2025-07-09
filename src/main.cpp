@@ -2,6 +2,7 @@
 #include "mining_system.hpp"
 #include "multi_gpu_manager.hpp"
 #include "../net/pool_integration.hpp"
+#include "../logging/logger.hpp"
 #include <iostream>
 #include <iomanip>
 #include <vector>
@@ -73,6 +74,8 @@ struct MiningConfig {
     bool test_sha1 = false;
     bool test_bits = false;
     bool debug_mode = false;
+    int debug_level = 2; // Default to INFO level
+    bool no_colors = false; // Option to disable colors
 };
 
 // Signal handler for graceful shutdown
@@ -91,7 +94,7 @@ void signal_handler(int sig) {
         case SIGQUIT: sig_name = "SIGQUIT"; break;
 #endif
     }
-    std::cout << "\nReceived signal " << sig_name << " (" << sig << "), shutting down...\n";
+    LOG_INFO("MAIN", Color::YELLOW, "Received signal ", sig_name, " (", sig, "), shutting down...", Color::RESET);
     g_shutdown.store(true);
 }
 
@@ -155,14 +158,17 @@ MiningConfig parse_args(int argc, char *argv[]) {
             ("benchmark", po::bool_switch(&config.benchmark), "Run performance benchmark")
             ("test-sha1", po::bool_switch(&config.test_sha1), "Test SHA-1 implementation")
             ("test-bits", po::bool_switch(&config.test_bits), "Test bit matching")
-            ("debug", po::bool_switch(&config.debug_mode), "Enable debug mode");
+            ("debug", po::bool_switch(&config.debug_mode), "Enable debug mode")
+            ("debug-level", po::value<int>(&config.debug_level)->default_value(2),
+             "Debug level (0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=TRACE)")
+            ("no-colors", po::bool_switch(&config.no_colors), "Disable colored output");
 
     po::variables_map vm;
     try {
         po::store(po::parse_command_line(argc, argv, desc), vm);
         po::notify(vm);
     } catch (const po::error &e) {
-        std::cerr << "Error: " << e.what() << "\n";
+        LOG_ERROR("MAIN", "Error: ", e.what());
         std::cerr << desc << "\n";
         std::exit(1);
     }
@@ -177,6 +183,9 @@ MiningConfig parse_args(int argc, char *argv[]) {
         std::cout << "  Multi-GPU:   " << argv[0] <<
                 " --all-gpus --pool wss://secure.pool.com:443 --wallet YOUR_WALLET\n";
         std::cout << "  Benchmark:   " << argv[0] << " --benchmark --auto-tune\n";
+        std::cout << "  Debug mode:  " << argv[0] << " --pool ws://localhost:3333 --wallet YOUR_WALLET --debug\n";
+        std::cout << "  Custom log:  " << argv[0] <<
+                " --pool ws://localhost:3333 --wallet YOUR_WALLET --debug-level 3\n";
         std::exit(0);
     }
 
@@ -203,11 +212,11 @@ MiningConfig parse_args(int argc, char *argv[]) {
     // Validate pool configuration
     if (config.use_pool) {
         if (config.pool_wallet.empty()) {
-            std::cerr << "Error: --wallet is required for pool mining\n";
+            LOG_ERROR("MAIN", "Error: --wallet is required for pool mining");
             std::exit(1);
         }
         if (config.pool_url.empty()) {
-            std::cerr << "Error: --pool URL is required for pool mining\n";
+            LOG_ERROR("MAIN", "Error: --pool URL is required for pool mining");
             std::exit(1);
         }
     }
@@ -247,7 +256,7 @@ std::vector<uint8_t> generate_secure_random_message() {
 
 // Auto-tune mining parameters
 void auto_tune_parameters(MiningSystem::Config &config, int device_id) {
-    std::cout << "Auto-tuning mining parameters...\n";
+    LOG_INFO("TUNE", "Auto-tuning mining parameters...");
 
     gpuDeviceProp props;
     gpuGetDeviceProperties(&props, device_id);
@@ -346,20 +355,20 @@ void auto_tune_parameters(MiningSystem::Config &config, int device_id) {
         config.threads_per_block = props.maxThreadsPerBlock;
     }
 
-    std::cout << "Auto-tuned configuration for " << props.name << ":\n";
-    std::cout << "  Compute Capability: " << props.major << "." << props.minor << "\n";
-    std::cout << "  SMs: " << props.multiProcessorCount << "\n";
-    std::cout << "  Blocks per SM: " << blocks_per_sm << "\n";
-    std::cout << "  Blocks per stream: " << config.blocks_per_stream << "\n";
-    std::cout << "  Threads per block: " << config.threads_per_block << "\n";
-    std::cout << "  Number of streams: " << config.num_streams << "\n";
-    std::cout << "  Total concurrent threads: " <<
-            (config.blocks_per_stream * config.threads_per_block * config.num_streams) << "\n\n";
+    LOG_INFO("TUNE", "Auto-tuned configuration for ", Color::BRIGHT_CYAN, props.name, Color::RESET, ":");
+    LOG_INFO("TUNE", "  Compute Capability: ", props.major, ".", props.minor);
+    LOG_INFO("TUNE", "  SMs: ", props.multiProcessorCount);
+    LOG_INFO("TUNE", "  Blocks per SM: ", blocks_per_sm);
+    LOG_INFO("TUNE", "  Blocks per stream: ", config.blocks_per_stream);
+    LOG_INFO("TUNE", "  Threads per block: ", config.threads_per_block);
+    LOG_INFO("TUNE", "  Number of streams: ", config.num_streams);
+    LOG_INFO("TUNE", "  Total concurrent threads: ",
+             (config.blocks_per_stream * config.threads_per_block * config.num_streams));
 }
 
 // Run comprehensive benchmark
 void run_benchmark(int gpu_id, bool auto_tune) {
-    std::cout << "\n=== SHA-1 Near-Collision Mining Benchmark ===\n\n";
+    LOG_INFO("BENCH", Color::BRIGHT_YELLOW, "=== SHA-1 Near-Collision Mining Benchmark ===", Color::RESET);
 
     // Initialize mining system with auto-tuned parameters
     MiningSystem::Config sys_config;
@@ -371,7 +380,7 @@ void run_benchmark(int gpu_id, bool auto_tune) {
 
     g_mining_system = std::make_unique<MiningSystem>(sys_config);
     if (!g_mining_system->initialize()) {
-        std::cerr << "Failed to initialize mining system\n";
+        LOG_ERROR("BENCH", "Failed to initialize mining system");
         return;
     }
 
@@ -382,7 +391,7 @@ void run_benchmark(int gpu_id, bool auto_tune) {
     for (uint32_t diff: difficulties) {
         if (g_shutdown) break;
 
-        std::cout << "\nTesting difficulty " << diff << " bits:\n";
+        LOG_INFO("BENCH", "Testing difficulty ", diff, " bits:");
 
         // Generate test job
         auto message = generate_secure_random_message();
@@ -402,24 +411,24 @@ void run_benchmark(int gpu_id, bool auto_tune) {
 
         results.push_back(hash_rate);
 
-        std::cout << "\nResults for difficulty " << diff << " bits:\n";
-        std::cout << "  Hash rate: " << std::fixed << std::setprecision(2)
-                << hash_rate << " GH/s\n";
-        std::cout << "  Candidates found: " << stats.candidates_found << "\n";
-        std::cout << "  Expected candidates: " << std::scientific
-                << (stats.hashes_computed / std::pow(2.0, diff)) << "\n";
-        std::cout << "  Efficiency: " << std::fixed << std::setprecision(2)
-                << (100.0 * stats.candidates_found * std::pow(2.0, diff) /
-                    stats.hashes_computed) << "%\n";
+        LOG_INFO("BENCH", "Results for difficulty ", diff, " bits:");
+        LOG_INFO("BENCH", "  Hash rate: ", std::fixed, std::setprecision(2),
+                 hash_rate, " GH/s");
+        LOG_INFO("BENCH", "  Candidates found: ", stats.candidates_found);
+        LOG_INFO("BENCH", "  Expected candidates: ", std::scientific,
+                 (stats.hashes_computed / std::pow(2.0, diff)));
+        LOG_INFO("BENCH", "  Efficiency: ", std::fixed, std::setprecision(2),
+                 (100.0 * stats.candidates_found * std::pow(2.0, diff) /
+                     stats.hashes_computed), "%");
     }
 
     // Print summary
-    std::cout << "\n=== Benchmark Summary ===\n";
-    std::cout << "Difficulty | Hash Rate (GH/s)\n";
-    std::cout << "-----------|----------------\n";
+    LOG_INFO("BENCH", Color::BRIGHT_GREEN, "=== Benchmark Summary ===", Color::RESET);
+    LOG_INFO("BENCH", "Difficulty | Hash Rate (GH/s)");
+    LOG_INFO("BENCH", "-----------|----------------");
     for (size_t i = 0; i < difficulties.size() && i < results.size(); i++) {
-        std::cout << std::setw(10) << difficulties[i] << " | "
-                << std::fixed << std::setprecision(2) << results[i] << "\n";
+        LOG_INFO("BENCH", std::setw(10), difficulties[i], " | ",
+                 std::fixed, std::setprecision(2), results[i]);
     }
 
     cleanup_mining_system();
@@ -427,7 +436,7 @@ void run_benchmark(int gpu_id, bool auto_tune) {
 
 // Verify SHA-1 implementation
 bool verify_sha1_implementation() {
-    std::cout << "Verifying SHA-1 implementation...\n";
+    LOG_INFO("TEST", "Verifying SHA-1 implementation...");
 
     // Test vectors from FIPS 180-1
     struct TestVector {
@@ -452,12 +461,12 @@ bool verify_sha1_implementation() {
         std::string hash_hex = bytes_to_hex(hash);
 
         if (hash_hex != test.expected_hash) {
-            std::cerr << "FAILED: Message '" << test.message << "'\n";
-            std::cerr << "  Expected: " << test.expected_hash << "\n";
-            std::cerr << "  Got:      " << hash_hex << "\n";
+            LOG_ERROR("TEST", "FAILED: Message '", test.message, "'");
+            LOG_ERROR("TEST", "  Expected: ", test.expected_hash);
+            LOG_ERROR("TEST", "  Got:      ", hash_hex);
             all_passed = false;
         } else {
-            std::cout << "PASSED: '" << test.message << "'\n";
+            LOG_INFO("TEST", Color::GREEN, "PASSED: '", test.message, "'", Color::RESET);
         }
     }
 
@@ -466,27 +475,39 @@ bool verify_sha1_implementation() {
 
 // Pool mining status display
 void display_pool_stats(const MiningPool::PoolMiningSystem::PoolMiningStats &stats) {
+    // Clear line with carriage return
     std::cout << "\r";
-    std::cout << "[POOL] ";
 
     if (!stats.connected) {
-        std::cout << "Disconnected - Attempting to reconnect..." << std::endl;
+        std::cout << Color::YELLOW << "[POOL] " << Color::RED
+                << "Disconnected - Attempting to reconnect..."
+                << Color::RESET << std::string(20, ' ') << std::flush;
     } else if (!stats.authenticated) {
-        std::cout << "Connected - Authentication pending..." << std::endl;
+        std::cout << Color::YELLOW << "[POOL] " << Color::YELLOW
+                << "Connected - Authentication pending..."
+                << Color::RESET << std::string(20, ' ') << std::flush;
     } else {
-        std::cout << "Worker: " << stats.worker_id << " | ";
-        std::cout << "Diff: " << stats.current_difficulty << " | ";
-        std::cout << "Hash: " << std::fixed << std::setprecision(2)
-                << stats.hashrate / 1e9 << " GH/s | ";
-        std::cout << "Shares: " << stats.shares_accepted << "/"
-                << stats.shares_submitted;
+        std::cout << Color::YELLOW << "[POOL] " << Color::RESET
+                << "Worker: " << Color::BRIGHT_CYAN << stats.worker_id << Color::RESET << " | "
+                << "Diff: " << Color::BRIGHT_MAGENTA << stats.current_difficulty << Color::RESET << " | "
+                << "Hash: " << Color::BRIGHT_GREEN << std::fixed << std::setprecision(2)
+                << stats.hashrate / 1e9 << " GH/s" << Color::RESET << " | "
+                << "Shares: " << Color::BRIGHT_BLUE << stats.shares_accepted << "/"
+                << stats.shares_submitted << Color::RESET;
 
         if (stats.shares_submitted > 0) {
-            std::cout << " (" << std::setprecision(1)
-                    << stats.share_success_rate * 100 << "%)";
+            double success_rate = stats.share_success_rate * 100;
+            std::string color = success_rate >= 95
+                                    ? Color::BRIGHT_GREEN
+                                    : success_rate >= 80
+                                          ? Color::BRIGHT_YELLOW
+                                          : Color::BRIGHT_RED;
+            std::cout << " (" << color << std::setprecision(1)
+                    << success_rate << "%" << Color::RESET << ")";
         }
 
-        std::cout << " | Up: " << stats.uptime.count() << "s     ";
+        std::cout << " | Up: " << Color::DIM << stats.uptime.count() << "s"
+                << Color::RESET << std::string(10, ' ');
     }
 
     std::cout << std::flush;
@@ -494,10 +515,10 @@ void display_pool_stats(const MiningPool::PoolMiningSystem::PoolMiningStats &sta
 
 // Run pool mining
 int run_pool_mining(const MiningConfig &config) {
-    std::cout << "\n=== SHA-1 Pool Mining Mode ===\n";
-    std::cout << "Pool: " << config.pool_url << "\n";
-    std::cout << "Wallet: " << config.pool_wallet << "\n";
-    std::cout << "Worker: " << config.worker_name << "\n\n";
+    LOG_INFO("POOL", Color::BRIGHT_GREEN, "=== SHA-1 Pool Mining Mode ===", Color::RESET);
+    LOG_INFO("POOL", "Pool: ", Color::BRIGHT_CYAN, config.pool_url, Color::RESET);
+    LOG_INFO("POOL", "Wallet: ", Color::BRIGHT_YELLOW, config.pool_wallet, Color::RESET);
+    LOG_INFO("POOL", "Worker: ", Color::BRIGHT_MAGENTA, config.worker_name, Color::RESET);
 
     // Create pool configuration
     MiningPool::PoolConfig pool_config;
@@ -557,12 +578,12 @@ int run_pool_mining(const MiningConfig &config) {
 
         // Start mining with failover
         if (!multi_pool_manager->start_mining(mining_config)) {
-            std::cerr << "Failed to start pool mining\n";
+            LOG_ERROR("POOL", "Failed to start pool mining");
             return 1;
         }
 
-        std::cout << "Mining started with " << (priority) << " pool(s)\n";
-        std::cout << "Press Ctrl+C to stop mining\n\n";
+        LOG_INFO("POOL", "Mining started with ", priority, " pool(s)");
+        LOG_INFO("POOL", "Press Ctrl+C to stop mining");
 
         // Monitor and display stats
         while (!g_shutdown) {
@@ -582,12 +603,12 @@ int run_pool_mining(const MiningConfig &config) {
         auto pool_mining = std::make_unique<MiningPool::PoolMiningSystem>(mining_config);
 
         if (!pool_mining->start()) {
-            std::cerr << "Failed to start pool mining\n";
+            LOG_ERROR("POOL", "Failed to start pool mining");
             return 1;
         }
 
-        std::cout << "Mining started\n";
-        std::cout << "Press Ctrl+C to stop mining\n\n";
+        LOG_INFO("POOL", "Mining started");
+        LOG_INFO("POOL", "Press Ctrl+C to stop mining");
 
         // Monitor and display stats
         auto last_stats_time = std::chrono::steady_clock::now();
@@ -602,11 +623,11 @@ int run_pool_mining(const MiningConfig &config) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
-        std::cout << "\n\nStopping mining...\n";
+        LOG_INFO("POOL", "\n\nStopping mining...");
         pool_mining->stop();
     }
 
-    std::cout << "\nPool mining stopped.\n";
+    LOG_INFO("POOL", "Pool mining stopped.");
     return 0;
 }
 
@@ -621,14 +642,25 @@ int main(int argc, char *argv[]) {
     // Parse command line
     MiningConfig config = parse_args(argc, argv);
 
-    std::cout << "+------------------------------------------+\n";
-    std::cout << "|            SHA-1 OP_NET Miner            |\n";
-    std::cout << "+------------------------------------------+\n\n";
+    // Configure logging based on command line options
+    MiningPool::Logger::set_level(static_cast<MiningPool::LogLevel>(config.debug_level));
+    MiningPool::Logger::enable_colors(!config.no_colors);
+
+    // If debug mode is explicitly enabled, set to DEBUG level
+    if (config.debug_mode) {
+        MiningPool::Logger::set_level(MiningPool::LogLevel::DEBUG);
+    }
+
+    LOG_INFO("MAIN", Color::BRIGHT_CYAN, "+------------------------------------------+", Color::RESET);
+    LOG_INFO("MAIN", Color::BRIGHT_CYAN, "|            SHA-1 OP_NET Miner            |", Color::RESET);
+    LOG_INFO("MAIN", Color::BRIGHT_CYAN, "+------------------------------------------+", Color::RESET);
+    LOG_INFO("MAIN", "Debug level: ", config.debug_level,
+             " (", config.debug_mode ? "DEBUG MODE" : "NORMAL", ")");
 
     if (config.test_sha1) {
-        std::cout << "Running SHA-1 tests...\n";
+        LOG_INFO("MAIN", "Running SHA-1 tests...");
         if (!verify_sha1_implementation()) {
-            std::cerr << "SHA-1 implementation verification failed!\n";
+            LOG_ERROR("MAIN", "SHA-1 implementation verification failed!");
             return 1;
         }
         return 0;
@@ -636,10 +668,10 @@ int main(int argc, char *argv[]) {
 
     // Verify SHA-1 implementation
     if (!verify_sha1_implementation()) {
-        std::cerr << "SHA-1 implementation verification failed!\n";
+        LOG_ERROR("MAIN", "SHA-1 implementation verification failed!");
         return 1;
     }
-    std::cout << "SHA-1 implementation verified.\n\n";
+    LOG_INFO("MAIN", Color::GREEN, "SHA-1 implementation verified.", Color::RESET);
 
     // Check GPU availability
     int device_count;
@@ -647,9 +679,9 @@ int main(int argc, char *argv[]) {
 
     if (device_count == 0) {
 #ifdef USE_HIP
-        std::cerr << "No AMD/HIP devices found!\n";
+        LOG_ERROR("MAIN", "No AMD/HIP devices found!");
 #else
-        std::cerr << "No CUDA devices found!\n";
+        LOG_ERROR("MAIN", "No CUDA devices found!");
 #endif
         return 1;
     }
@@ -660,40 +692,40 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < device_count; i++) {
             gpu_ids_to_use.push_back(i);
         }
-        std::cout << "Using all " << device_count << " available GPUs\n";
+        LOG_INFO("MAIN", "Using all ", device_count, " available GPUs");
     } else if (!config.gpu_ids.empty()) {
         gpu_ids_to_use = config.gpu_ids;
         // Validate GPU IDs
         for (int id: gpu_ids_to_use) {
             if (id >= device_count || id < 0) {
-                std::cerr << "Invalid GPU ID: " << id << ". Available GPUs: 0-"
-                        << (device_count - 1) << "\n";
+                LOG_ERROR("MAIN", "Invalid GPU ID: ", id, ". Available GPUs: 0-",
+                          (device_count - 1));
                 return 1;
             }
         }
-        std::cout << "Using " << gpu_ids_to_use.size() << " specified GPU(s)\n";
+        LOG_INFO("MAIN", "Using ", gpu_ids_to_use.size(), " specified GPU(s)");
     } else {
         // Default to single GPU
         gpu_ids_to_use.push_back(config.gpu_id);
         if (config.gpu_id >= device_count) {
-            std::cerr << "Invalid GPU ID. Available GPUs: 0-" << (device_count - 1) << "\n";
+            LOG_ERROR("MAIN", "Invalid GPU ID. Available GPUs: 0-", (device_count - 1));
             return 1;
         }
     }
 
     // Print GPU information
-    std::cout << "\nGPU Information:\n";
-    std::cout << "=====================================\n";
+    LOG_INFO("MAIN", "\nGPU Information:");
+    LOG_INFO("MAIN", "=====================================");
     for (int id: gpu_ids_to_use) {
         gpuDeviceProp props;
         gpuGetDeviceProperties(&props, id);
-        std::cout << "  GPU " << id << ": " << props.name << "\n";
-        std::cout << "    Compute capability: " << props.major << "." << props.minor << "\n";
-        std::cout << "    Memory: " << (props.totalGlobalMem / (1024.0 * 1024.0 * 1024.0))
-                << " GB\n";
-        std::cout << "    SMs/CUs: " << props.multiProcessorCount << "\n";
+        LOG_INFO("MAIN", "  GPU ", id, ": ", Color::BRIGHT_CYAN, props.name, Color::RESET);
+        LOG_INFO("MAIN", "    Compute capability: ", props.major, ".", props.minor);
+        LOG_INFO("MAIN", "    Memory: ", std::fixed, std::setprecision(2),
+                 (props.totalGlobalMem / (1024.0 * 1024.0 * 1024.0)), " GB");
+        LOG_INFO("MAIN", "    SMs/CUs: ", props.multiProcessorCount);
     }
-    std::cout << "\n";
+    LOG_INFO("MAIN", "");
 
     // Check if pool mining is requested
     if (config.use_pool) {
@@ -703,7 +735,7 @@ int main(int argc, char *argv[]) {
     // Run benchmark if requested
     if (config.benchmark) {
         if (gpu_ids_to_use.size() > 1) {
-            std::cout << "Multi-GPU benchmark not yet implemented. Using GPU 0 only.\n";
+            LOG_WARN("MAIN", "Multi-GPU benchmark not yet implemented. Using GPU 0 only.");
             run_benchmark(gpu_ids_to_use[0], config.auto_tune);
         } else {
             run_benchmark(gpu_ids_to_use[0], config.auto_tune);
@@ -712,7 +744,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Solo mining mode
-    std::cout << "Running in solo mining mode\n";
+    LOG_INFO("MAIN", "Running in solo mining mode");
 
     // Prepare message and target
     std::vector<uint8_t> message;
@@ -720,33 +752,33 @@ int main(int argc, char *argv[]) {
 
     if (!config.message_hex.empty()) {
         if (config.message_hex.length() != 64) {
-            std::cerr << "Message must be 64 hex characters (32 bytes)\n";
+            LOG_ERROR("MAIN", "Message must be 64 hex characters (32 bytes)");
             return 1;
         }
         message = hex_to_bytes(config.message_hex);
     } else {
         message = generate_secure_random_message();
-        std::cout << "Generated random message: " << bytes_to_hex(message) << "\n";
+        LOG_INFO("MAIN", "Generated random message: ", bytes_to_hex(message));
     }
 
     if (!config.target_hex.empty()) {
         if (config.target_hex.length() != 40) {
-            std::cerr << "Target must be 40 hex characters (20 bytes)\n";
+            LOG_ERROR("MAIN", "Target must be 40 hex characters (20 bytes)");
             return 1;
         }
         target = hex_to_bytes(config.target_hex);
     } else {
         target = calculate_sha1(message);
-        std::cout << "Target SHA-1: " << bytes_to_hex(target) << "\n";
+        LOG_INFO("MAIN", "Target SHA-1: ", bytes_to_hex(target));
     }
 
     // Create mining job
     MiningJob job = create_mining_job(message.data(), target.data(), config.difficulty);
 
-    std::cout << "\nMining Configuration:\n";
-    std::cout << "  Difficulty: " << config.difficulty << " bits must match\n";
-    std::cout << "  Duration: " << config.duration << " seconds\n";
-    std::cout << "  Success probability per hash: 2^-" << config.difficulty << "\n\n";
+    LOG_INFO("MAIN", "\nMining Configuration:");
+    LOG_INFO("MAIN", "  Difficulty: ", config.difficulty, " bits must match");
+    LOG_INFO("MAIN", "  Duration: ", config.duration, " seconds");
+    LOG_INFO("MAIN", "  Success probability per hash: 2^-", config.difficulty);
 
     // Start mining
     auto start_time = std::chrono::steady_clock::now();
@@ -755,7 +787,7 @@ int main(int argc, char *argv[]) {
     if (gpu_ids_to_use.size() > 1) {
         MultiGPUManager multi_gpu_manager;
         if (!multi_gpu_manager.initialize(gpu_ids_to_use)) {
-            std::cerr << "Failed to initialize multi-GPU manager\n";
+            LOG_ERROR("MAIN", "Failed to initialize multi-GPU manager");
             return 1;
         }
 
@@ -774,14 +806,14 @@ int main(int argc, char *argv[]) {
 
         g_mining_system = std::make_unique<MiningSystem>(sys_config);
         if (!g_mining_system->initialize()) {
-            std::cerr << "Failed to initialize mining system\n";
+            LOG_ERROR("MAIN", "Failed to initialize mining system");
             return 1;
         }
 
-        std::cout << "  Expected time to find: " << std::scientific
-                << (std::pow(2.0, config.difficulty) / (sys_config.blocks_per_stream *
-                                                        sys_config.threads_per_block * NONCES_PER_THREAD * 1e9))
-                << " seconds @ 1 GH/s\n\n";
+        LOG_INFO("MAIN", "  Expected time to find: ", std::scientific,
+                 (std::pow(2.0, config.difficulty) / (sys_config.blocks_per_stream *
+                     sys_config.threads_per_block * NONCES_PER_THREAD * 1e9)),
+                 " seconds @ 1 GH/s");
 
         g_mining_system->runMiningLoop(job, config.duration);
         cleanup_mining_system();
@@ -791,8 +823,8 @@ int main(int argc, char *argv[]) {
 
     // Print final statistics
     auto duration = std::chrono::duration<double>(end_time - start_time).count();
-    std::cout << "\nTotal runtime: " << std::fixed << std::setprecision(2)
-            << duration << " seconds\n";
+    LOG_INFO("MAIN", "\nTotal runtime: ", std::fixed, std::setprecision(2),
+             duration, " seconds");
 
     return 0;
 }

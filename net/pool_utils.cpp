@@ -8,18 +8,10 @@
 namespace MiningPool {
     namespace Utils {
         uint64_t generate_message_id() {
-            // Use a combination of timestamp and counter for uniqueness
-            static std::atomic<uint32_t> counter{0};
-
-            auto now = std::chrono::steady_clock::now();
-            auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
-                now.time_since_epoch()
-            ).count();
-
-            uint32_t count = counter.fetch_add(1, std::memory_order_relaxed);
-
-            // Combine timestamp (high 32 bits) and counter (low 32 bits)
-            return (static_cast<uint64_t>(timestamp & 0xFFFFFFFF) << 32) | count;
+            static std::random_device rd;
+            static std::mt19937_64 gen(rd());
+            static std::uniform_int_distribution<uint64_t> dis;
+            return dis(gen);
         }
 
         uint64_t current_timestamp_ms() {

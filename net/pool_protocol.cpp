@@ -1,5 +1,8 @@
 #include "pool_protocol.hpp"
+#include "../logging/logger.hpp"
 #include <iostream>
+#include <random>
+#include <chrono>
 
 namespace MiningPool {
     // Message serialization/deserialization
@@ -36,13 +39,13 @@ namespace MiningPool {
             }
             // Payload is already a JSON object
             msg.payload = j["payload"];
-            std::cout << "[MESSAGE] Deserialized - type: " << static_cast<int>(msg.type)
-                    << " id: " << msg.id << " timestamp: " << msg.timestamp << std::endl;
+            LOG_TRACE("MESSAGE", "Deserialized - type: ", static_cast<int>(msg.type),
+                      " id: ", msg.id, " timestamp: ", msg.timestamp);
 
             return msg;
         } catch (const std::exception &e) {
-            std::cerr << "[MESSAGE] Deserialize error: " << e.what() << std::endl;
-            std::cerr << "[MESSAGE] Raw data: " << data << std::endl;
+            LOG_ERROR("MESSAGE", "Deserialize error: ", e.what());
+            LOG_DEBUG("MESSAGE", "Raw data: ", data);
             return std::nullopt;
         }
     }

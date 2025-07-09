@@ -1,11 +1,6 @@
 #include "pool_client.hpp"
-#include <iostream>
+#include "../logging/logger.hpp"
 #include <regex>
-
-// Make sure OpenSSL SHA1 doesn't conflict with our SHA1
-#ifdef SHA1
-#undef SHA1
-#endif
 
 namespace MiningPool {
     // ParsedUrl implementation
@@ -71,7 +66,7 @@ namespace MiningPool {
             keepalive_thread_ = std::thread(&PoolClient::keepalive_loop, this);
 
             // Add DNS resolution debugging
-            std::cout << "Resolving host: " << parsed.host << ":" << parsed.port << std::endl;
+            LOG_INFO("CLIENT", "Resolving host: ", parsed.host, ":", parsed.port);
 
             // Create a promise/future to synchronize the connection
             std::promise<bool> connection_promise;
@@ -95,8 +90,8 @@ namespace MiningPool {
 
                     // Print resolved addresses
                     for (auto const &endpoint: results) {
-                        std::cout << "Resolved to: " << endpoint.endpoint().address().to_string()
-                                << ":" << endpoint.endpoint().port() << std::endl;
+                        LOG_DEBUG("CLIENT", "Resolved to: ", endpoint.endpoint().address().to_string(),
+                                  ":", endpoint.endpoint().port());
                     }
 
                     if (config_.use_tls) {
@@ -146,11 +141,11 @@ namespace MiningPool {
                     connected_ = true;
                     worker_stats_.connected_since = std::chrono::steady_clock::now();
                     // Start reading immediately in the IO thread
-                    std::cout << "[CLIENT] Starting async read loop" << std::endl;
+                    LOG_DEBUG("CLIENT", "Starting async read loop");
                     do_read();
                     connection_promise.set_value(true);
                 } catch (const std::exception &e) {
-                    std::cerr << "Connection error in IO thread: " << e.what() << std::endl;
+                    LOG_ERROR("CLIENT", "Connection error in IO thread: ", e.what());
                     connection_promise.set_value(false);
                 }
             });
@@ -180,12 +175,12 @@ namespace MiningPool {
             msg.timestamp = Utils::current_timestamp_ms();
             msg.payload = hello.to_json();
 
-            std::cout << "[CLIENT] Sending HELLO message" << std::endl;
+            LOG_INFO("CLIENT", "Sending HELLO message");
             send_message(msg);
 
             return true;
         } catch (const std::exception &e) {
-            std::cerr << "Connection error: " << e.what() << std::endl;
+            LOG_ERROR("CLIENT", "Connection error: ", e.what());
             running_ = false;
             connected_ = false;
             return false;
@@ -247,7 +242,7 @@ namespace MiningPool {
         try {
             ioc_.run();
         } catch (const std::exception &e) {
-            std::cerr << "IO loop error: " << e.what() << std::endl;
+            LOG_ERROR("CLIENT", "IO loop error: ", e.what());
         }
     }
 
@@ -279,18 +274,17 @@ namespace MiningPool {
 
     void PoolClient::do_read() {
         if (!connected_.load()) {
-            std::cerr << "[CLIENT] do_read called but not connected!" << std::endl;
+            LOG_ERROR("CLIENT", "do_read called but not connected!");
             return;
         }
 
-        std::cout << "[CLIENT] Setting up async_read" << std::endl;
+        LOG_TRACE("CLIENT", "Setting up async_read");
         // Clear buffer before reading
         buffer_.consume(buffer_.size());
         auto read_handler = [this](beast::error_code ec, std::size_t bytes_transferred) {
-            std::cout << "[CLIENT] async_read completed - ec: " << ec
-                    << ", bytes: " << bytes_transferred << std::endl;
+            LOG_TRACE("CLIENT", "async_read completed - ec: ", ec, ", bytes: ", bytes_transferred);
             if (!ec) {
-                std::cout << "[CLIENT] Read data: " << beast::buffers_to_string(buffer_.data()) << std::endl;
+                LOG_TRACE("CLIENT", "Read data: ", beast::buffers_to_string(buffer_.data()));
             }
             on_read(ec, bytes_transferred);
         };
@@ -300,7 +294,7 @@ namespace MiningPool {
         } else if (ws_) {
             ws_->async_read(buffer_, read_handler);
         } else {
-            std::cerr << "[CLIENT] ERROR: No websocket stream available!" << std::endl;
+            LOG_ERROR("CLIENT", "ERROR: No websocket stream available!");
         }
     }
 
@@ -342,7 +336,7 @@ namespace MiningPool {
                     error_msg = "Connection closed by remote host (error code: " + std::to_string(ec.value()) + ")";
                 }
 #endif
-                std::cerr << "[CLIENT] Read error: " << error_msg << std::endl;
+                LOG_ERROR("CLIENT", "Read error: ", error_msg);
             }
 
             connected_ = false;
@@ -360,25 +354,25 @@ namespace MiningPool {
 
         // Check if we're still connected before processing
         if (!connected_.load()) {
-            std::cerr << "[CLIENT] Received data but not connected, ignoring" << std::endl;
+            LOG_ERROR("CLIENT", "Received data but not connected, ignoring");
             return;
         }
 
         std::string data = beast::buffers_to_string(buffer_.data());
         buffer_.consume(bytes_transferred);
 
-        std::cout << "[CLIENT] Received " << bytes_transferred << " bytes" << std::endl;
+        LOG_DEBUG("CLIENT", "Received ", bytes_transferred, " bytes");
         auto parsed = Message::deserialize(data);
         if (parsed) {
-            std::cout << "[CLIENT] Successfully parsed message type: " << static_cast<int>(parsed->type) << ", id: " <<
-                    parsed->id << std::endl;
+            LOG_DEBUG("CLIENT", "Successfully parsed message type: ", static_cast<int>(parsed->type),
+                      ", id: ", parsed->id);
 
             // Check for error messages that should stop further reading
             if (parsed->type == MessageType::ERROR_PROBLEM) {
                 int error_code = parsed->payload.value("code", 0);
                 if (error_code == static_cast<int>(ErrorCode::INVALID_MESSAGE) ||
                     error_code == static_cast<int>(ErrorCode::PROTOCOL_ERROR)) {
-                    std::cerr << "[CLIENT] Received fatal error, stopping reads" << std::endl;
+                    LOG_ERROR("CLIENT", "Received fatal error, stopping reads");
                     connected_ = false;
                 }
             }
@@ -396,7 +390,7 @@ namespace MiningPool {
 
     void PoolClient::on_write(beast::error_code ec, std::size_t bytes_transferred) {
         if (ec) {
-            std::cerr << "Write error: " << ec.message() << std::endl;
+            LOG_ERROR("CLIENT", "Write error: ", ec.message());
             return;
         }
 
@@ -425,43 +419,42 @@ namespace MiningPool {
     }
 
     void PoolClient::message_processor_loop() {
-        std::cout << "[CLIENT] Message processor thread started (tid: " << std::this_thread::get_id() << ")" <<
-                std::endl;
+        LOG_DEBUG("CLIENT", "Message processor thread started (tid: ", std::this_thread::get_id(), ")");
         while (running_.load()) {
             std::unique_lock<std::mutex> lock(incoming_mutex_);
-            std::cout << "[CLIENT] Message processor waiting for messages..." << std::endl;
+            LOG_TRACE("CLIENT", "Message processor waiting for messages...");
             // Wait for messages with timeout to check running status
             bool has_message = incoming_cv_.wait_for(lock, std::chrono::milliseconds(1000), [this] {
                 bool result = !incoming_queue_.empty() || !running_.load();
                 if (result) {
-                    std::cout << "[CLIENT] Wait condition met - queue empty: " << incoming_queue_.empty() <<
-                            ", running: " << running_.load() << std::endl;
+                    LOG_TRACE("CLIENT", "Wait condition met - queue empty: ", incoming_queue_.empty(),
+                              ", running: ", running_.load());
                 }
                 return result;
             });
 
             if (!has_message) {
-                std::cout << "[CLIENT] Message processor timeout - no messages" << std::endl;
+                LOG_TRACE("CLIENT", "Message processor timeout - no messages");
                 continue;
             }
 
             while (!incoming_queue_.empty()) {
                 Message msg = incoming_queue_.front();
                 incoming_queue_.pop();
-                std::cout << "[CLIENT] Dequeued message for processing - type: " << static_cast<int>(msg.type) <<
-                        ", id: " << msg.id << std::endl;
+                LOG_DEBUG("CLIENT", "Dequeued message for processing - type: ", static_cast<int>(msg.type),
+                          ", id: ", msg.id);
                 lock.unlock();
                 try {
                     process_message(msg);
                 } catch (const std::exception &e) {
-                    std::cerr << "[CLIENT] Exception processing message: " << e.what() << std::endl;
+                    LOG_ERROR("CLIENT", "Exception processing message: ", e.what());
                 }
 
                 lock.lock();
             }
         }
 
-        std::cout << "[CLIENT] Message processor thread stopped" << std::endl;
+        LOG_DEBUG("CLIENT", "Message processor thread stopped");
     }
 
     void PoolClient::process_message(const Message &msg) {
@@ -471,63 +464,63 @@ namespace MiningPool {
             pending_requests_.erase(msg.id);
         }
 
-        std::cout << "[CLIENT] process_message called with type: " << static_cast<int>(msg.type) << " (0x" << std::hex
-                << static_cast<int>(msg.type) << std::dec << ")" << std::endl;
+        LOG_DEBUG("CLIENT", "process_message called with type: ", static_cast<int>(msg.type),
+                  " (0x", std::hex, static_cast<int>(msg.type), std::dec, ")");
 
         try {
             switch (msg.type) {
                 case MessageType::WELCOME: // This is 0x11 = 17
-                    std::cout << "[CLIENT] Handling WELCOME message" << std::endl;
+                    LOG_INFO("CLIENT", "Handling WELCOME message");
                     handle_welcome(WelcomeMessage::from_json(msg.payload));
                     break;
                 case MessageType::AUTH_RESPONSE:
-                    std::cout << "[CLIENT] Handling AUTH_RESPONSE message" << std::endl;
+                    LOG_INFO("CLIENT", "Handling AUTH_RESPONSE message");
                     handle_auth_response(AuthResponseMessage::from_json(msg.payload));
                     break;
                 case MessageType::NEW_JOB:
-                    std::cout << "[CLIENT] Handling NEW_JOB message" << std::endl;
+                    LOG_INFO("CLIENT", "Handling NEW_JOB message");
                     handle_new_job(JobMessage::from_json(msg.payload));
                     break;
                 case MessageType::SHARE_RESULT:
-                    std::cout << "[CLIENT] Handling SHARE_RESULT message" << std::endl;
+                    LOG_INFO("CLIENT", "Handling SHARE_RESULT message");
                     handle_share_result(ShareResultMessage::from_json(msg.payload));
                     break;
                 case MessageType::DIFFICULTY_ADJUST:
-                    std::cout << "[CLIENT] Handling DIFFICULTY_ADJUST message" << std::endl;
+                    LOG_INFO("CLIENT", "Handling DIFFICULTY_ADJUST message");
                     handle_difficulty_adjust(DifficultyAdjustMessage::from_json(msg.payload));
                     break;
                 case MessageType::POOL_STATUS:
-                    std::cout << "[CLIENT] Handling POOL_STATUS message" << std::endl;
+                    LOG_INFO("CLIENT", "Handling POOL_STATUS message");
                     handle_pool_status(PoolStatusMessage::from_json(msg.payload));
                     break;
                 case MessageType::ERROR_PROBLEM: // This is 0x17 = 23
-                    std::cout << "[CLIENT] Handling ERROR message" << std::endl;
+                    LOG_WARN("CLIENT", "Handling ERROR message");
                     handle_error(msg);
                     break;
                 case MessageType::RECONNECT:
-                    std::cout << "[CLIENT] Handling RECONNECT message" << std::endl;
+                    LOG_INFO("CLIENT", "Handling RECONNECT message");
                     // Server requested reconnect
                     reconnect();
                     break;
                 default:
-                    std::cerr << "[CLIENT] Unknown message type: " << static_cast<int>(msg.type)
-                            << " (hex: 0x" << std::hex << static_cast<int>(msg.type) << std::dec << ")" << std::endl;
+                    LOG_ERROR("CLIENT", "Unknown message type: ", static_cast<int>(msg.type),
+                              " (hex: 0x", std::hex, static_cast<int>(msg.type), std::dec, ")");
             }
         } catch (const std::exception &e) {
-            std::cerr << "[CLIENT] Error processing message type " << static_cast<int>(msg.type)
-                    << ": " << e.what() << std::endl;
+            LOG_ERROR("CLIENT", "Error processing message type ", static_cast<int>(msg.type),
+                      ": ", e.what());
             event_handler_->on_error(ErrorCode::PROTOCOL_ERROR, e.what());
         }
     }
 
     void PoolClient::handle_welcome(const WelcomeMessage &welcome) {
-        std::cout << "Connected to pool: " << welcome.pool_name
-                << " v" << welcome.pool_version << std::endl;
+        LOG_INFO("CLIENT", Color::GREEN, "Connected to pool: ", Color::RESET, welcome.pool_name,
+                 " v", welcome.pool_version);
 
         // Check protocol compatibility
         if (welcome.protocol_version != PROTOCOL_VERSION) {
-            std::cerr << "Protocol version mismatch. Pool: " << welcome.protocol_version
-                    << ", Client: " << PROTOCOL_VERSION << std::endl;
+            LOG_WARN("CLIENT", "Protocol version mismatch. Pool: ", welcome.protocol_version,
+                     ", Client: ", PROTOCOL_VERSION);
         }
 
         // Update stats
@@ -549,14 +542,14 @@ namespace MiningPool {
         auth.password = config_.password;
         auth.session_id = session_id_;
 
-        std::cout << "[CLIENT] Sending AUTH message:" << std::endl;
-        std::cout << "  Method: " << (auth.method == AuthMethod::WORKER_PASS
-                                          ? "worker_pass"
-                                          : auth.method == AuthMethod::API_KEY
-                                                ? "api_key"
-                                                : "certificate") << std::endl;
-        std::cout << "  Username: " << auth.username << std::endl;
-        std::cout << "  Password: " << (auth.password.empty() ? "<empty>" : "<set>") << std::endl;
+        LOG_INFO("CLIENT", "Sending AUTH message:");
+        LOG_DEBUG("CLIENT", "  Method: ", (auth.method == AuthMethod::WORKER_PASS
+                      ? "worker_pass"
+                      : auth.method == AuthMethod::API_KEY
+                      ? "api_key"
+                      : "certificate"));
+        LOG_DEBUG("CLIENT", "  Username: ", auth.username);
+        LOG_DEBUG("CLIENT", "  Password: ", (auth.password.empty() ? "<empty>" : "<set>"));
 
         Message msg;
         msg.type = MessageType::AUTH;
@@ -564,7 +557,7 @@ namespace MiningPool {
         msg.timestamp = Utils::current_timestamp_ms();
         msg.payload = auth.to_json();
 
-        std::cout << "[CLIENT] AUTH payload: " << msg.payload.dump() << std::endl;
+        LOG_TRACE("CLIENT", "AUTH payload: ", msg.payload.dump());
 
         send_message(msg);
         return true;
@@ -671,7 +664,7 @@ namespace MiningPool {
 
             // Check for special messages (e.g., "Block found!")
             if (!result.message.empty()) {
-                std::cout << "Pool message: " << result.message << std::endl;
+                LOG_INFO("POOL", Color::BRIGHT_GREEN, "Pool message: ", result.message, Color::RESET);
             }
         } else {
             event_handler_->on_share_rejected(result);
@@ -694,7 +687,7 @@ namespace MiningPool {
                 default:
                     break;
             }
-            std::cerr << "Share rejected: " << reason << std::endl;
+            LOG_ERROR("POOL", "Share rejected: ", reason);
         }
     }
 
@@ -716,8 +709,8 @@ namespace MiningPool {
             worker_stats_.current_difficulty = adjust.new_difficulty;
         }
 
-        std::cout << "Difficulty adjusted to " << adjust.new_difficulty
-                << " (" << adjust.reason << ")" << std::endl;
+        LOG_INFO("POOL", "Difficulty adjusted to ", Color::BRIGHT_MAGENTA, adjust.new_difficulty,
+                 Color::RESET, " (", adjust.reason, ")");
 
         event_handler_->on_difficulty_changed(adjust.new_difficulty);
     }
@@ -730,14 +723,14 @@ namespace MiningPool {
         int error_code_int = msg.payload.value("code", 0);
         ErrorCode code = static_cast<ErrorCode>(error_code_int);
         std::string message = msg.payload.value("message", "Unknown error");
-        std::cerr << "[CLIENT] Received error from server - code: " << error_code_int << ", message: " << message <<
-                std::endl;
+        LOG_ERROR("CLIENT", Color::RED, "Received error from server - code: ", error_code_int,
+                  ", message: ", message, Color::RESET);
         // Handle specific error codes
         switch (code) {
             case ErrorCode::INVALID_MESSAGE:
             case ErrorCode::PROTOCOL_ERROR:
                 // These are fatal errors, disconnect
-                std::cerr << "[CLIENT] Fatal protocol error, disconnecting..." << std::endl;
+                LOG_ERROR("CLIENT", "Fatal protocol error, disconnecting...");
                 connected_ = false;
                 authenticated_ = false;
                 // Close the websocket
@@ -752,6 +745,8 @@ namespace MiningPool {
             case ErrorCode::RATE_LIMITED:
                 // Back off for a bit
                 std::this_thread::sleep_for(std::chrono::seconds(5));
+                break;
+            default:
                 break;
         }
 
@@ -837,7 +832,7 @@ namespace MiningPool {
             ).count();
 
             if (elapsed > config_.response_timeout_ms) {
-                std::cerr << "Request timeout: message_id=" << it->first << std::endl;
+                LOG_ERROR("CLIENT", "Request timeout: message_id=", it->first);
                 it = pending_requests_.erase(it);
             } else {
                 ++it;
@@ -850,7 +845,7 @@ namespace MiningPool {
             return;
         }
 
-        std::cout << "Attempting to reconnect..." << std::endl;
+        LOG_INFO("CLIENT", "Attempting to reconnect...");
 
         // Reset connection state
         connected_ = false;
@@ -927,7 +922,7 @@ namespace MiningPool {
             // Start read loop
             do_read();
         } catch (const std::exception &e) {
-            std::cerr << "Reconnection failed: " << e.what() << std::endl;
+            LOG_ERROR("CLIENT", "Reconnection failed: ", e.what());
 
             // Schedule another reconnection attempt
             if (config_.reconnect_attempts != 0) {
@@ -951,7 +946,7 @@ namespace MiningPool {
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (clients_.count(name) > 0) {
-            std::cerr << "Pool with name '" << name << "' already exists" << std::endl;
+            LOG_ERROR("POOL_MGR", "Pool with name '", name, "' already exists");
             return false;
         }
 
@@ -1029,7 +1024,7 @@ namespace MiningPool {
 
         for (auto &[name, client]: clients_) {
             if (!client->is_connected()) {
-                std::cout << "Connecting to pool: " << name << std::endl;
+                LOG_INFO("POOL_MGR", "Connecting to pool: ", name);
                 client->connect();
             }
         }
@@ -1040,7 +1035,7 @@ namespace MiningPool {
 
         for (auto &[name, client]: clients_) {
             if (client->is_connected()) {
-                std::cout << "Disconnecting from pool: " << name << std::endl;
+                LOG_INFO("POOL_MGR", "Disconnecting from pool: ", name);
                 client->disconnect();
             }
         }
@@ -1075,7 +1070,7 @@ namespace MiningPool {
         for (const auto &pool_name: failover_order_) {
             auto client = get_client(pool_name);
             if (client && client->is_connected()) {
-                std::cout << "Failing over to pool: " << pool_name << std::endl;
+                LOG_INFO("POOL_MGR", "Failing over to pool: ", pool_name);
                 set_primary_pool(pool_name);
                 return;
             }
@@ -1085,7 +1080,7 @@ namespace MiningPool {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const auto &[name, client]: clients_) {
             if (client->is_connected() && name != primary_pool_name_) {
-                std::cout << "Failing over to pool: " << name << std::endl;
+                LOG_INFO("POOL_MGR", "Failing over to pool: ", name);
                 primary_pool_name_ = name;
                 return;
             }
