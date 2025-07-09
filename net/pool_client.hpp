@@ -71,7 +71,11 @@ namespace MiningPool {
         // Message handling
         void send_message(const Message &msg);
 
+        bool is_authenticated() const;
+
     private:
+        std::atomic<bool> write_in_progress_{false};
+        std::string current_write_payload_;
         // Configuration
         PoolConfig config_;
         IPoolEventHandler *event_handler_;

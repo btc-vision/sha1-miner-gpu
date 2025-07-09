@@ -2,6 +2,8 @@
 #include "../logging/logger.hpp"
 #include <regex>
 
+#include "gpu_platform.hpp"
+
 namespace MiningPool {
     // ParsedUrl implementation
     PoolClient::ParsedUrl PoolClient::parse_url(const std::string &url) {
@@ -247,29 +249,42 @@ namespace MiningPool {
     }
 
     void PoolClient::send_message(const Message &msg) {
+        LOG_DEBUG("CLIENT", "send_message called for type: ", static_cast<int>(msg.type), ", ID: ", msg.id);
         if (!connected_.load()) {
+            LOG_ERROR("CLIENT", "Cannot send message - not connected");
             return;
         }
 
-        std::string payload = msg.serialize();
+        try {
+            std::string payload = msg.serialize();
+            LOG_DEBUG("CLIENT", "Message serialized, length: ", payload.length());
+            LOG_TRACE("CLIENT", "Payload: ", payload);
 
-        // Track pending requests if expecting response
-        if (msg.type == MessageType::AUTH ||
-            msg.type == MessageType::SUBMIT_SHARE ||
-            msg.type == MessageType::GET_JOB) {
-            std::lock_guard<std::mutex> lock(pending_mutex_);
-            pending_requests_[msg.id] = std::chrono::steady_clock::now();
+            // Track pending requests if expecting response
+            if (msg.type == MessageType::AUTH ||
+                msg.type == MessageType::SUBMIT_SHARE ||
+                msg.type == MessageType::GET_JOB) {
+                std::lock_guard<std::mutex> lock(pending_mutex_);
+                pending_requests_[msg.id] = std::chrono::steady_clock::now();
+                LOG_DEBUG("CLIENT", "Added message ID ", msg.id, " to pending requests");
+            }
+
+            // Queue message for sending
+            {
+                std::lock_guard<std::mutex> lock(outgoing_mutex_);
+                outgoing_queue_.push(msg);
+                LOG_DEBUG("CLIENT", "Message queued, queue size: ", outgoing_queue_.size());
+                outgoing_cv_.notify_one();
+            }
+
+            // Trigger write if not already writing
+            net::post(ioc_, [this]() {
+                LOG_DEBUG("CLIENT", "Posted do_write to io_context");
+                do_write();
+            });
+        } catch (const std::exception &e) {
+            LOG_ERROR("CLIENT", "Exception in send_message: ", e.what());
         }
-
-        // Queue message for sending
-        {
-            std::lock_guard<std::mutex> lock(outgoing_mutex_);
-            outgoing_queue_.push(msg);
-            outgoing_cv_.notify_one();
-        }
-
-        // Trigger write if not already writing
-        net::post(ioc_, [this]() { do_write(); });
     }
 
     void PoolClient::do_read() {
@@ -299,30 +314,41 @@ namespace MiningPool {
     }
 
     void PoolClient::do_write() {
-        if (!connected_.load()) {
+        if (!connected_.load() || write_in_progress_.load()) {
             return;
         }
-
         std::unique_lock<std::mutex> lock(outgoing_mutex_);
         if (outgoing_queue_.empty()) {
             return;
         }
-
+        write_in_progress_ = true;
         Message msg = outgoing_queue_.front();
         outgoing_queue_.pop();
         lock.unlock();
 
-        std::string payload = msg.serialize();
-
-        // Simply capture 'this' - the PoolClient lifetime is managed externally
+        current_write_payload_ = msg.serialize();
         auto write_handler = [this](beast::error_code ec, std::size_t bytes_transferred) {
+            write_in_progress_ = false;
             on_write(ec, bytes_transferred);
         };
 
         if (config_.use_tls && wss_) {
-            wss_->async_write(net::buffer(payload), write_handler);
+            wss_->async_write(net::buffer(current_write_payload_), write_handler);
         } else if (ws_) {
-            ws_->async_write(net::buffer(payload), write_handler);
+            ws_->async_write(net::buffer(current_write_payload_), write_handler);
+        }
+    }
+
+    void PoolClient::on_write(beast::error_code ec, std::size_t bytes_transferred) {
+        if (ec) {
+            LOG_ERROR("CLIENT", "Write error: ", ec.message());
+            return;
+        }
+
+        // Check if more messages to send
+        std::lock_guard<std::mutex> lock(outgoing_mutex_);
+        if (!outgoing_queue_.empty()) {
+            net::post(ioc_, [this]() { do_write(); });
         }
     }
 
@@ -388,17 +414,8 @@ namespace MiningPool {
         }
     }
 
-    void PoolClient::on_write(beast::error_code ec, std::size_t bytes_transferred) {
-        if (ec) {
-            LOG_ERROR("CLIENT", "Write error: ", ec.message());
-            return;
-        }
-
-        // Check if more messages to send
-        std::lock_guard<std::mutex> lock(outgoing_mutex_);
-        if (!outgoing_queue_.empty()) {
-            net::post(ioc_, [this]() { do_write(); });
-        }
+    bool PoolClient::is_authenticated() const {
+        return authenticated_.load();
     }
 
     void PoolClient::keepalive_loop() {
@@ -542,6 +559,28 @@ namespace MiningPool {
         auth.password = config_.password;
         auth.session_id = session_id_;
 
+        // Add client info for better server-side difficulty adjustment
+        ClientInfo client_info;
+
+        // Estimate hashrate based on GPU count
+        // The actual mining system will be initialized later by PoolMiningSystem
+        int gpu_count = 0;
+        gpuGetDeviceCount(&gpu_count);
+
+        if (gpu_count > 0) {
+            client_info.gpu_count = gpu_count;
+            // Estimate based on typical GPU performance
+            // Modern GPUs typically achieve 2-4 GH/s for SHA-1
+            client_info.estimated_hashrate = gpu_count * 2.5e9; // 2.5 GH/s per GPU
+        } else {
+            // CPU fallback (though not recommended)
+            client_info.gpu_count = 0;
+            client_info.estimated_hashrate = 100e6; // 100 MH/s for CPU
+        }
+
+        client_info.miner_version = "SHA1-Miner/1.0.0";
+        auth.client_info = client_info;
+
         LOG_INFO("CLIENT", "Sending AUTH message:");
         LOG_DEBUG("CLIENT", "  Method: ", (auth.method == AuthMethod::WORKER_PASS
                       ? "worker_pass"
@@ -550,6 +589,8 @@ namespace MiningPool {
                       : "certificate"));
         LOG_DEBUG("CLIENT", "  Username: ", auth.username);
         LOG_DEBUG("CLIENT", "  Password: ", (auth.password.empty() ? "<empty>" : "<set>"));
+        LOG_DEBUG("CLIENT", "  Estimated hashrate: ", client_info.estimated_hashrate / 1e9, " GH/s");
+        LOG_DEBUG("CLIENT", "  GPU count: ", client_info.gpu_count);
 
         Message msg;
         msg.type = MessageType::AUTH;
@@ -630,30 +671,74 @@ namespace MiningPool {
     }
 
     void PoolClient::submit_share(const Share &share) {
+        LOG_INFO("SHARE", "PoolClient::submit_share called");
+        LOG_INFO("SHARE", "  Job ID: ", share.job_id);
+        LOG_INFO("SHARE", "  Nonce: ", share.nonce);
+        LOG_INFO("SHARE", "  Hash: ", share.hash);
+        LOG_INFO("SHARE", "  Bits: ", share.matching_bits);
+
         if (!authenticated_.load()) {
+            LOG_ERROR("SHARE", "Not authenticated, cannot submit share");
             return;
         }
 
-        SubmitShareMessage submit;
-        submit.job_id = share.job_id;
-        submit.nonce = share.nonce;
-        submit.hash = share.hash;
-        submit.matching_bits = share.matching_bits;
-        submit.worker_name = config_.worker_name;
-
-        Message msg;
-        msg.type = MessageType::SUBMIT_SHARE;
-        msg.id = Utils::generate_message_id();
-        msg.timestamp = Utils::current_timestamp_ms();
-        msg.payload = submit.to_json();
-
-        // Track submission time for latency stats
-        {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            worker_stats_.last_share_time = std::chrono::steady_clock::now();
+        if (!connected_.load()) {
+            LOG_ERROR("SHARE", "Not connected, cannot submit share");
+            return;
         }
 
-        send_message(msg);
+        // Validate share data
+        if (share.job_id.empty()) {
+            LOG_ERROR("SHARE", "Empty job ID, cannot submit share");
+            return;
+        }
+
+        if (share.hash.empty()) {
+            LOG_ERROR("SHARE", "Empty hash, cannot submit share");
+            return;
+        }
+
+        // Validate hash format (should be 40 hex characters)
+        if (share.hash.length() != 40) {
+            LOG_ERROR("SHARE", "Invalid hash length: ", share.hash.length(), " (expected 40)");
+            return;
+        }
+
+        // Check if hash contains only hex characters
+        for (char c: share.hash) {
+            if (!std::isxdigit(c)) {
+                LOG_ERROR("SHARE", "Invalid hash character: '", c, "' in hash: ", share.hash);
+                return;
+            }
+        }
+
+        try {
+            SubmitShareMessage submit;
+            submit.job_id = share.job_id;
+            submit.nonce = share.nonce;
+            submit.hash = share.hash;
+            submit.matching_bits = share.matching_bits;
+            submit.worker_name = config_.worker_name;
+
+            Message msg;
+            msg.type = MessageType::SUBMIT_SHARE;
+            msg.id = Utils::generate_message_id();
+            msg.timestamp = Utils::current_timestamp_ms();
+            LOG_DEBUG("SHARE", "Creating message payload...");
+            msg.payload = submit.to_json();
+            LOG_INFO("SHARE", "Sending share message with ID: ", msg.id);
+
+            // Track submission time for latency stats
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                worker_stats_.last_share_time = std::chrono::steady_clock::now();
+            }
+
+            send_message(msg);
+            LOG_INFO("SHARE", "Share message sent successfully");
+        } catch (const std::exception &e) {
+            LOG_ERROR("SHARE", "Exception in submit_share: ", e.what());
+        }
     }
 
     void PoolClient::handle_share_result(const ShareResultMessage &result) {

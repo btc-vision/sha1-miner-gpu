@@ -6,12 +6,17 @@
 #include <atomic>
 
 namespace MiningPool {
+    static std::atomic<uint64_t> message_counter{1};
+
     namespace Utils {
         uint64_t generate_message_id() {
-            static std::random_device rd;
-            static std::mt19937_64 gen(rd());
-            static std::uniform_int_distribution<uint64_t> dis;
-            return dis(gen);
+            auto now = std::chrono::high_resolution_clock::now();
+            auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+                now.time_since_epoch()).count();
+
+            // Combine timestamp with counter for uniqueness
+            uint64_t counter = message_counter.fetch_add(1);
+            return (timestamp << 16) | (counter & 0xFFFF);
         }
 
         uint64_t current_timestamp_ms() {

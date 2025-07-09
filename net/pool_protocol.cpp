@@ -3,8 +3,11 @@
 #include <iostream>
 #include <random>
 #include <chrono>
+#include <atomic>
 
 namespace MiningPool {
+    static std::atomic<uint64_t> message_counter{1};
+
     // Message serialization/deserialization
     std::string Message::serialize() const {
         nlohmann::json j;
@@ -96,7 +99,7 @@ namespace MiningPool {
         return msg;
     }
 
-    // AuthMessage
+    // AuthMessage - Enhanced for epoch support
     nlohmann::json AuthMessage::to_json() const {
         nlohmann::json j;
         // Convert enum to string to match TypeScript
@@ -116,6 +119,20 @@ namespace MiningPool {
         if (!session_id.empty()) j["session_id"] = session_id;
         if (!otp.empty()) j["otp"] = otp;
         if (!client_nonce.empty()) j["client_nonce"] = client_nonce;
+        // Add client_info for hashrate estimation
+        if (client_info.has_value()) {
+            nlohmann::json info;
+            if (client_info->estimated_hashrate > 0) {
+                info["estimated_hashrate"] = client_info->estimated_hashrate;
+            }
+            if (client_info->gpu_count > 0) {
+                info["gpu_count"] = client_info->gpu_count;
+            }
+            if (!client_info->miner_version.empty()) {
+                info["miner_version"] = client_info->miner_version;
+            }
+            j["client_info"] = info;
+        }
         return j;
     }
 
@@ -146,6 +163,21 @@ namespace MiningPool {
         }
         if (j.contains("client_nonce") && !j["client_nonce"].is_null()) {
             msg.client_nonce = j["client_nonce"].get<std::string>();
+        }
+        // Parse client_info if present
+        if (j.contains("client_info") && !j["client_info"].is_null()) {
+            ClientInfo info;
+            auto ci = j["client_info"];
+            if (ci.contains("estimated_hashrate")) {
+                info.estimated_hashrate = ci["estimated_hashrate"].get<double>();
+            }
+            if (ci.contains("gpu_count")) {
+                info.gpu_count = ci["gpu_count"].get<uint32_t>();
+            }
+            if (ci.contains("miner_version")) {
+                info.miner_version = ci["miner_version"].get<std::string>();
+            }
+            msg.client_info = info;
         }
         return msg;
     }
@@ -182,7 +214,7 @@ namespace MiningPool {
         return msg;
     }
 
-    // JobMessage
+    // JobMessage - Enhanced for unique salted preimages
     nlohmann::json JobMessage::to_json() const {
         nlohmann::json j;
         j["job_id"] = job_id;
@@ -366,14 +398,15 @@ namespace MiningPool {
         return msg;
     }
 
-    // PoolStatusMessage
+    // PoolStatusMessage - Enhanced with epoch info
     nlohmann::json PoolStatusMessage::to_json() const {
         nlohmann::json j;
         j["connected_workers"] = connected_workers;
         j["total_hashrate"] = total_hashrate;
         j["shares_per_minute"] = shares_per_minute;
-        j["blocks_found"] = blocks_found;
-        j["current_round_shares"] = current_round_shares;
+        j["epochs_completed"] = epochs_completed;
+        j["current_epoch_number"] = current_epoch_number;
+        j["current_epoch_shares"] = current_epoch_shares;
         j["pool_fee_percent"] = pool_fee_percent;
         j["minimum_payout"] = minimum_payout;
         j["extra_info"] = extra_info;
@@ -385,11 +418,27 @@ namespace MiningPool {
         msg.connected_workers = j["connected_workers"].get<uint32_t>();
         msg.total_hashrate = j["total_hashrate"].get<double>();
         msg.shares_per_minute = j["shares_per_minute"].get<double>();
-        msg.blocks_found = j["blocks_found"].get<uint64_t>();
-        msg.current_round_shares = j["current_round_shares"].get<uint64_t>();
+        // Handle both old (blocks_found) and new (epochs_completed) field names
+        if (j.contains("epochs_completed")) {
+            msg.epochs_completed = j["epochs_completed"].get<uint64_t>();
+        } else if (j.contains("blocks_found")) {
+            msg.epochs_completed = j["blocks_found"].get<uint64_t>();
+        }
+
+        // Handle epoch-specific fields
+        if (j.contains("current_epoch_number")) {
+            msg.current_epoch_number = j["current_epoch_number"].get<uint32_t>();
+        }
+        if (j.contains("current_epoch_shares")) {
+            msg.current_epoch_shares = j["current_epoch_shares"].get<uint64_t>();
+        } else if (j.contains("current_round_shares")) {
+            msg.current_epoch_shares = j["current_round_shares"].get<uint64_t>();
+        }
+
         msg.pool_fee_percent = j["pool_fee_percent"].get<double>();
         msg.minimum_payout = j["minimum_payout"].get<double>();
         msg.extra_info = j["extra_info"];
+
         return msg;
     }
 } // namespace MiningPool

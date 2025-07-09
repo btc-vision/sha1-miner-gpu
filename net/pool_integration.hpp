@@ -20,12 +20,12 @@ namespace MiningPool {
 
             // Mining configuration
             int gpu_id = 0;
-            std::vector<int> gpu_ids; // For multi-GPU
+            std::vector<int> gpu_ids;
             bool use_all_gpus = false;
 
             // Performance settings
             uint32_t share_scan_interval_ms = 100;
-            uint32_t min_share_difficulty = 20; // Minimum bits to check
+            uint32_t min_share_difficulty = 20;
             uint32_t share_buffer_size = 1000;
 
             // Vardiff settings
@@ -43,6 +43,8 @@ namespace MiningPool {
 
         // Start/stop pool mining
         bool start();
+
+        void share_submission_loop();
 
         void stop();
 
@@ -136,6 +138,8 @@ namespace MiningPool {
         PoolMiningStats stats_;
         std::chrono::steady_clock::time_point start_time_;
 
+        std::thread share_submission_thread_;
+
         // Threads
         std::thread mining_thread_;
         std::thread share_scanner_thread_;
@@ -156,11 +160,11 @@ namespace MiningPool {
         // Share processing
         void scan_for_shares();
 
+        void setup_mining_result_callback();
+
         void process_mining_results(const std::vector<MiningResult> &results);
 
         void submit_share(const MiningResult &result);
-
-        void processAccumulatedResults();
 
         // Vardiff
         void adjust_local_difficulty();

@@ -45,7 +45,8 @@ namespace MiningPool {
         RATE_LIMITED = 1006,
         PROTOCOL_ERROR = 1007,
         INTERNAL_ERROR = 1008,
-        BANNED = 1009
+        BANNED = 1009,
+        NO_WORK = 1010
     };
 
     // Share difficulty validation result
@@ -80,7 +81,8 @@ namespace MiningPool {
     struct HelloMessage {
         uint32_t protocol_version;
         std::string client_version;
-        std::vector<std::string> capabilities; // e.g., ["gpu", "cpu", "multi-gpu"]
+        std::vector<std::string> capabilities;
+        // e.g., ["gpu", "cpu", "multi-gpu", "vardiff", "unique-targets", "opnet-integration"]
         std::string user_agent;
 
         nlohmann::json to_json() const;
@@ -88,13 +90,21 @@ namespace MiningPool {
         static HelloMessage from_json(const nlohmann::json &j);
     };
 
+    // Client info for better difficulty adjustment
+    struct ClientInfo {
+        double estimated_hashrate = 0;
+        uint32_t gpu_count = 0;
+        std::string miner_version;
+    };
+
     struct AuthMessage {
         AuthMethod method;
-        std::string username; // Format: "wallet_address.worker_name" or "username.worker"
+        std::string username; // Format: "wallet_address.worker_name"
         std::string password; // Optional password or API key
         std::string session_id; // For reconnection
         std::string otp; // Optional OTP
         std::string client_nonce; // Optional nonce
+        std::optional<ClientInfo> client_info; // Optional client information
 
         nlohmann::json to_json() const;
 
@@ -133,7 +143,7 @@ namespace MiningPool {
         std::string pool_version;
         uint32_t protocol_version;
         uint32_t min_difficulty;
-        std::vector<std::string> features;
+        std::vector<std::string> features; // e.g., ["vardiff", "unique-targets", "opnet-integration"]
         std::string motd; // Message of the day
 
         nlohmann::json to_json() const;
@@ -157,12 +167,12 @@ namespace MiningPool {
         std::string job_id;
         uint32_t target_difficulty;
         std::string target_pattern;
-        std::string prefix_data;
+        std::string prefix_data; // Unique salted preimage for this worker
         std::string suffix_data;
-        uint64_t nonce_start;
-        uint64_t nonce_end;
-        std::string algorithm;
-        nlohmann::json extra_data;
+        uint64_t nonce_start; // Full nonce space available
+        uint64_t nonce_end; // 0xFFFFFFFFFFFFFFFF
+        std::string algorithm; // "sha1"
+        nlohmann::json extra_data; // Contains epoch info, salt, etc.
         bool clean_jobs;
         uint32_t expires_in_seconds;
 
@@ -198,11 +208,12 @@ namespace MiningPool {
         uint32_t connected_workers;
         double total_hashrate;
         double shares_per_minute;
-        uint64_t blocks_found;
-        uint64_t current_round_shares;
+        uint64_t epochs_completed; // Changed from blocks_found
+        uint32_t current_epoch_number;
+        uint64_t current_epoch_shares;
         double pool_fee_percent;
         double minimum_payout;
-        nlohmann::json extra_info;
+        nlohmann::json extra_info; // Contains detailed epoch and server info
 
         nlohmann::json to_json() const;
 
@@ -263,7 +274,7 @@ namespace MiningPool {
         }
     };
 
-    // Job tracking
+    // Job tracking with epoch support
     struct PoolJob {
         std::string job_id;
         JobMessage job_data;
@@ -325,4 +336,3 @@ namespace MiningPool {
         std::vector<uint8_t> hex_to_bytes(const std::string &hex);
     }
 } // namespace MiningPool
-
