@@ -275,11 +275,16 @@ namespace MiningPool {
     SubmitShareMessage SubmitShareMessage::from_json(const nlohmann::json &j) {
         SubmitShareMessage msg;
         msg.job_id = j["job_id"].get<std::string>();
-        // Handle bigint nonce
+
+        // Handle bigint nonce - it could be string or number
         if (j["nonce"].is_string()) {
             msg.nonce = std::stoull(j["nonce"].get<std::string>());
-        } else {
+        } else if (j["nonce"].is_number_integer()) {
             msg.nonce = j["nonce"].get<uint64_t>();
+        } else if (j["nonce"].is_number_unsigned()) {
+            msg.nonce = j["nonce"].get<uint64_t>();
+        } else {
+            throw std::runtime_error("Invalid nonce type");
         }
 
         msg.hash = j["hash"].get<std::string>();

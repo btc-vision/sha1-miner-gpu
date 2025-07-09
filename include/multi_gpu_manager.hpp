@@ -25,7 +25,15 @@ class MultiGPUManager {
 public:
     MultiGPUManager();
 
-    ~MultiGPUManager();
+    virtual ~MultiGPUManager();
+
+    void stopMining() const {
+        for (auto& worker : workers_) {
+            if (worker && worker->mining_system) {
+                worker->mining_system->stopMining();
+            }
+        }
+    }
 
     /**
      * Initialize mining on specified GPUs
@@ -65,7 +73,7 @@ protected:
         std::atomic<uint32_t> best_match_bits{0};
     };
 
-    std::vector<std::unique_ptr<GPUWorker> > workers_;
+    std::vector<std::unique_ptr<GPUWorker>> workers_;
     std::atomic<bool> shutdown_{false};
 
     // Global nonce distribution

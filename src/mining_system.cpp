@@ -6,6 +6,8 @@
 #include <cstring>
 #include "gpu_architecture.hpp"
 #include "utilities.hpp"
+#include "../logging/logger.hpp"
+#include "algorithm"
 
 // Global system instance
 std::unique_ptr<MiningSystem> g_mining_system;
@@ -318,29 +320,35 @@ bool MiningSystem::initialize() {
     return true;
 }
 
+void MiningSystem::stopMining() {
+    stop_mining_ = true;
+    g_shutdown = true; // Also set global shutdown for monitor thread
+}
+
 void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds) {
-    std::cout << "Starting mining for " << duration_seconds << " seconds...\n";
-    std::cout << "Target difficulty: " << job.difficulty << " bits\n";
-    std::cout << "Target hash: ";
+    LOG_INFO("MINING", "Starting mining for ", duration_seconds, " seconds...");
+    LOG_INFO("MINING", "Target difficulty: ", job.difficulty, " bits");
+
+    // Log target hash
+    std::stringstream target_ss;
     for (int i = 0; i < 5; i++) {
-        std::cout << std::hex << std::setw(8) << std::setfill('0')
-                << job.target_hash[i] << " ";
+        target_ss << std::hex << std::setw(8) << std::setfill('0') << job.target_hash[i];
+        if (i < 4) target_ss << " ";
     }
-    std::cout << "\n" << std::dec;
-    std::cout << "Only new best matches will be reported.\n";
-    std::cout << "=====================================\n\n";
+    LOG_INFO("MINING", "Target hash: ", target_ss.str());
+    LOG_INFO("MINING", "Only new best matches will be reported.");
+    LOG_INFO("MINING", "=====================================");
 
     // Copy job to device
     for (int i = 0; i < config_.num_streams; i++) {
         device_jobs_[i].copyFromHost(job);
     }
 
-    // Reset shutdown flag and best tracker
+    // Reset flags
     g_shutdown = false;
+    stop_mining_ = false;
     best_tracker_.reset();
-    // Reset actual hash counter
     total_hashes_ = 0;
-    // Clear accumulated results
     clearResults();
 
     // Start performance monitor
@@ -356,12 +364,14 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
         uint64_t nonce_offset;
         bool busy;
         std::chrono::high_resolution_clock::time_point launch_time;
-        uint64_t last_nonces_processed; // Add tracking per stream
+        uint64_t last_nonces_processed;
     };
     std::vector<StreamData> stream_data(config_.num_streams);
+
     // Initialize stream tracking
     for (int i = 0; i < config_.num_streams; i++) {
         stream_data[i].last_nonces_processed = 0;
+        stream_data[i].busy = false;
         // Reset the actual nonces counter for each stream
         gpuMemsetAsync(gpu_pools_[i].nonces_processed, 0, sizeof(uint64_t), streams_[i]);
     }
@@ -374,7 +384,10 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
     int current_stream = 0;
     uint64_t kernels_launched = 0;
 
-    while (std::chrono::steady_clock::now() < end_time && !g_shutdown) {
+    LOG_DEBUG("MINING", "Starting mining loop with ", config_.num_streams, " streams");
+
+    // MODIFIED: Check both time limit AND stop_mining_ flag
+    while (std::chrono::steady_clock::now() < end_time && !g_shutdown && !stop_mining_) {
         // Find next available stream
         int attempts = 0;
         while (stream_data[current_stream].busy && attempts < config_.num_streams) {
@@ -382,13 +395,18 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
             if (status == gpuSuccess) {
                 // Stream completed - get actual nonces processed
                 uint64_t actual_nonces = 0;
-                gpuMemcpyAsync(&actual_nonces, gpu_pools_[current_stream].nonces_processed, sizeof(uint64_t),
-                               gpuMemcpyDeviceToHost, streams_[current_stream]);
+                gpuMemcpyAsync(&actual_nonces, gpu_pools_[current_stream].nonces_processed,
+                              sizeof(uint64_t), gpuMemcpyDeviceToHost, streams_[current_stream]);
                 gpuStreamSynchronize(streams_[current_stream]);
+
                 // Update total with actual work done
                 uint64_t nonces_this_kernel = actual_nonces - stream_data[current_stream].last_nonces_processed;
                 total_hashes_ += nonces_this_kernel;
                 stream_data[current_stream].last_nonces_processed = actual_nonces;
+
+                LOG_TRACE("MINING", "Stream ", current_stream, " completed, processed ",
+                         nonces_this_kernel, " nonces");
+
                 // Process results
                 processResultsOptimized(current_stream);
                 stream_data[current_stream].busy = false;
@@ -406,6 +424,12 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
 
             current_stream = (current_stream + 1) % config_.num_streams;
             attempts++;
+        }
+
+        // Check if we should stop mining
+        if (stop_mining_) {
+            LOG_INFO("MINING", "Stop mining flag detected, breaking loop");
+            break;
         }
 
         if (stream_data[current_stream].busy) {
@@ -435,7 +459,9 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
         stream_data[current_stream].busy = true;
         stream_data[current_stream].nonce_offset = global_nonce_offset;
 
-        // Don't update total_hashes_ here - wait for actual count
+        LOG_TRACE("MINING", "Launched kernel on stream ", current_stream,
+                 " with nonce offset ", global_nonce_offset);
+
         kernels_launched++;
         global_nonce_offset += nonce_stride;
 
@@ -443,17 +469,24 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
         current_stream = (current_stream + 1) % config_.num_streams;
     }
 
+    LOG_DEBUG("MINING", "Main loop finished, waiting for streams to complete");
+
     // Wait for all streams to complete and get final counts
     for (int i = 0; i < config_.num_streams; i++) {
-        gpuStreamSynchronize(streams_[i]);
-        // Get final actual nonces processed
-        uint64_t actual_nonces = 0;
-        gpuMemcpy(&actual_nonces, gpu_pools_[i].nonces_processed, sizeof(uint64_t), gpuMemcpyDeviceToHost);
-        // Update total with any remaining work
-        uint64_t nonces_this_kernel = actual_nonces - stream_data[i].last_nonces_processed;
-        total_hashes_ += nonces_this_kernel;
+        if (stream_data[i].busy) {
+            gpuStreamSynchronize(streams_[i]);
+            // Get final actual nonces processed
+            uint64_t actual_nonces = 0;
+            gpuMemcpy(&actual_nonces, gpu_pools_[i].nonces_processed, sizeof(uint64_t), gpuMemcpyDeviceToHost);
+            // Update total with any remaining work
+            uint64_t nonces_this_kernel = actual_nonces - stream_data[i].last_nonces_processed;
+            total_hashes_ += nonces_this_kernel;
 
-        processResultsOptimized(i);
+            LOG_TRACE("MINING", "Final sync for stream ", i, ", processed ",
+                     nonces_this_kernel, " nonces");
+
+            processResultsOptimized(i);
+        }
     }
 
     // Stop monitor thread
@@ -462,9 +495,18 @@ void MiningSystem::runMiningLoop(const MiningJob &job, uint32_t duration_seconds
         monitor_thread_->join();
     }
 
-    std::cout << "\n\nMining completed. Kernels launched: " << kernels_launched << "\n";
-    std::cout << "Actual hashes computed: " << static_cast<double>(total_hashes_) / 1e9 << " GH\n";
-    std::cout << "Final best match: " << best_tracker_.getBestBits() << " bits\n";
+    // Log if we stopped early
+    if (stop_mining_) {
+        LOG_WARN("MINING", Color::YELLOW, "Mining interrupted by new job.", Color::RESET);
+    } else {
+        LOG_INFO("MINING", Color::GREEN, "Mining completed normally.", Color::RESET);
+    }
+
+    LOG_INFO("MINING", "Kernels launched: ", kernels_launched);
+    LOG_INFO("MINING", "Actual hashes computed: ",
+             std::fixed, std::setprecision(2),
+             static_cast<double>(total_hashes_) / 1e9, " GH");
+    LOG_INFO("MINING", "Final best match: ", best_tracker_.getBestBits(), " bits");
 }
 
 void MiningSystem::processResultsOptimized(int stream_idx) {
@@ -480,7 +522,9 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
     if (count == 0) return;
 
     // Limit to capacity
-    count = std::min(count, pool.capacity);
+    count = (count < pool.capacity) ? count : pool.capacity;
+
+    LOG_TRACE("MINING", "Processing ", count, " results from stream ", stream_idx);
 
     // Copy results
     auto copy_start = std::chrono::high_resolution_clock::now();
@@ -512,20 +556,19 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
                 std::chrono::steady_clock::now() - start_time_
             );
 
-            std::cout << "\n[NEW BEST!] Time: " << elapsed.count() << "s\n";
-            std::cout << "  Platform: " << getGPUPlatformName() << "\n";
-            std::cout << "  Nonce: 0x" << std::hex << results[i].nonce << std::dec << "\n";
-            std::cout << "  Matching bits: " << results[i].matching_bits << "\n";
-            std::cout << "  Hash: ";
+            LOG_INFO("MINING", Color::BRIGHT_YELLOW, "[NEW BEST!] Time: ", elapsed.count(), "s", Color::RESET);
+            LOG_INFO("MINING", "  Platform: ", getGPUPlatformName());
+            LOG_INFO("MINING", "  Nonce: 0x", std::hex, results[i].nonce, std::dec);
+            LOG_INFO("MINING", "  Matching bits: ", results[i].matching_bits);
+
+            std::stringstream hash_ss;
             for (int j = 0; j < 5; j++) {
-                std::cout << std::hex << std::setw(8) << std::setfill('0')
-                        << results[i].hash[j];
-                if (j < 4) std::cout << " ";
+                hash_ss << std::hex << std::setw(8) << std::setfill('0') << results[i].hash[j];
+                if (j < 4) hash_ss << " ";
             }
-            std::cout << std::dec << "\n";
-            std::cout << "  Rate: " << std::fixed << std::setprecision(2)
-                    << static_cast<double>(total_hashes_.load()) / elapsed.count() / 1e9
-                    << " GH/s\n";
+            LOG_INFO("MINING", "  Hash: ", hash_ss.str());
+            LOG_INFO("MINING", "  Rate: ", std::fixed, std::setprecision(2),
+                    static_cast<double>(total_hashes_.load()) / elapsed.count() / 1e9, " GH/s");
         }
 
         total_candidates_++;

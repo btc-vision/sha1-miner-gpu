@@ -87,6 +87,10 @@ public:
         }
     };
 
+    void stopMining();
+
+    bool shouldContinueMining() const { return !stop_mining_.load(); }
+
     /**
      * Set a callback to be called whenever new results are found
      * @param callback Function to call with new results
@@ -102,18 +106,23 @@ public:
      * @return Number of hashes computed in this batch
      */
     uint64_t runSingleBatch(const MiningJob &job) {
-        // Copy job to device
-        for (int i = 0; i < config_.num_streams; i++) {
-            device_jobs_[i].copyFromHost(job);
+        if (!device_jobs_.empty()) {
+            device_jobs_[0].copyFromHost(job);
         }
+
+        // Reset stop flag for this batch
+        stop_mining_ = false;
+
         // Configure kernel
         KernelConfig kernel_config;
         kernel_config.blocks = config_.blocks_per_stream;
         kernel_config.threads_per_block = config_.threads_per_block;
-        kernel_config.stream = streams_[0]; // Use first stream
+        kernel_config.stream = streams_[0];
         kernel_config.shared_memory_size = 0;
+
         // Reset nonce counter
         gpuMemsetAsync(gpu_pools_[0].nonces_processed, 0, sizeof(uint64_t), streams_[0]);
+
         // Launch kernel
         launch_mining_kernel(
             device_jobs_[0],
@@ -122,15 +131,20 @@ public:
             gpu_pools_[0],
             kernel_config
         );
+
         // Wait for completion
         gpuStreamSynchronize(streams_[0]);
+
         // Get actual nonces processed
         uint64_t actual_nonces = 0;
         gpuMemcpy(&actual_nonces, gpu_pools_[0].nonces_processed, sizeof(uint64_t), gpuMemcpyDeviceToHost);
+
         // Process results
         processResultsOptimized(0);
+
         // Update total hashes
         total_hashes_ += actual_nonces;
+
         return actual_nonces;
     }
 
@@ -209,6 +223,9 @@ public:
     void runMiningLoop(const MiningJob &job, uint32_t duration_seconds);
 
     MiningStats getStats() const;
+
+private:
+    std::atomic<bool> stop_mining_{false};
 
 protected:
     // Configuration and device properties

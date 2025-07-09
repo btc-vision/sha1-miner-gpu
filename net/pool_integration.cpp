@@ -12,7 +12,6 @@ namespace MiningPool {
     static std::string hash_to_hex(const uint32_t hash[5]) {
         std::string result;
         result.reserve(40); // 5 * 8 characters
-
         for (int i = 0; i < 5; i++) {
             char hex_chars[9]; // 8 chars + null terminator
             snprintf(hex_chars, sizeof(hex_chars), "%08x", hash[i]);
@@ -48,11 +47,6 @@ namespace MiningPool {
         // Initialize mining system with proper configuration
         MiningSystem::Config mining_config;
 
-        // Create result callback for share submission
-        auto result_callback = [this](const std::vector<MiningResult> &results) {
-            process_mining_results(results);
-        };
-
         // Configure GPU setup
         if (config_.use_all_gpus) {
             // For multi-GPU, we'll use a MultiGPUManager
@@ -72,9 +66,6 @@ namespace MiningPool {
                     return false;
                 }
 
-                // Set the result callback
-                multi_gpu_manager_->setResultCallback(result_callback);
-
                 LOG_INFO("POOL", "Initialized ", device_count, " GPUs for pool mining");
             } else {
                 // Single GPU fallback
@@ -88,7 +79,6 @@ namespace MiningPool {
                     LOG_ERROR("POOL", "Failed to initialize multi-GPU manager");
                     return false;
                 }
-                multi_gpu_manager_->setResultCallback(result_callback);
             } else {
                 // Single specific GPU
                 mining_config.device_id = config_.gpu_ids[0];
@@ -105,7 +95,6 @@ namespace MiningPool {
                 LOG_ERROR("POOL", "Failed to initialize mining system");
                 return false;
             }
-            mining_system_->setResultCallback(result_callback);
         }
 
         // Connect to pool
@@ -125,32 +114,6 @@ namespace MiningPool {
         return true;
     }
 
-    void PoolMiningSystem::share_submission_loop() {
-        while (running_.load()) {
-            std::unique_lock<std::mutex> lock(share_mutex_);
-            share_cv_.wait_for(lock, std::chrono::seconds(1), [this] {
-                return !share_queue_.empty() || !running_.load();
-            });
-
-            if (!running_.load()) break;
-            while (!share_queue_.empty()) {
-                Share share = share_queue_.front();
-                share_queue_.pop();
-                lock.unlock();
-
-                // Send via pool client
-                if (pool_client_ && pool_client_->is_connected()) {
-                    pool_client_->submit_share(share);
-
-                    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
-                    stats_.shares_submitted++;
-                }
-
-                lock.lock();
-            }
-        }
-    }
-
     void PoolMiningSystem::stop() {
         if (!running_.load()) {
             return;
@@ -164,6 +127,7 @@ namespace MiningPool {
         // Notify condition variables
         job_cv_.notify_all();
         share_cv_.notify_all();
+        results_cv_.notify_all();
 
         // Disconnect from pool
         if (pool_client_) {
@@ -185,7 +149,6 @@ namespace MiningPool {
         if (stats_reporter_thread_.joinable()) {
             stats_reporter_thread_.join();
         }
-
         if (share_submission_thread_.joinable()) {
             share_submission_thread_.join();
         }
@@ -194,63 +157,140 @@ namespace MiningPool {
     }
 
     void PoolMiningSystem::mining_loop() {
-        LOG_INFO("MINING", "Mining loop started");
-        while (running_.load()) {
-            std::optional<PoolJob> current_pool_job;
-            std::optional<MiningJob> current_mining_job_local;
-            // Wait for a job
-            {
-                std::unique_lock<std::mutex> lock(job_mutex_);
-                job_cv_.wait_for(lock, std::chrono::seconds(1), [this] {
-                    return current_job_.has_value() || !running_.load();
-                });
-                if (!running_.load()) break;
-                if (!current_job_.has_value()) {
-                    LOG_DEBUG("MINING", "No job available, waiting...");
-                    continue;
-                }
-                current_pool_job = current_job_;
-                current_mining_job_local = current_mining_job_;
-            }
-            if (!current_mining_job_local.has_value()) {
-                LOG_WARN("MINING", "Job available but mining job conversion failed");
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    LOG_INFO("MINING", "Mining loop started");
+
+    while (running_.load()) {
+        std::optional<PoolJob> current_pool_job;
+        std::optional<MiningJob> current_mining_job_local;
+        std::string current_job_id;
+        uint64_t current_generation;
+
+        // Wait for a job
+        {
+            std::unique_lock<std::mutex> lock(job_mutex_);
+            job_cv_.wait_for(lock, std::chrono::seconds(1), [this] {
+                return current_job_.has_value() || !running_.load();
+            });
+
+            if (!running_.load()) break;
+            if (!current_job_.has_value()) {
+                LOG_DEBUG("MINING", "No job available, waiting...");
                 continue;
             }
 
-            mining_active_ = true;
-
-            // Set up result callback
-            setup_mining_result_callback();
-            LOG_INFO("MINING", "Starting mining with job: ", current_pool_job->job_id);
-            LOG_INFO("MINING", "Target difficulty: ", current_mining_job_local->difficulty);
-            LOG_INFO("MINING", "Expected minimum shares at difficulty: ", config_.min_share_difficulty);
-            try {
-                // Run mining for a short period to allow job updates
-                mining_system_->runMiningLoop(*current_mining_job_local, 30);
-                LOG_DEBUG("MINING", "Mining batch completed");
-            } catch (const std::exception &e) {
-                LOG_ERROR("MINING", "Mining loop exception: ", e.what());
-            }
-
-            // Small delay to prevent tight loop
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            current_pool_job = current_job_;
+            current_mining_job_local = current_mining_job_;
+            current_job_id = current_job_->job_id;
+            current_generation = job_generation_.load();
         }
 
-        mining_active_ = false;
-        LOG_INFO("MINING", "Mining loop stopped");
+        if (!current_mining_job_local.has_value()) {
+            LOG_WARN("MINING", "Job available but mining job conversion failed");
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+
+        // Reset the restart flag
+        should_restart_mining_ = false;
+
+        // Store this mining batch
+        {
+            std::lock_guard<std::mutex> lock(batch_mutex_);
+            MiningBatch batch;
+            batch.job_id = current_job_id;
+            batch.mining_job = *current_mining_job_local;
+            batch.start_time = std::chrono::steady_clock::now();
+
+            active_batches_.push_back(batch);
+
+            while (active_batches_.size() > MAX_ACTIVE_BATCHES) {
+                active_batches_.pop_front();
+            }
+        }
+
+        // Set up result callback
+        auto job_id_for_callback = current_job_id;
+        auto result_callback = [this, job_id_for_callback](const std::vector<MiningResult> &results) {
+            process_mining_results(results, job_id_for_callback);
+        };
+
+        if (mining_system_) {
+            mining_system_->setResultCallback(result_callback);
+            mining_system_->resetState();  // Reset counters for new job
+        } else if (multi_gpu_manager_) {
+            multi_gpu_manager_->setResultCallback(result_callback);
+        }
+
+        LOG_INFO("MINING", "Starting mining with job: ", current_job_id);
+        LOG_INFO("MINING", "Target difficulty: ", current_mining_job_local->difficulty);
+
+        // Log the target pattern
+        std::stringstream target_ss;
+        for (int i = 0; i < 5; i++) {
+            target_ss << std::hex << std::setw(8) << std::setfill('0')
+                     << current_mining_job_local->target_hash[i];
+            if (i < 4) target_ss << " ";
+        }
+        LOG_INFO("MINING", "Mining with target pattern: ", target_ss.str());
+
+        try {
+            // Run mining in small chunks to allow checking for updates
+            const int chunk_seconds = 1; // Check every second
+            const int max_chunks = 300;  // Maximum 5 minutes total
+
+            for (int chunk = 0; chunk < max_chunks; chunk++) {
+                // Check if we should stop (new job arrived)
+                {
+                    std::lock_guard<std::mutex> lock(job_mutex_);
+                    if (job_generation_.load() != current_generation) {
+                        LOG_INFO("MINING", "New job detected, switching...");
+                        break;
+                    }
+                }
+
+                // Also check the restart flag
+                if (should_restart_mining_.load()) {
+                    LOG_INFO("MINING", "Mining restart requested");
+                    break;
+                }
+
+                // Run mining for this chunk
+                if (mining_system_) {
+                    mining_system_->runMiningLoop(*current_mining_job_local, chunk_seconds);
+                } else if (multi_gpu_manager_) {
+                    multi_gpu_manager_->runMining(*current_mining_job_local, chunk_seconds);
+                }
+
+                // If mining stopped early (due to stopMining()), break
+                if (mining_system_ && !mining_system_->shouldContinueMining()) {
+                    LOG_INFO("MINING", "Mining stopped early, checking for new job");
+                    break;
+                }
+            }
+
+        } catch (const std::exception &e) {
+            LOG_ERROR("MINING", "Mining error: ", e.what());
+        }
+
+        LOG_INFO("MINING", "Mining batch completed for job: ", current_job_id);
     }
+
+    LOG_INFO("MINING", "Mining loop stopped");
+}
 
     void PoolMiningSystem::share_scanner_loop() {
         LOG_INFO("SCANNER", "Share scanner loop started");
+
         while (running_.load()) {
             {
                 std::unique_lock<std::mutex> lock(results_mutex_);
                 results_cv_.wait_for(lock, std::chrono::milliseconds(config_.share_scan_interval_ms), [this] {
-                    return !current_mining_results_.empty() || !running_.load();
+                    return !current_mining_results_with_job_.empty() || !running_.load();
                 });
             }
+
             if (!running_.load()) break;
+
             try {
                 scan_for_shares();
             } catch (const std::exception &e) {
@@ -262,6 +302,33 @@ namespace MiningPool {
         }
 
         LOG_INFO("SCANNER", "Share scanner loop stopped");
+    }
+
+    void PoolMiningSystem::share_submission_loop() {
+        while (running_.load()) {
+            std::unique_lock<std::mutex> lock(share_mutex_);
+            share_cv_.wait_for(lock, std::chrono::seconds(1), [this] {
+                return !share_queue_.empty() || !running_.load();
+            });
+
+            if (!running_.load()) break;
+
+            while (!share_queue_.empty()) {
+                Share share = share_queue_.front();
+                share_queue_.pop();
+                lock.unlock();
+
+                // Send via pool client
+                if (pool_client_ && pool_client_->is_connected()) {
+                    pool_client_->submit_share(share);
+
+                    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+                    stats_.shares_submitted++;
+                }
+
+                lock.lock();
+            }
+        }
     }
 
     void PoolMiningSystem::stats_reporter_loop() {
@@ -331,115 +398,103 @@ namespace MiningPool {
     }
 
     void PoolMiningSystem::scan_for_shares() {
-        std::vector<MiningResult> current_results; {
+        std::vector<MiningResultWithJob> results_to_scan; {
             std::lock_guard<std::mutex> lock(results_mutex_);
-            if (current_mining_results_.empty()) {
-                return;
-            }
-            current_results = std::move(current_mining_results_);
-            current_mining_results_.clear();
+            if (current_mining_results_with_job_.empty()) return;
+            results_to_scan = std::move(current_mining_results_with_job_);
+            current_mining_results_with_job_.clear();
         }
-        std::string current_job_id;
-        uint32_t job_difficulty; {
-            std::lock_guard<std::mutex> lock(job_mutex_);
-            current_job_id = current_job_id_for_mining_;
-            job_difficulty = current_difficulty_.load();
-        }
-        if (current_job_id.empty()) {
-            LOG_DEBUG("SHARE", "No current job ID, skipping share scan");
-            return;
-        }
-        LOG_DEBUG("SHARE", "Scanning ", current_results.size(), " results for shares");
-        LOG_DEBUG("SHARE", "Job difficulty: ", job_difficulty, ", min share difficulty: ",
-                  config_.min_share_difficulty);
 
-        uint32_t min_difficulty_for_shares = std::min(job_difficulty, config_.min_share_difficulty);
-        LOG_DEBUG("SHARE", "Effective minimum difficulty for shares: ", min_difficulty_for_shares);
-        for (const auto &result: current_results) {
-            LOG_DEBUG("SHARE", "Checking result: nonce=0x", std::hex, result.nonce,
-                      std::dec, ", bits=", result.matching_bits);
+        LOG_DEBUG("SHARE", "Scanning ", results_to_scan.size(), " results for shares");
 
-            if (result.matching_bits >= min_difficulty_for_shares) {
-                LOG_INFO("SHARE", "Found valid share: ", result.matching_bits, " bits (min: ",
-                         min_difficulty_for_shares, ")");
-                submit_share(result);
-            } else {
-                LOG_DEBUG("SHARE", "Result ", result.matching_bits, " bits below threshold ",
-                          min_difficulty_for_shares);
-            }
+        // Group results by job ID
+        std::unordered_map<std::string, std::vector<MiningResult> > results_by_job;
+        for (const auto &item: results_to_scan) {
+            results_by_job[item.job_id].push_back(item.result);
         }
-    }
 
-    void PoolMiningSystem::setup_mining_result_callback() {
-        if (!mining_system_) {
-            LOG_ERROR("SETUP", "Mining system not initialized");
-            return;
-        }
-        auto result_callback = [this](const std::vector<MiningResult> &results) {
-            LOG_DEBUG("CALLBACK", "Mining result callback triggered with ", results.size(), " results");
-            if (results.empty()) {
-                LOG_DEBUG("CALLBACK", "Empty results vector received");
-                return;
-            }
-            // Log details of each result
-            for (size_t i = 0; i < results.size(); i++) {
-                const auto &result = results[i];
-                LOG_DEBUG("CALLBACK", "Result ", i, ": nonce=0x", std::hex, result.nonce, std::dec, ", bits=",
-                          result.matching_bits, ", difficulty_score=", result.difficulty_score);
-                // Log the hash
-                std::string hash_str;
-                for (int j = 0; j < 5; j++) {
-                    char buf[9];
-                    snprintf(buf, sizeof(buf), "%08x", result.hash[j]);
-                    hash_str += buf;
-                    if (j < 4) hash_str += " ";
+        // Process each job's results
+        for (const auto &[job_id, results]: results_by_job) {
+            // Find the job data for this job ID
+            std::optional<PoolJob> job_for_validation; {
+                std::lock_guard<std::mutex> lock(job_mutex_);
+                auto it = active_jobs_.find(job_id);
+                if (it != active_jobs_.end()) {
+                    job_for_validation = it->second;
                 }
-                LOG_DEBUG("CALLBACK", "  Hash: ", hash_str);
             }
-            // Store results for share scanning
-            {
-                std::lock_guard<std::mutex> lock(results_mutex_);
-                size_t old_size = current_mining_results_.size();
-                current_mining_results_.insert(current_mining_results_.end(), results.begin(), results.end());
-                LOG_DEBUG("CALLBACK", "Stored results, total count: ", old_size, " -> ",
-                          current_mining_results_.size());
+
+            if (!job_for_validation.has_value()) {
+                LOG_WARN("SHARE", "No job data found for job ID: ", job_id, ", discarding ", results.size(),
+                         " results");
+                continue;
             }
-            // Notify share scanner
-            results_cv_.notify_one();
-        };
 
-        mining_system_->setResultCallback(result_callback);
-        LOG_INFO("SETUP", "Mining result callback configured with enhanced debugging");
-    }
+            uint32_t job_difficulty = job_for_validation->job_data.target_difficulty;
+            uint32_t min_difficulty_for_shares = std::min(job_difficulty, config_.min_share_difficulty);
 
-    void PoolMiningSystem::process_mining_results(const std::vector<MiningResult> &results) {
-        std::cout << "Processing mining results.\n";
+            LOG_DEBUG("SHARE", "Processing ", results.size(), " results for job ", job_id);
+            LOG_DEBUG("SHARE", "Job difficulty: ", job_difficulty, ", min share difficulty: ",
+                      min_difficulty_for_shares);
 
-        uint32_t pool_difficulty = current_difficulty_.load();
+            for (const auto &result: results) {
+                LOG_DEBUG("SHARE", "Checking result: nonce=0x", std::hex, result.nonce,
+                          std::dec, ", bits=", result.matching_bits);
 
-        for (const auto &result: results) {
-            if (result.matching_bits >= pool_difficulty) {
-                submit_share(result);
+                if (result.matching_bits >= min_difficulty_for_shares) {
+                    LOG_INFO("SHARE", "Found valid share: ", result.matching_bits, " bits (min: ",
+                             min_difficulty_for_shares, ") for job ", job_id);
+
+                    // Create share with the correct job ID
+                    Share share;
+                    share.job_id = job_id; // Use the job ID this result was found for
+                    share.nonce = result.nonce;
+                    share.hash = hash_to_hex(result.hash);
+                    share.matching_bits = result.matching_bits;
+                    share.found_time = std::chrono::steady_clock::now();
+
+                    submit_share_direct(share);
+                } else {
+                    LOG_DEBUG("SHARE", "Result ", result.matching_bits, " bits below threshold ",
+                              min_difficulty_for_shares);
+                }
             }
         }
     }
 
-    void PoolMiningSystem::submit_share(const MiningResult &result) {
-        LOG_INFO("SHARE", "Submitting share: nonce=0x", std::hex, result.nonce, std::dec,
-                 ", bits=", result.matching_bits);
+    void PoolMiningSystem::process_mining_results(const std::vector<MiningResult> &results, const std::string &job_id) {
+        if (results.empty()) return;
 
-        std::lock_guard<std::mutex> lock(job_mutex_);
-        if (!current_job_.has_value()) {
-            LOG_ERROR("SHARE", "No current job for share submission");
-            return;
+        LOG_DEBUG("PROCESS", "Processing ", results.size(), " results for job ", job_id);
+
+        // Store results with their job ID
+        {
+            std::lock_guard<std::mutex> lock(results_mutex_);
+            for (const auto &result: results) {
+                MiningResultWithJob result_with_job;
+                result_with_job.result = result;
+                result_with_job.job_id = job_id;
+                current_mining_results_with_job_.push_back(result_with_job);
+            }
+            LOG_DEBUG("PROCESS", "Stored results, total pending: ", current_mining_results_with_job_.size());
         }
 
-        Share share;
-        share.job_id = current_job_->job_id;
-        share.nonce = result.nonce;
-        share.hash = hash_to_hex(result.hash); // Use the safe version
-        share.matching_bits = result.matching_bits;
-        share.found_time = std::chrono::steady_clock::now();
+        // Notify share scanner
+        results_cv_.notify_one();
+    }
+
+    void PoolMiningSystem::submit_share_direct(const Share &share) {
+        LOG_INFO("SHARE", "Submitting share: nonce=0x", std::hex, share.nonce, std::dec,
+                 ", bits=", share.matching_bits);
+
+        // Verify job still exists
+        {
+            std::lock_guard<std::mutex> lock(job_mutex_);
+            if (active_jobs_.find(share.job_id) == active_jobs_.end()) {
+                LOG_ERROR("SHARE", "Job ", share.job_id, " no longer active, discarding share");
+                return;
+            }
+        }
 
         LOG_INFO("SHARE", "Formatted share data:");
         LOG_INFO("SHARE", "  Job ID: ", share.job_id);
@@ -461,29 +516,32 @@ namespace MiningPool {
                 LOG_ERROR("SHARE", "Exception during share submission: ", e.what());
             }
         } else {
-            LOG_ERROR("SHARE", "Cannot submit share - pool client not connected or not authenticated");
-            LOG_ERROR("SHARE", "  Connected: ", (pool_client_ ? pool_client_->is_connected() : false));
-            LOG_ERROR("SHARE", "  Authenticated: ", (pool_client_ ? pool_client_->is_authenticated() : false));
+            LOG_ERROR("SHARE", "Cannot submit share - pool client not ready");
         }
     }
 
     MiningJob PoolMiningSystem::convert_to_mining_job(const JobMessage &job_msg) {
         MiningJob mining_job{};
+
         // The prefix_data now contains the unique salted preimage for this worker
         auto prefix_bytes = MiningPool::Utils::hex_to_bytes(job_msg.prefix_data);
         auto target_bytes = MiningPool::Utils::hex_to_bytes(job_msg.target_pattern);
+
         if (target_bytes.size() != 20) {
             LOG_ERROR("POOL", "Invalid target pattern size: ", target_bytes.size());
             return mining_job;
         }
+
         // Clear the base message
         std::memset(mining_job.base_message, 0, 32);
+
         // Copy the salted preimage to base message
         if (!prefix_bytes.empty()) {
             size_t copy_size = std::min(prefix_bytes.size(), size_t(32));
             std::memcpy(mining_job.base_message, prefix_bytes.data(), copy_size);
             LOG_DEBUG("POOL", "Using salted preimage of ", copy_size, " bytes");
         }
+
         // Handle suffix data if present (usually empty for salted preimages)
         if (!job_msg.suffix_data.empty()) {
             auto suffix_bytes = MiningPool::Utils::hex_to_bytes(job_msg.suffix_data);
@@ -493,6 +551,7 @@ namespace MiningPool {
                 LOG_DEBUG("POOL", "Added ", suffix_bytes.size(), " suffix bytes at offset ", suffix_offset);
             }
         }
+
         // Convert target hash to uint32_t array
         for (int i = 0; i < 5; i++) {
             mining_job.target_hash[i] = (static_cast<uint32_t>(target_bytes[i * 4]) << 24) |
@@ -500,8 +559,10 @@ namespace MiningPool {
                                         (static_cast<uint32_t>(target_bytes[i * 4 + 2]) << 8) |
                                         static_cast<uint32_t>(target_bytes[i * 4 + 3]);
         }
+
         mining_job.difficulty = job_msg.target_difficulty;
         mining_job.nonce_offset = job_msg.nonce_start;
+
         // Log epoch information if available
         if (job_msg.extra_data.contains("epoch_number")) {
             LOG_INFO("POOL", "Mining for epoch #", job_msg.extra_data["epoch_number"].get<int>());
@@ -576,11 +637,13 @@ namespace MiningPool {
 
     void PoolMiningSystem::update_stats() {
         std::lock_guard<std::mutex> lock(stats_mutex_);
+
         if (mining_system_) {
             auto mining_stats = mining_system_->getStats();
             stats_.hashrate = mining_stats.hash_rate;
             stats_.total_hashes = mining_stats.hashes_computed;
         }
+
         // Update current difficulty from the actual job
         stats_.current_difficulty = current_difficulty_.load();
 
@@ -720,36 +783,106 @@ namespace MiningPool {
     }
 
     void PoolMiningSystem::on_new_job(const PoolJob &job) {
-        LOG_INFO("POOL", "New job received: ", job.job_id, " (difficulty: ", job.job_data.target_difficulty, ")");
-        // Log if this is a unique target job
-        if (job.job_data.extra_data.contains("unique_target") && job.job_data.extra_data["unique_target"].get<bool>()) {
-            LOG_INFO("POOL", Color::BRIGHT_GREEN, "Received unique salted job for this worker", Color::RESET);
-        }
-        // CRITICAL: Update current difficulty to match the job
-        current_difficulty_.store(job.job_data.target_difficulty); {
-            std::lock_guard<std::mutex> lock(job_mutex_);
-            current_job_ = job;
-            current_mining_job_ = convert_to_mining_job(job.job_data);
-            current_job_id_for_mining_ = job.job_id;
-        }
-        // Update mining job
-        update_mining_job(job);
-        // Notify mining thread
-        job_cv_.notify_all();
+    LOG_INFO("POOL", "New job received: ", job.job_id, " (difficulty: ", job.job_data.target_difficulty, ")");
 
-        LOG_INFO("POOL", "Job updated - Mining difficulty set to: ", current_difficulty_.load());
-        LOG_DEBUG("POOL", "Nonce range: ", std::hex, job.job_data.nonce_start,
-                  " - ", job.job_data.nonce_end, std::dec);
+    bool should_interrupt = false;
+
+    // Store job in active jobs map
+    {
+        std::lock_guard<std::mutex> lock(job_mutex_);
+
+        // Check if we need to interrupt current mining
+        if (job.job_data.clean_jobs && current_job_.has_value()) {
+            LOG_WARN("POOL", "Clean jobs requested - interrupting current mining");
+            should_interrupt = true;
+        }
+
+        // Clear jobs if requested
+        if (job.job_data.clean_jobs) {
+            active_jobs_.clear();
+
+            // Clear pending results
+            {
+                std::lock_guard<std::mutex> results_lock(results_mutex_);
+                current_mining_results_with_job_.clear();
+            }
+        }
+
+        // Add the new job
+        active_jobs_[job.job_id] = job;
+
+        // Update current job
+        current_job_ = job;
+        current_mining_job_ = convert_to_mining_job(job.job_data);
+        current_job_id_for_mining_ = job.job_id;
+
+        // Increment job generation
+        job_generation_++;
+
+        // Clean up old jobs if needed
+        while (!job.job_data.clean_jobs && active_jobs_.size() > 10) {
+            std::string oldest_id;
+            auto oldest_time = std::chrono::steady_clock::now();
+
+            for (const auto &[id, j] : active_jobs_) {
+                if (j.received_time < oldest_time) {
+                    oldest_time = j.received_time;
+                    oldest_id = id;
+                }
+            }
+
+            if (!oldest_id.empty()) {
+                active_jobs_.erase(oldest_id);
+            }
+        }
     }
+
+    // Update difficulty
+    current_difficulty_.store(job.job_data.target_difficulty);
+
+    // Signal mining restart if needed
+    if (should_interrupt) {
+        should_restart_mining_ = true;
+
+        // Interrupt the current mining
+        if (mining_system_) {
+            mining_system_->stopMining();
+        } else if (multi_gpu_manager_) {
+            multi_gpu_manager_->stopMining();
+        }
+    }
+
+    // Notify mining thread
+    job_cv_.notify_all();
+}
 
     void PoolMiningSystem::on_job_cancelled(const std::string &job_id) {
         LOG_INFO("POOL", "Job cancelled: ", job_id);
 
         std::lock_guard<std::mutex> lock(job_mutex_);
+
+        // Remove from active jobs
+        active_jobs_.erase(job_id);
+
+        // If this was the current job, stop mining immediately
         if (current_job_.has_value() && current_job_->job_id == job_id) {
+            LOG_WARN("POOL", "Current job was cancelled, stopping mining");
             current_job_.reset();
             current_mining_job_.reset();
             mining_active_ = false;
+
+            // Clear any pending results for this job
+            {
+                std::lock_guard<std::mutex> results_lock(results_mutex_);
+                current_mining_results_with_job_.erase(
+                    std::ranges::remove_if(current_mining_results_with_job_,
+                                           [&job_id](const MiningResultWithJob& r) {
+                                               return r.job_id == job_id;
+                                           }).begin(),
+                    current_mining_results_with_job_.end()
+                );
+            }
+
             job_cv_.notify_all();
         }
     }
@@ -757,17 +890,21 @@ namespace MiningPool {
     void PoolMiningSystem::on_share_accepted(const ShareResultMessage &result) {
         LOG_INFO("POOL", Color::BRIGHT_GREEN, "Share accepted! Difficulty: ",
                  result.difficulty_credited, Color::RESET);
+
         // Update stats
         {
             std::lock_guard<std::mutex> lock(stats_mutex_);
             stats_.shares_accepted++;
+
             // Track share times for vardiff
             share_times_.push_back(std::chrono::steady_clock::now());
             if (share_times_.size() > 100) {
                 share_times_.pop_front();
             }
+
             if (!result.message.empty()) {
                 LOG_INFO("POOL", Color::BRIGHT_YELLOW, "Pool message: ", result.message, Color::RESET);
+
                 // Check for special messages
                 if (result.message.find("High-value contribution") != std::string::npos) {
                     LOG_INFO("POOL", Color::BRIGHT_CYAN,
@@ -1014,3 +1151,4 @@ namespace MiningPool {
                   });
     }
 } // namespace MiningPool
+

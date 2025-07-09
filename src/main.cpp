@@ -542,7 +542,6 @@ int run_pool_mining(const MiningConfig &config) {
     // Create mining configuration
     MiningPool::PoolMiningSystem::Config mining_config;
     mining_config.pool_config = pool_config;
-    mining_config.dev_fee_percent = 0.0; // No dev fee
 
     // Set GPU configuration
     if (config.use_all_gpus) {

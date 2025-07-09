@@ -248,7 +248,15 @@ void MultiGPUManager::runMining(const MiningJob &job, uint32_t duration_seconds)
     // Store difficulty for stats calculation
     current_difficulty_ = job.difficulty;
 
+    shutdown_ = true;
+    for (auto &worker: workers_) {
+        if (worker->worker_thread && worker->worker_thread->joinable()) {
+            worker->worker_thread->join();
+        }
+    }
+    // Now safe to reset
     shutdown_ = false;
+
     start_time_ = std::chrono::steady_clock::now();
     global_best_tracker_.reset();
 
