@@ -15,7 +15,7 @@
 #include "sha1_miner.cuh"
 
 #ifdef USE_HIP
-#include "gpu_architecture.hpp"
+enum class AMDArchitecture;
 #endif
 
 // Forward declare the global shutdown flag
@@ -25,8 +25,6 @@ extern std::atomic<bool> g_shutdown;
  * Callback type for processing mining results in real-time
  */
 using MiningResultCallback = std::function<void(const std::vector<MiningResult> &)>;
-
-
 
 /**
  * Thread-safe tracker for best mining results
@@ -313,5 +311,9 @@ protected:
 
 // Declare the global mining system pointer
 extern std::unique_ptr<MiningSystem> g_mining_system;
+
+#ifdef USE_HIP
+#include "gpu_architecture.hpp"
+#endif
 
 #endif // MINING_SYSTEM_HPP

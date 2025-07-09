@@ -1,4 +1,3 @@
-// gpu_architecture.hpp - Enhanced AMD GPU architecture detection and handling
 #ifndef GPU_ARCHITECTURE_HPP
 #define GPU_ARCHITECTURE_HPP
 
