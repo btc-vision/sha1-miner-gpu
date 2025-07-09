@@ -104,16 +104,6 @@ void MiningSystem::autoTuneParameters() {
             break;
     }
 
-    // Special handling for RDNA4 (gfx1200)
-    if (device_props_.major == 12) {
-        std::cout << "Detected RDNA4 GPU - applying conservative settings\n";
-        config_.blocks_per_stream = 64;
-        config_.threads_per_block = 64;
-        config_.num_streams = 1;
-        config_.result_buffer_size = 32;
-        return;
-    }
-
     int blocks_per_sm;
     int optimal_threads;
 
@@ -121,7 +111,9 @@ void MiningSystem::autoTuneParameters() {
 #ifdef USE_HIP
         // Use enhanced AMD detection
         AMDArchitecture arch = AMDGPUDetector::detectArchitecture(device_props_);
-        AMDArchParams arch_params = AMDGPUDetector::getArchitectureParams(arch);
+
+        // Store the architecture for later use (add this member to class)
+        detected_arch_ = arch;  // You'll need to add AMDArchitecture detected_arch_; to the class
 
         // Print detailed architecture info
         printAMDArchitectureInfo(device_props_);
@@ -135,13 +127,26 @@ void MiningSystem::autoTuneParameters() {
         // Use architecture-specific configuration
         AMDGPUDetector::configureForArchitecture(config_, device_props_, arch);
 
-        // Override threads per block based on architecture
-        if (arch == AMDArchitecture::RDNA3 || arch == AMDArchitecture::RDNA2) {
-            // RDNA prefers 128 or 256 threads
+        // IMPORTANT: After configureForArchitecture, we may need to override for specific GPUs
+
+        // Special handling for RDNA4 - ensure we're not limiting it
+        if (arch == AMDArchitecture::RDNA4) {
+            // Force more aggressive settings for RDNA4
             config_.threads_per_block = 256;
-        } else if (arch == AMDArchitecture::GCN5 || arch == AMDArchitecture::GCN4) {
-            // GCN works well with 256
-            config_.threads_per_block = 256;
+
+            // Don't let the generic limiter cap RDNA4
+            int rdna4_max_blocks = 4096;  // RDNA4 can handle more
+            if (config_.blocks_per_stream > rdna4_max_blocks) {
+                config_.blocks_per_stream = rdna4_max_blocks;
+            }
+
+            // Ensure adequate streams for RDNA4
+            if (config_.num_streams < 16) {
+                config_.num_streams = 16;
+            }
+
+            // Larger result buffer for RDNA4
+            config_.result_buffer_size = 1024;
         }
 
         // Special handling for specific GPUs
@@ -212,19 +217,42 @@ void MiningSystem::autoTuneParameters() {
         config_.threads_per_block = device_props_.maxThreadsPerBlock;
     }
 
-    // For very large GPUs, limit total blocks to avoid scheduling overhead
-    int max_total_blocks = (gpu_vendor_ == GPUVendor::AMD) ? 2048 : 2048;
+    // Architecture-specific block limits
+    int max_total_blocks = 2048;  // Default
+
+#ifdef USE_HIP
+    if (gpu_vendor_ == GPUVendor::AMD) {
+        // AMD-specific limits based on architecture
+        if (detected_arch_ == AMDArchitecture::RDNA4) {
+            max_total_blocks = 4096;  // RDNA4 can handle more
+        } else if (detected_arch_ == AMDArchitecture::RDNA3) {
+            max_total_blocks = 3072;  // RDNA3 limit
+        } else if (detected_arch_ == AMDArchitecture::RDNA2) {
+            max_total_blocks = 2048;  // RDNA2 limit
+        }
+    }
+#endif
+
     if (config_.blocks_per_stream > max_total_blocks) {
+        std::cout << "Capping blocks from " << config_.blocks_per_stream
+                  << " to " << max_total_blocks << " for architecture\n";
         config_.blocks_per_stream = max_total_blocks;
     }
 
     // Adjust streams based on available memory
     size_t free_mem, total_mem;
     gpuMemGetInfo(&free_mem, &total_mem);
-    size_t mem_per_stream = sizeof(MiningResult) * config_.result_buffer_size +
-                            (config_.blocks_per_stream * config_.threads_per_block * sizeof(uint32_t) * 5);
-    int max_streams_by_memory = free_mem / (mem_per_stream * 2);
+
+    // Calculate memory per stream more accurately
+    size_t result_buffer_mem = sizeof(MiningResult) * config_.result_buffer_size;
+    size_t working_mem = config_.blocks_per_stream * config_.threads_per_block * 256; // Rough estimate
+    size_t mem_per_stream = result_buffer_mem + working_mem + (1024 * 1024); // Add 1MB buffer
+
+    int max_streams_by_memory = (free_mem * 0.8) / mem_per_stream; // Use 80% of free memory
+
     if (config_.num_streams > max_streams_by_memory && max_streams_by_memory > 0) {
+        std::cout << "Reducing streams from " << config_.num_streams
+                  << " to " << max_streams_by_memory << " due to memory constraints\n";
         config_.num_streams = max_streams_by_memory;
     }
 
@@ -233,21 +261,51 @@ void MiningSystem::autoTuneParameters() {
         config_.num_streams = 1;
     }
 
-    // Result buffer size
-    config_.result_buffer_size = 128;
+    // Architecture-specific result buffer sizing
+#ifdef USE_HIP
+    if (gpu_vendor_ == GPUVendor::AMD && detected_arch_ == AMDArchitecture::RDNA4) {
+        // RDNA4 gets larger buffers
+        if (config_.result_buffer_size < 512) {
+            config_.result_buffer_size = 512;
+        }
+    } else {
+        // Default buffer size
+        if (config_.result_buffer_size == 0) {
+            config_.result_buffer_size = 128;
+        }
+    }
+#else
+    // Default for NVIDIA
+    if (config_.result_buffer_size == 0) {
+        config_.result_buffer_size = 128;
+    }
+#endif
 
     // Print final configuration
-    std::cout << "Auto-tuned configuration for " << device_props_.name << ":\n";
+    std::cout << "\nAuto-tuned configuration for " << device_props_.name << ":\n";
     std::cout << "  Compute Capability: " << device_props_.major << "." << device_props_.minor << "\n";
     std::cout << "  SMs/CUs: " << device_props_.multiProcessorCount << "\n";
+
     if (gpu_vendor_ == GPUVendor::NVIDIA) {
         std::cout << "  Blocks per SM: " << (config_.blocks_per_stream / device_props_.multiProcessorCount) << "\n";
+    } else if (gpu_vendor_ == GPUVendor::AMD) {
+        std::cout << "  Blocks per CU: " << (config_.blocks_per_stream / device_props_.multiProcessorCount) << "\n";
+#ifdef USE_HIP
+        std::cout << "  Architecture: " << AMDGPUDetector::getArchitectureName(detected_arch_) << "\n";
+#endif
     }
+
     std::cout << "  Blocks per stream: " << config_.blocks_per_stream << "\n";
     std::cout << "  Threads per block: " << config_.threads_per_block << "\n";
     std::cout << "  Number of streams: " << config_.num_streams << "\n";
+    std::cout << "  Result buffer size: " << config_.result_buffer_size << "\n";
     std::cout << "  Total concurrent threads: " <<
-            (config_.blocks_per_stream * config_.threads_per_block * config_.num_streams) << "\n\n";
+            (config_.blocks_per_stream * config_.threads_per_block * config_.num_streams) << "\n";
+
+    // Calculate expected memory usage
+    size_t total_mem_usage = config_.num_streams * mem_per_stream;
+    std::cout << "  Estimated memory usage: " << (total_mem_usage / (1024.0 * 1024.0)) << " MB\n";
+    std::cout << "  Available memory: " << (free_mem / (1024.0 * 1024.0)) << " MB\n\n";
 }
 
 bool MiningSystem::initialize() {
@@ -960,9 +1018,19 @@ uint64_t MiningSystem::getTotalThreads() const {
 }
 
 uint64_t MiningSystem::getHashesPerKernel() const {
-    return static_cast<uint64_t>(config_.blocks_per_stream) *
-           static_cast<uint64_t>(config_.threads_per_block) *
-           static_cast<uint64_t>(NONCES_PER_THREAD);
+    // Base calculation
+    uint64_t base_hashes = static_cast<uint64_t>(config_.blocks_per_stream) *
+                          static_cast<uint64_t>(config_.threads_per_block) *
+                          static_cast<uint64_t>(NONCES_PER_THREAD);
+
+#ifdef USE_HIP
+    // For AMD, the kernel might do different work per thread
+    // But we should still return NONCES_PER_THREAD total
+    // The kernel will distribute this work across threads
+    return base_hashes;
+#else
+    return base_hashes;
+#endif
 }
 
 void MiningSystem::optimizeForGPU() {

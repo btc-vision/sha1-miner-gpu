@@ -3,8 +3,11 @@
 #define GPU_ARCHITECTURE_HPP
 
 #include "gpu_platform.hpp"
+#include "mining_system.hpp"
 #include <string>
 #include <map>
+#include <iostream>
+#include <iomanip>
 
 #ifdef USE_HIP
 
@@ -25,22 +28,71 @@ enum class AMDArchitecture {
 
 // Architecture-specific parameters
 struct AMDArchParams {
-    int wavefront_size;
-    int max_workgroup_size;
-    int preferred_workgroup_multiple;
-    int local_memory_size;
-    int max_registers_per_cu;
-    bool has_packed_math;
-    bool has_matrix_instructions;
-    int blocks_per_cu;
-    std::string arch_name;
+    int waves_per_cu;      // Calculated based on architecture
+    int wave_size;         // From device properties
+    int lds_size_per_cu;   // From device properties
+    int max_workgroup_size; // From device properties
+    int max_waves_per_eu;   // Max concurrent waves per execution unit
+
+    // Get parameters from actual device properties
+    static AMDArchParams getFromDevice(const hipDeviceProp_t& props, AMDArchitecture arch) {
+        AMDArchParams params;
+
+        // 1. Wave size - directly from device
+        params.wave_size = props.warpSize;
+
+        // 2. LDS (Local Data Share) size - from device
+        params.lds_size_per_cu = props.sharedMemPerBlock;
+
+        // 3. Max workgroup size - from device
+        params.max_workgroup_size = props.maxThreadsPerBlock;
+
+        // 4. Calculate waves per CU based on architecture and device limits
+        // This is based on register and LDS limits
+        int max_threads_per_cu = props.maxThreadsPerMultiProcessor;
+        params.waves_per_cu = max_threads_per_cu / params.wave_size;
+
+        // 5. Architecture-specific adjustments
+        // Some architectures have execution unit limitations
+        switch (arch) {
+            case AMDArchitecture::RDNA4:
+            case AMDArchitecture::RDNA3:
+            case AMDArchitecture::RDNA2:
+                // RDNA has 2 SIMDs per CU, each can handle multiple waves
+                // But practical limit is often lower due to register pressure
+                params.max_waves_per_eu = 8; // 16 waves total per CU (8 per SIMD)
+                break;
+            case AMDArchitecture::RDNA1:
+                params.max_waves_per_eu = 10; // 20 waves total per CU
+                break;
+            case AMDArchitecture::CDNA3:
+            case AMDArchitecture::CDNA2:
+            case AMDArchitecture::CDNA1:
+            case AMDArchitecture::GCN5:
+            case AMDArchitecture::GCN4:
+                // GCN/CDNA has 4 SIMDs per CU
+                params.max_waves_per_eu = 10; // 40 waves total per CU
+                break;
+            default:
+                params.max_waves_per_eu = 8;
+                break;
+        }
+
+        // Adjust waves_per_cu if it exceeds architectural limits
+        int arch_limit = params.max_waves_per_eu * (arch >= AMDArchitecture::RDNA1 ? 2 : 4);
+        if (params.waves_per_cu > arch_limit) {
+            params.waves_per_cu = arch_limit;
+        }
+
+        return params;
+    }
 };
 
 class AMDGPUDetector {
 public:
     static AMDArchitecture detectArchitecture(const hipDeviceProp_t& props) {
         // Use gcnArchName for precise detection
-        std::string arch_name = props.gcnArchName;
+        std::string arch_name = props.gcnArchName ? props.gcnArchName : "";
 
         // Parse gfxXXX format
         if (arch_name.find("gfx") == 0 && arch_name.length() >= 6) {
@@ -88,138 +140,140 @@ public:
         return AMDArchitecture::UNKNOWN;
     }
 
-    static AMDArchParams getArchitectureParams(AMDArchitecture arch) {
-        static const std::map<AMDArchitecture, AMDArchParams> arch_params = {
-            {AMDArchitecture::GCN3, {64, 256, 64, 65536, 24576, false, false, 4, "GCN3"}},
-            {AMDArchitecture::GCN4, {64, 256, 64, 65536, 24576, false, false, 4, "GCN4"}},
-            {AMDArchitecture::GCN5, {64, 256, 64, 65536, 24576, true, false, 8, "GCN5/Vega"}},
-            {AMDArchitecture::RDNA1, {32, 256, 32, 65536, 24576, true, false, 16, "RDNA1"}},
-            {AMDArchitecture::RDNA2, {32, 256, 32, 65536, 32768, true, false, 16, "RDNA2"}},
-            {AMDArchitecture::RDNA3, {32, 256, 32, 65536, 32768, true, true, 20, "RDNA3"}},
-            {AMDArchitecture::RDNA4, {32, 256, 32, 65536, 32768, true, true, 24, "RDNA4"}},
-            {AMDArchitecture::CDNA1, {64, 256, 64, 65536, 32768, true, true, 8, "CDNA1"}},
-            {AMDArchitecture::CDNA2, {64, 256, 64, 65536, 32768, true, true, 16, "CDNA2"}},
-            {AMDArchitecture::CDNA3, {64, 256, 64, 65536, 32768, true, true, 32, "CDNA3"}},
-            {AMDArchitecture::UNKNOWN, {32, 256, 32, 65536, 24576, false, false, 8, "Unknown"}}
-        };
-
-        auto it = arch_params.find(arch);
-        if (it != arch_params.end()) {
-            return it->second;
+    static std::string getArchitectureName(AMDArchitecture arch) {
+        switch (arch) {
+            case AMDArchitecture::RDNA4: return "RDNA4";
+            case AMDArchitecture::RDNA3: return "RDNA3";
+            case AMDArchitecture::RDNA2: return "RDNA2";
+            case AMDArchitecture::RDNA1: return "RDNA1";
+            case AMDArchitecture::CDNA3: return "CDNA3";
+            case AMDArchitecture::CDNA2: return "CDNA2";
+            case AMDArchitecture::CDNA1: return "CDNA1";
+            case AMDArchitecture::GCN5: return "GCN5 (Vega)";
+            case AMDArchitecture::GCN4: return "GCN4 (Polaris)";
+            case AMDArchitecture::GCN3: return "GCN3";
+            default: return "Unknown";
         }
-        return arch_params.at(AMDArchitecture::UNKNOWN);
     }
 
-    // Get actual CU count (handle RDNA WGP reporting)
-    static int getActualCUCount(const hipDeviceProp_t& props, AMDArchitecture arch) {
-        int reported_count = props.multiProcessorCount;
-
-        // RDNA architectures may report WGPs instead of CUs
-        if (arch == AMDArchitecture::RDNA1 ||
-            arch == AMDArchitecture::RDNA2 ||
-            arch == AMDArchitecture::RDNA3 ||
-            arch == AMDArchitecture::RDNA4) {
-            // Check if this is reporting WGPs (each WGP = 2 CUs)
-            // This is a heuristic based on known GPU configurations
-            if (reported_count < 40) {  // Likely WGPs
-                return reported_count * 2;
-            }
-        }
-
-        return reported_count;
+    // Get architecture parameters - DO NOT USE the hardcoded map!
+    static AMDArchParams getArchitectureParams(AMDArchitecture arch, const hipDeviceProp_t& props) {
+        return AMDArchParams::getFromDevice(props, arch);
     }
 
-    // Get architecture-specific kernel configuration
     static void configureForArchitecture(MiningSystem::Config& config,
-                                          const hipDeviceProp_t& props,
-                                          AMDArchitecture arch) {
-        AMDArchParams params = getArchitectureParams(arch);
-        int actual_cus = getActualCUCount(props, arch);
+                                    const hipDeviceProp_t& props,
+                                    AMDArchitecture arch) {
+        // Get actual parameters from device
+        AMDArchParams params = AMDArchParams::getFromDevice(props, arch);
+        int actual_cus = props.multiProcessorCount;
 
-        // Base configuration
-        config.threads_per_block = 256;  // Works well across all architectures
- // Architecture-specific tuning
+        std::cout << "\nDevice Capabilities (auto-detected):\n";
+        std::cout << "  Architecture: " << getArchitectureName(arch) << "\n";
+        std::cout << "  Compute Units: " << actual_cus << "\n";
+        std::cout << "  Wave Size: " << params.wave_size << "\n";
+        std::cout << "  Max Waves per CU: " << params.waves_per_cu << "\n";
+        std::cout << "  LDS Size per Block: " << params.lds_size_per_cu / 1024 << " KB\n";
+        std::cout << "  Max Workgroup Size: " << params.max_workgroup_size << "\n";
+        std::cout << "  Max Threads per CU: " << props.maxThreadsPerMultiProcessor << "\n";
+
+        // Calculate optimal blocks per CU based on occupancy goals
+        // Goal: Achieve high occupancy without oversubscribing
+        int target_waves_per_cu = params.waves_per_cu * 0.75; // Target 75% occupancy
+        int waves_per_block = config.threads_per_block / params.wave_size;
+        if (waves_per_block < 1) waves_per_block = 1;
+        int blocks_per_cu = target_waves_per_cu / waves_per_block;
+
+        // Ensure at least some minimum blocks per CU
+        if (blocks_per_cu < 4) blocks_per_cu = 4;
+
+        // Architecture-specific tuning
         switch (arch) {
             case AMDArchitecture::RDNA4:
-                // RDNA4 has improved dual-issue and better efficiency
-                config.blocks_per_stream = actual_cus * params.blocks_per_cu;
-                config.num_streams = 12;
-                // RDNA4 has better occupancy characteristics
-                if (config.blocks_per_stream > 2560) {
-                    config.blocks_per_stream = 2560;
+                // RDNA4 can handle MUCH more work
+                blocks_per_cu = 32;  // Maximum blocks per CU
+                config.threads_per_block = 256;
+                config.num_streams = 16;  // More streams for better overlap
+                config.result_buffer_size = 512;  // Larger buffer for more results
+
+                // For 64 CUs: 64 * 32 = 2048 blocks
+                config.blocks_per_stream = actual_cus * blocks_per_cu;
+
+                // Don't cap at 2048 for RDNA4 - it can handle more
+                if (config.blocks_per_stream > 4096) {
+                    config.blocks_per_stream = 4096;
                 }
                 break;
 
             case AMDArchitecture::RDNA3:
-                // RDNA3 has dual-issue capability and better occupancy
-                config.blocks_per_stream = actual_cus * params.blocks_per_cu;
+                blocks_per_cu = 24;
+                config.threads_per_block = 256;
                 config.num_streams = 8;
-                // Consider using wave32 mode for better occupancy
+                config.result_buffer_size = 256;
+                config.blocks_per_stream = actual_cus * blocks_per_cu;
+                if (config.blocks_per_stream > 3072) {
+                    config.blocks_per_stream = 3072;
+                }
+                break;
+
+            case AMDArchitecture::RDNA2:
+                blocks_per_cu = 16;
+                config.threads_per_block = 256;
+                config.num_streams = 6;
+                config.result_buffer_size = 128;
+                config.blocks_per_stream = actual_cus * blocks_per_cu;
                 if (config.blocks_per_stream > 2048) {
                     config.blocks_per_stream = 2048;
                 }
                 break;
 
-            case AMDArchitecture::RDNA2:
-                config.blocks_per_stream = actual_cus * params.blocks_per_cu;
-                config.num_streams = 8;
-                if (config.blocks_per_stream > 1536) {
-                    config.blocks_per_stream = 1536;
-                }
-                break;
-
-            case AMDArchitecture::RDNA1:
-                config.blocks_per_stream = actual_cus * params.blocks_per_cu;
+            default:
+                // Conservative for older architectures
+                blocks_per_cu = 8;
+                config.threads_per_block = 256;
                 config.num_streams = 4;
+                config.result_buffer_size = 128;
+                config.blocks_per_stream = actual_cus * blocks_per_cu;
                 if (config.blocks_per_stream > 1024) {
                     config.blocks_per_stream = 1024;
                 }
                 break;
-
-            case AMDArchitecture::GCN5:
-                config.blocks_per_stream = actual_cus * params.blocks_per_cu;
-                config.num_streams = 4;
-                break;
-
-            case AMDArchitecture::GCN4:
-            case AMDArchitecture::GCN3:
-                config.blocks_per_stream = actual_cus * params.blocks_per_cu;
-                config.num_streams = 2;
-                break;
-
-            case AMDArchitecture::CDNA1:
-            case AMDArchitecture::CDNA2:
-            case AMDArchitecture::CDNA3:
-                // Data center GPUs can handle more concurrent work
-                config.blocks_per_stream = actual_cus * params.blocks_per_cu;
-                config.num_streams = 16;
-                config.threads_per_block = 256;
-                break;
-
-            default:
-                // Conservative defaults
-                config.blocks_per_stream = actual_cus * 8;
-                config.num_streams = 4;
-                break;
         }
 
-        // Memory-based limits
-        size_t free_mem, total_mem;
-        GPU_IGNORE_RESULT(hipMemGetInfo(&free_mem, &total_mem));
+        // Verify configuration doesn't exceed device limits
+        int total_threads = config.blocks_per_stream * config.threads_per_block;
+        int total_waves = total_threads / params.wave_size;
+        int waves_per_cu_actual = total_waves / actual_cus;
 
-        // Adjust based on available memory
-        size_t mem_per_stream = sizeof(MiningResult) * config.result_buffer_size +
-                                (config.blocks_per_stream * config.threads_per_block * 256);
-        int max_streams_by_memory = free_mem / (mem_per_stream * 2);
+        std::cout << "\nCalculated Configuration:\n";
+        std::cout << "  Blocks per CU: " << blocks_per_cu << "\n";
+        std::cout << "  Total blocks per stream: " << config.blocks_per_stream << "\n";
+        std::cout << "  Threads per block: " << config.threads_per_block << "\n";
+        std::cout << "  Waves per CU (actual): " << waves_per_cu_actual << "\n";
+        std::cout << "  Occupancy: " << (100.0 * waves_per_cu_actual / params.waves_per_cu) << "%\n";
 
-        if (config.num_streams > max_streams_by_memory && max_streams_by_memory > 0) {
-            config.num_streams = max_streams_by_memory;
+        // Check if we need to adjust for memory or other limits
+        size_t required_lds = config.threads_per_block * 64; // Rough estimate
+        if (required_lds > static_cast<size_t>(params.lds_size_per_cu)) {
+            std::cout << "  WARNING: May need to reduce threads per block due to LDS limits\n";
         }
+    }
 
-        // Ensure at least 1 stream
-        if (config.num_streams < 1) {
-            config.num_streams = 1;
-        }
+    static void displayDeviceLimits(const hipDeviceProp_t& props) {
+        std::cout << "\nComplete Device Limits:\n";
+        std::cout << "  Max Threads per Block: " << props.maxThreadsPerBlock << "\n";
+        std::cout << "  Max Threads per CU: " << props.maxThreadsPerMultiProcessor << "\n";
+        std::cout << "  Max Blocks per CU: " << props.maxBlocksPerMultiProcessor << "\n";
+        std::cout << "  Max Grid Size: [" << props.maxGridSize[0] << ", "
+                  << props.maxGridSize[1] << ", " << props.maxGridSize[2] << "]\n";
+        std::cout << "  Warp/Wave Size: " << props.warpSize << "\n";
+        std::cout << "  Registers per Block: " << props.regsPerBlock << "\n";
+        std::cout << "  Shared Memory per Block: " << props.sharedMemPerBlock / 1024 << " KB\n";
+        std::cout << "  Total Constant Memory: " << props.totalConstMem / 1024 << " KB\n";
+        std::cout << "  Memory Clock Rate: " << props.memoryClockRate / 1000 << " MHz\n";
+        std::cout << "  Memory Bus Width: " << props.memoryBusWidth << " bits\n";
+        std::cout << "  L2 Cache Size: " << props.l2CacheSize / 1024 << " KB\n";
+        std::cout << "  Compute Capability: " << props.major << "." << props.minor << "\n";
     }
 
     // Check if GPU is known to have issues
@@ -257,22 +311,29 @@ public:
 // Helper function to print architecture info
 inline void printAMDArchitectureInfo(const hipDeviceProp_t& props) {
     AMDArchitecture arch = AMDGPUDetector::detectArchitecture(props);
-    AMDArchParams params = AMDGPUDetector::getArchitectureParams(arch);
-    int actual_cus = AMDGPUDetector::getActualCUCount(props, arch);
+    AMDArchParams params = AMDArchParams::getFromDevice(props, arch);
 
-    std::cout << "AMD GPU Architecture Details:\n";
-    std::cout << "  Architecture: " << params.arch_name << "\n";
-    std::cout << "  GCN Arch Name: " << props.gcnArchName << "\n";
-    std::cout << "  Wavefront Size: " << params.wavefront_size << "\n";
-    std::cout << "  Reported SMs/CUs: " << props.multiProcessorCount << "\n";
-    std::cout << "  Actual CUs: " << actual_cus << "\n";
-    std::cout << "  Max Workgroup Size: " << params.max_workgroup_size << "\n";
-    std::cout << "  Local Memory: " << params.local_memory_size << " bytes\n";
-    std::cout << "  Has Packed Math: " << (params.has_packed_math ? "Yes" : "No") << "\n";
-
-    if (AMDGPUDetector::hasKnownIssues(arch, props.name)) {
-        std::cout << "  WARNING: This GPU/driver combination may have known issues\n";
+    std::cout << "\n=== AMD GPU Architecture Information ===\n";
+    std::cout << "GPU Name: " << props.name << "\n";
+    std::cout << "Architecture: " << AMDGPUDetector::getArchitectureName(arch) << "\n";
+    if (props.gcnArchName) {
+        std::cout << "GCN Arch Name: " << props.gcnArchName << "\n";
     }
+
+    // Display all detected parameters
+    AMDGPUDetector::displayDeviceLimits(props);
+
+    // Calculate some derived metrics
+    double memory_bandwidth_gb = (props.memoryClockRate / 1000.0) * (props.memoryBusWidth / 8.0) * 2.0 / 1000.0;
+    double compute_tflops = (props.clockRate / 1000.0) * props.multiProcessorCount * 128 * 2 / 1000.0; // Rough estimate
+
+    std::cout << "\nPerformance Metrics:\n";
+    std::cout << "  Theoretical Memory Bandwidth: " << std::fixed << std::setprecision(1)
+              << memory_bandwidth_gb << " GB/s\n";
+    std::cout << "  Estimated FP32 Performance: " << std::setprecision(1)
+              << compute_tflops << " TFLOPS\n";
+    std::cout << "  Compute to Memory Ratio: " << std::setprecision(2)
+              << (compute_tflops * 1000.0 / memory_bandwidth_gb) << " FLOP/byte\n";
 }
 
 #endif // USE_HIP

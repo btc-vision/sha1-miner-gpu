@@ -250,6 +250,10 @@ protected:
     gpuDeviceProp device_props_;
     GPUVendor gpu_vendor_;
 
+#ifdef USE_HIP
+    AMDArchitecture detected_arch_ = AMDArchitecture::UNKNOWN;
+#endif
+
     // GPU resources - using platform-independent types
     std::vector<DeviceMiningJob> device_jobs_;
     std::vector<gpuStream_t> streams_;

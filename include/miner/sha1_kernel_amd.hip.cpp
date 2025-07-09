@@ -92,7 +92,7 @@ __device__ __forceinline__ void expand_message_amd(uint32_t W[16], int t) {
 
 /**
  * Main SHA-1 mining kernel for AMD GPUs
- * Corrected to match NVIDIA kernel hash generation
+ * Optimized for RDNA4 with dynamic work distribution
  */
 __global__ void sha1_mining_kernel_amd(
     const uint8_t * __restrict__ base_message,
@@ -245,13 +245,6 @@ __global__ void sha1_mining_kernel_amd(
         // Count matching bits
         uint32_t matching_bits = count_leading_zeros_160bit_amd(hash, target);
 
-#ifdef DEBUG_SHA1
-        if (blockIdx.x == 0 && threadIdx.x == 0 && i == 0) {
-            printf("[DEBUG] Thread 0: nonce=%llu, matching_bits=%u, difficulty=%u\n",
-                   nonce, matching_bits, difficulty);
-        }
-#endif
-
         // Check if we found a match
         if (matching_bits >= difficulty) {
             // Use AMD's wavefront vote operations
@@ -282,13 +275,6 @@ __global__ void sha1_mining_kernel_amd(
                         for (int j = 0; j < 5; j++) {
                             results[idx].hash[j] = hash[j];
                         }
-
-#ifdef DEBUG_SHA1
-                        if (idx == 0) {
-                            printf("[DEBUG] Found collision! nonce=%llu, bits=%u\n",
-                                   nonce, matching_bits);
-                        }
-#endif
                     }
                 }
             }
@@ -333,6 +319,7 @@ struct AMDKernelConfig {
 
 /**
  * Launch the optimized AMD HIP SHA-1 mining kernel
+ * Properly configured for RDNA4 and other AMD architectures
  */
 extern "C" void launch_mining_kernel_amd(
     const DeviceMiningJob &device_job,
@@ -375,8 +362,68 @@ extern "C" void launch_mining_kernel_amd(
         blocks = (total_waves * props.warpSize) / threads;
     }
 
-    // Increase nonces per thread for AMD to reduce kernel launch overhead
-    uint32_t nonces_per_thread = 128; // Increased from 32
+    // Dynamic nonces_per_thread calculation for proper hash counting
+    uint32_t nonces_per_thread;
+
+    // Detect architecture from device properties
+    std::string arch_name = props.gcnArchName ? props.gcnArchName : "";
+    std::string device_name = props.name ? props.name : "";
+
+    bool is_rdna4 = (arch_name.find("gfx12") != std::string::npos) ||
+                    (props.major == 12) ||
+                    (device_name.find("9070") != std::string::npos) ||
+                    (device_name.find("9080") != std::string::npos);
+    bool is_rdna3 = (arch_name.find("gfx11") != std::string::npos) ||
+                    (props.major == 11) ||
+                    (device_name.find("7900") != std::string::npos) ||
+                    (device_name.find("7800") != std::string::npos) ||
+                    (device_name.find("7700") != std::string::npos);
+    bool is_rdna2 = (arch_name.find("gfx103") != std::string::npos) ||
+                    (device_name.find("6900") != std::string::npos) ||
+                    (device_name.find("6800") != std::string::npos) ||
+                    (device_name.find("6700") != std::string::npos);
+
+    // Calculate nonces_per_thread to match NONCES_PER_THREAD total work
+    uint64_t total_threads = static_cast<uint64_t>(blocks) * static_cast<uint64_t>(threads);
+    nonces_per_thread = NONCES_PER_THREAD / total_threads;
+
+    // Ensure minimum work per thread based on architecture
+    uint32_t min_nonces;
+    if (is_rdna4) {
+        min_nonces = 64;  // RDNA4 minimum
+    } else if (is_rdna3) {
+        min_nonces = 32;  // RDNA3 minimum
+    } else if (is_rdna2) {
+        min_nonces = 16;  // RDNA2 minimum
+    } else {
+        min_nonces = 8;   // Older GPUs
+    }
+
+    // Ensure we have at least minimum work per thread
+    if (nonces_per_thread < min_nonces) {
+        nonces_per_thread = min_nonces;
+        // If this happens, we're doing more work than NONCES_PER_THREAD
+        // The actual_nonces_processed counter will track real work
+    }
+
+    // For very high thread counts, ensure we don't overflow
+    if (nonces_per_thread == 0) {
+        nonces_per_thread = 1;
+    }
+
+    // Debug output for verification
+#ifdef DEBUG_SHA1
+    printf("[AMD Kernel Launch] Device: %s\n", device_name.c_str());
+    printf("[AMD Kernel Launch] Architecture: %s (gfx: %s)\n",
+           is_rdna4 ? "RDNA4" : is_rdna3 ? "RDNA3" : is_rdna2 ? "RDNA2" : "Other",
+           arch_name.c_str());
+    printf("[AMD Kernel Launch] Blocks: %d, Threads/block: %d, Total threads: %llu\n",
+           blocks, threads, total_threads);
+    printf("[AMD Kernel Launch] Nonces/thread: %u, Min nonces: %u\n",
+           nonces_per_thread, min_nonces);
+    printf("[AMD Kernel Launch] Expected work: %llu hashes (NONCES_PER_THREAD: %d)\n",
+           total_threads * nonces_per_thread, NONCES_PER_THREAD);
+#endif
 
     // Reset result count asynchronously
     hipError_t err = hipMemsetAsync(pool.count, 0, sizeof(uint32_t), config.stream);
@@ -389,8 +436,8 @@ extern "C" void launch_mining_kernel_amd(
     dim3 gridDim(blocks);
     dim3 blockDim(threads);
     size_t lds_size = 0;
-
-    // Launch kernel with larger work per thread
+    
+    // Launch kernel with calculated work per thread
     hipLaunchKernelGGL(
         sha1_mining_kernel_amd,
         gridDim,
@@ -407,4 +454,10 @@ extern "C" void launch_mining_kernel_amd(
         nonces_per_thread,
         pool.nonces_processed
     );
+
+    // Check for launch errors
+    err = hipGetLastError();
+    if (err != hipSuccess) {
+        fprintf(stderr, "Kernel launch failed: %s\n", hipGetErrorString(err));
+    }
 }
