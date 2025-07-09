@@ -241,7 +241,7 @@ void MiningSystem::autoTuneParameters() {
 
     // Adjust streams based on available memory
     size_t free_mem, total_mem;
-    gpuMemGetInfo(&free_mem, &total_mem);
+    (void)gpuMemGetInfo(&free_mem, &total_mem);
 
     // Calculate memory per stream more accurately
     size_t result_buffer_mem = sizeof(MiningResult) * config_.result_buffer_size;

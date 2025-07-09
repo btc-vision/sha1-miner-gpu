@@ -41,10 +41,13 @@ bool MultiGPUManager::initialize(const std::vector<int> &gpu_ids) {
 #ifdef USE_HIP
         // Check for AMD GPU issues
         AMDArchitecture arch = AMDGPUDetector::detectArchitecture(props);
-        AMDArchParams arch_params = AMDGPUDetector::getArchitectureParams(arch);
+        AMDArchParams arch_params = AMDGPUDetector::getArchitectureParams(arch, props);
 
-        std::cout << "  Architecture: " << arch_params.arch_name << " (" << props.gcnArchName << ")\n";
-        std::cout << "  Wavefront size: " << arch_params.wavefront_size << "\n";
+        std::cout << "  Architecture: " << AMDGPUDetector::getArchitectureName(arch)
+                  << " (" << props.gcnArchName << ")\n";
+        std::cout << "  Wave size: " << arch_params.wave_size << "\n";
+        std::cout << "  Max waves per CU: " << arch_params.waves_per_cu << "\n";
+        std::cout << "  Compute units: " << props.multiProcessorCount << "\n";
 
         if (AMDGPUDetector::hasKnownIssues(arch, props.name)) {
             std::cout << "WARNING: GPU " << gpu_id << " has known compatibility issues.\n";

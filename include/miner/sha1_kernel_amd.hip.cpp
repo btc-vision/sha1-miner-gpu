@@ -436,7 +436,7 @@ extern "C" void launch_mining_kernel_amd(
     dim3 gridDim(blocks);
     dim3 blockDim(threads);
     size_t lds_size = 0;
-    
+
     // Launch kernel with calculated work per thread
     hipLaunchKernelGGL(
         sha1_mining_kernel_amd,
