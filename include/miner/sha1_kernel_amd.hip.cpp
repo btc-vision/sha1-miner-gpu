@@ -383,7 +383,6 @@ extern "C" void launch_mining_kernel_amd(
                     (device_name.find("6900") != std::string::npos) ||
                     (device_name.find("6800") != std::string::npos) ||
                     (device_name.find("6700") != std::string::npos);
-
     bool is_rdna1 = (arch_name.find("gfx101") != std::string::npos) ||
                 (arch_name.find("gfx1010") != std::string::npos) ||
                 (device_name.find("5700") != std::string::npos) ||
@@ -407,7 +406,7 @@ extern "C" void launch_mining_kernel_amd(
     nonces_per_thread = target_nonces_per_kernel / total_threads;
 
     // Ensure minimum work per thread based on architecture
-    uint32_t min_nonces;
+    /*uint32_t min_nonces;
     if (is_rdna4) {
         min_nonces = 64;  // RDNA4 minimum
     } else if (is_rdna3) {
@@ -428,21 +427,7 @@ extern "C" void launch_mining_kernel_amd(
     // For very high thread counts, ensure we don't overflow
     if (nonces_per_thread == 0) {
         nonces_per_thread = 1;
-    }
-
-    // Debug output for verification
-#ifdef DEBUG_SHA1
-    printf("[AMD Kernel Launch] Device: %s\n", device_name.c_str());
-    printf("[AMD Kernel Launch] Architecture: %s (gfx: %s)\n",
-           is_rdna4 ? "RDNA4" : is_rdna3 ? "RDNA3" : is_rdna2 ? "RDNA2" : "Other",
-           arch_name.c_str());
-    printf("[AMD Kernel Launch] Blocks: %d, Threads/block: %d, Total threads: %llu\n",
-           blocks, threads, total_threads);
-    printf("[AMD Kernel Launch] Nonces/thread: %u, Min nonces: %u\n",
-           nonces_per_thread, min_nonces);
-    printf("[AMD Kernel Launch] Expected work: %llu hashes (NONCES_PER_THREAD: %d)\n",
-           total_threads * nonces_per_thread, NONCES_PER_THREAD);
-#endif
+    }*/
 
     // Reset result count asynchronously
     hipError_t err = hipMemsetAsync(pool.count, 0, sizeof(uint32_t), config.stream);
@@ -475,8 +460,8 @@ extern "C" void launch_mining_kernel_amd(
     );
 
     // Check for launch errors
-    err = hipGetLastError();
-    if (err != hipSuccess) {
-        fprintf(stderr, "Kernel launch failed: %s\n", hipGetErrorString(err));
-    }
+    //err = hipGetLastError();
+    //if (err != hipSuccess) {
+    //    fprintf(stderr, "Kernel launch failed: %s\n", hipGetErrorString(err));
+    //}
 }
