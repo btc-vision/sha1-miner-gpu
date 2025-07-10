@@ -113,7 +113,7 @@ __global__ void sha1_mining_kernel_amd(
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
 
     uint8_t base_msg[32];
-#pragma unroll
+//#pragma unroll
     uint4* base_msg_vec = (uint4*)base_msg;
     const uint4* base_message_vec = (const uint4*)base_message;
     base_msg_vec[0] = base_message_vec[0];  // Loads 16 bytes
