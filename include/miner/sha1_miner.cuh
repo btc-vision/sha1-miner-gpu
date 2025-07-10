@@ -20,13 +20,9 @@
 #define SHA1_BLOCK_SIZE 64
 #define SHA1_DIGEST_SIZE 20
 #define SHA1_ROUNDS 80
-
-// Mining configuration - platform specific
 #define MAX_CANDIDATES_PER_BATCH 1024
 
 #ifdef USE_HIP
-    // AMD GPUs need different values based on architecture
-    // This will be overridden at runtime
     #define NONCES_PER_THREAD 402653184 //201326592
     #define DEFAULT_THREADS_PER_BLOCK 512
 #else
@@ -37,8 +33,8 @@
 
 // Debug mode flag
 #define SHA1_MINER_DEBUG 0
+#define DEBUG_SHA1 true
 
-// Difficulty is defined as the minimum number of matching bits required
 struct MiningJob {
     uint8_t base_message[32]; // Base message to modify
     uint32_t target_hash[5]; // Target hash we're trying to match
@@ -52,14 +48,16 @@ struct MiningResult {
     uint32_t hash[5]; // The resulting hash
     uint32_t matching_bits; // Number of bits matching the target
     uint32_t difficulty_score; // Additional difficulty metric
+    int64_t job_version;
 };
 
 // GPU memory pool for results
 struct ResultPool {
-    MiningResult *results; // Array of results
-    uint32_t *count; // Number of results found
-    uint32_t capacity; // Maximum number of results
+    MiningResult *results;
+    uint32_t *count;
+    uint32_t capacity;
     uint64_t *nonces_processed;
+    uint64_t *job_version;
 };
 
 // Mining statistics
@@ -78,10 +76,19 @@ struct KernelConfig {
     gpuStream_t stream;
 };
 
+struct JobUpdateRequest {
+    uint32_t target_hash[5];
+    uint8_t base_message[32];
+    uint32_t difficulty;
+    uint64_t job_version;
+    bool job_updated;
+};
+
 // Device memory holder for mining job
 struct DeviceMiningJob {
     uint8_t *base_message;
     uint32_t *target_hash;
+    JobUpdateRequest *job_update;  // For live updates
 
     void allocate() {
         gpuError_t err = gpuMalloc(&base_message, 32);
@@ -96,12 +103,24 @@ struct DeviceMiningJob {
         if (err != gpuSuccess) {
             fprintf(stderr, "Failed to allocate device memory for target_hash: %s\n",
                     gpuGetErrorString(err));
-            (void)gpuFree(base_message);  // Explicitly ignore return value
+            (void)gpuFree(base_message);
             base_message = nullptr;
             target_hash = nullptr;
+            return;
+        }
+
+        // Allocate job update structure if using live updates
+        err = gpuMalloc(&job_update, sizeof(JobUpdateRequest));
+        if (err != gpuSuccess) {
+            fprintf(stderr, "Failed to allocate device memory for job_update: %s\n",
+                    gpuGetErrorString(err));
+            (void)gpuFree(base_message);
+            (void)gpuFree(target_hash);
+            base_message = nullptr;
+            target_hash = nullptr;
+            job_update = nullptr;
         }
     }
-
 
     void free() {
         if (base_message) {
@@ -118,6 +137,13 @@ struct DeviceMiningJob {
             }
             target_hash = nullptr;
         }
+        if (job_update) {
+            gpuError_t err = gpuFree(job_update);
+            if (err != gpuSuccess) {
+                fprintf(stderr, "Warning: Failed to free job_update: %s\n", gpuGetErrorString(err));
+            }
+            job_update = nullptr;
+        }
     }
 
     void copyFromHost(const MiningJob &job) const {
@@ -128,6 +154,39 @@ struct DeviceMiningJob {
         err = gpuMemcpy(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice);
         if (err != gpuSuccess) {
             fprintf(stderr, "Failed to copy target_hash to device: %s\n", gpuGetErrorString(err));
+        }
+    }
+
+    void updateJob(const MiningJob &job, uint64_t job_version) const {
+        if (!job_update) {
+            fprintf(stderr, "Warning: job_update is null, cannot update job\n");
+            return;
+        }
+
+        // Prepare update on host
+        JobUpdateRequest update;
+        memcpy(update.base_message, job.base_message, 32);
+        memcpy(update.target_hash, job.target_hash, 5 * sizeof(uint32_t));
+        update.difficulty = job.difficulty;
+        update.job_version = job_version;
+        update.job_updated = true;  // Set the flag
+
+        // Copy entire structure to device
+        gpuError_t err = gpuMemcpy(job_update, &update, sizeof(JobUpdateRequest), gpuMemcpyHostToDevice);
+        if (err != gpuSuccess) {
+            fprintf(stderr, "Failed to update job on device: %s\n", gpuGetErrorString(err));
+            return;
+        }
+
+        // Also update the main job data for consistency
+        err = gpuMemcpy(base_message, job.base_message, 32, gpuMemcpyHostToDevice);
+        if (err != gpuSuccess) {
+            fprintf(stderr, "Failed to update base_message: %s\n", gpuGetErrorString(err));
+        }
+
+        err = gpuMemcpy(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice);
+        if (err != gpuSuccess) {
+            fprintf(stderr, "Failed to update target_hash: %s\n", gpuGetErrorString(err));
         }
     }
 };

@@ -1,11 +1,11 @@
-#include "mining_system.hpp"
-#include "sha1_miner.cuh"
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
 #include <cstring>
 #include "gpu_architecture.hpp"
 #include "utilities.hpp"
+#include "mining_system.hpp"
+#include "sha1_miner.cuh"
 
 // Global system instance
 std::unique_ptr<MiningSystem> g_mining_system;
@@ -714,6 +714,42 @@ void MiningSystem::processStreamResults(int stream_idx, StreamData &stream_data)
     }
 }
 
+void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version) {
+    LOG_INFO("MINING", "Updating job to version ", job_version);
+
+    // First, prepare the job update on all device jobs
+    for (int i = 0; i < config_.num_streams; i++) {
+        // Update the device job with new data
+        device_jobs_[i].updateJob(job, job_version);
+    }
+
+    // Now synchronize all streams to ensure they see the update
+    for (int i = 0; i < config_.num_streams; i++) {
+        gpuStreamSynchronize(streams_[i]);
+    }
+
+    // Clear the job_updated flag after all streams have synchronized
+    // This ensures all blocks have had a chance to see the update
+    for (int i = 0; i < config_.num_streams; i++) {
+        if (device_jobs_[i].job_update) {
+            JobUpdateRequest clear_update;
+            clear_update.job_updated = false;
+            clear_update.job_version = job_version;
+            // Don't need to copy job data again, just clear the flag
+            gpuMemcpyAsync(&device_jobs_[i].job_update->job_updated,
+                          &clear_update.job_updated,
+                          sizeof(bool),
+                          gpuMemcpyHostToDevice,
+                          streams_[i]);
+        }
+    }
+
+    // Store current job version
+    current_job_version_ = job_version;
+
+    LOG_INFO("MINING", "Live job update to version ", job_version, " completed");
+}
+
 void MiningSystem::processResultsOptimized(int stream_idx) {
     auto &pool = gpu_pools_[stream_idx];
     auto &results = pinned_results_[stream_idx];
@@ -727,7 +763,9 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
     if (count == 0) return;
 
     // Limit to capacity
-    count = std::min(count, pool.capacity);
+    if (count > pool.capacity) {
+        count = pool.capacity;
+    }
 
     // Copy results
     auto copy_start = std::chrono::high_resolution_clock::now();
@@ -854,19 +892,32 @@ bool MiningSystem::initializeGPUResources() {
         ResultPool &pool = gpu_pools_[i];
         pool.capacity = config_.result_buffer_size;
 
+        // Initialize all pointers to nullptr first
+        pool.results = nullptr;
+        pool.count = nullptr;
+        pool.nonces_processed = nullptr;
+        pool.job_version = nullptr;
+
         // Allocate device memory with proper alignment
         size_t result_size = sizeof(MiningResult) * pool.capacity;
         size_t aligned_size = ((result_size + alignment - 1) / alignment) * alignment;
 
         gpuError_t err = gpuMalloc(&pool.results, aligned_size);
         if (err != gpuSuccess) {
-            std::cerr << "Failed to allocate GPU results buffer\n";
+            std::cerr << "Failed to allocate GPU results buffer: " << gpuGetErrorString(err) << "\n";
             return false;
         }
 
+        // Allocate count with alignment
         err = gpuMalloc(&pool.count, sizeof(uint32_t));
         if (err != gpuSuccess) {
-            std::cerr << "Failed to allocate count buffer\n";
+            std::cerr << "Failed to allocate count buffer: " << gpuGetErrorString(err) << "\n";
+            return false;
+        }
+
+        // Verify the pointer is valid
+        if (!pool.count) {
+            std::cerr << "pool.count is null after allocation!\n";
             return false;
         }
 
@@ -874,10 +925,18 @@ bool MiningSystem::initializeGPUResources() {
 
         err = gpuMalloc(&pool.nonces_processed, sizeof(uint64_t));
         if (err != gpuSuccess) {
-            std::cerr << "Failed to allocate nonce counter\n";
+            std::cerr << "Failed to allocate nonce counter: " << gpuGetErrorString(err) << "\n";
             return false;
         }
         gpuMemsetAsync(pool.nonces_processed, 0, sizeof(uint64_t), streams_[i]);
+
+        // ALLOCATE JOB VERSION for live updates
+        err = gpuMalloc(&pool.job_version, sizeof(uint64_t));
+        if (err != gpuSuccess) {
+            std::cerr << "Failed to allocate job version: " << gpuGetErrorString(err) << "\n";
+            return false;
+        }
+        gpuMemsetAsync(pool.job_version, 0, sizeof(uint64_t), streams_[i]);
 
         // Allocate pinned host memory
         if (config_.use_pinned_memory) {
@@ -891,14 +950,18 @@ bool MiningSystem::initializeGPUResources() {
         } else {
             pinned_results_[i] = new MiningResult[pool.capacity];
         }
+
+        // Synchronize to ensure all allocations are complete
+        gpuStreamSynchronize(streams_[i]);
     }
 
-    // Allocate device memory for jobs
+    // Allocate device memory for jobs WITH job update support
     device_jobs_.resize(config_.num_streams);
     for (int i = 0; i < config_.num_streams; i++) {
-        device_jobs_[i].allocate();
+        device_jobs_[i].allocate();  // This now includes job_update allocation
     }
 
+    std::cout << "Successfully allocated GPU resources for " << config_.num_streams << " streams\n";
     return true;
 }
 
@@ -931,6 +994,8 @@ void MiningSystem::cleanup() {
             gpuFree(pool.count);
         if (pool.nonces_processed)
             gpuFree(pool.nonces_processed);
+        if (pool.job_version)
+            gpuFree(pool.job_version);
     }
 
     for (auto &job: device_jobs_) {

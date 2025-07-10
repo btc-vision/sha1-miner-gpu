@@ -101,6 +101,11 @@ namespace MiningPool {
         MiningJob convert_to_mining_job(const JobMessage &job_msg);
 
     private:
+        std::atomic<uint64_t> job_version_{0};
+        std::atomic<bool> job_update_pending_{false};
+
+        void update_mining_job_live(const PoolJob &pool_job);
+
         std::atomic<uint32_t> current_difficulty_{20};
 
         Config config_;

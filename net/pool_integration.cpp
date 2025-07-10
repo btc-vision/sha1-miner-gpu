@@ -198,64 +198,54 @@ namespace MiningPool {
     void PoolMiningSystem::mining_loop() {
         LOG_INFO("MINING", "Mining loop started");
 
-        while (running_.load()) {
-            // Check if we're still connected before doing anything
-            if (!pool_client_->is_connected() || !pool_client_->is_authenticated()) {
-                LOG_WARN("MINING", "Not connected to pool, waiting...");
-                mining_active_ = false;
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-                continue;
-            }
-
-            std::optional<PoolJob> current_pool_job;
-            std::optional<MiningJob> current_mining_job_local;
-
-            // Wait for a job
-            {
-                std::unique_lock<std::mutex> lock(job_mutex_);
-                job_cv_.wait_for(lock, std::chrono::seconds(1), [this] {
-                    return current_job_.has_value() || !running_.load();
-                });
-
-                if (!running_.load()) break;
-                if (!current_job_.has_value()) continue;
-
-                current_pool_job = current_job_;
-                current_mining_job_local = current_mining_job_;
-            }
-
-            if (!current_mining_job_local.has_value()) {
-                LOG_WARN("MINING", "Job available but mining job conversion failed");
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                continue;
-            }
-
-            mining_active_ = true;
-
-            try {
-                // Create a condition function that checks connection status
-                auto should_continue = [this]() -> bool {
-                    return mining_active_.load() &&
-                           running_.load() &&
-                           pool_client_->is_connected() &&
-                           pool_client_->is_authenticated();
-                };
-
-                // Use interruptible mining
-                if (multi_gpu_manager_) {
-                    multi_gpu_manager_->runMiningInterruptible(*current_mining_job_local, should_continue);
-                } else if (mining_system_) {
-                    mining_system_->runMiningLoopInterruptible(*current_mining_job_local, should_continue);
-                }
-
-                LOG_DEBUG("MINING", "Mining stopped");
-            } catch (const std::exception &e) {
-                LOG_ERROR("MINING", "Mining loop exception: ", e.what());
-            }
-
-            mining_active_ = false;
+        // Wait for initial job
+        {
+            std::unique_lock<std::mutex> lock(job_mutex_);
+            job_cv_.wait(lock, [this] {
+                return (current_job_.has_value() && current_mining_job_.has_value()) || !running_.load();
+            });
         }
 
+        if (!running_.load()) {
+            LOG_INFO("MINING", "Mining loop stopped before starting (no job)");
+            return;
+        }
+
+        // Verify we have a valid mining job
+        if (!current_mining_job_.has_value()) {
+            LOG_ERROR("MINING", "No mining job available!");
+            return;
+        }
+
+        // Start continuous mining
+        mining_active_ = true;
+
+        try {
+            // Create a condition function that only checks connection
+            auto should_continue = [this]() -> bool {
+                return mining_active_.load() &&
+                       running_.load() &&
+                       pool_client_->is_connected() &&
+                       pool_client_->is_authenticated();
+            };
+
+            LOG_INFO("MINING", "Starting mining with job difficulty: ", current_mining_job_->difficulty, " bits");
+
+            // Start mining and let it run indefinitely
+            // Job updates happen through updateJobLive()
+            if (multi_gpu_manager_) {
+                multi_gpu_manager_->runMiningInterruptible(
+                    *current_mining_job_, should_continue);
+            } else if (mining_system_) {
+                mining_system_->runMiningLoopInterruptible(
+                    *current_mining_job_, should_continue);
+            }
+
+        } catch (const std::exception &e) {
+            LOG_ERROR("MINING", "Mining loop exception: ", e.what());
+        }
+
+        mining_active_ = false;
         LOG_INFO("MINING", "Mining loop stopped");
     }
 
@@ -350,6 +340,10 @@ namespace MiningPool {
 
     void PoolMiningSystem::scan_for_shares() {
         std::vector<MiningResult> current_results;
+        std::string current_job_id;
+        uint32_t job_difficulty_bits;
+        uint64_t expected_job_version;
+
         {
             std::lock_guard<std::mutex> lock(results_mutex_);
             if (current_mining_results_.empty()) {
@@ -359,14 +353,12 @@ namespace MiningPool {
             current_mining_results_.clear();
         }
 
-        std::string current_job_id;
-        uint32_t job_difficulty_bits; // CHANGED: renamed from job_difficulty
         {
             std::lock_guard<std::mutex> lock(job_mutex_);
             current_job_id = current_job_id_for_mining_;
-            // CRITICAL FIX: Use the actual job difficulty IN BITS
             if (current_job_.has_value()) {
-                job_difficulty_bits = current_job_->job_data.target_difficulty; // This is now in BITS
+                job_difficulty_bits = current_job_->job_data.target_difficulty;
+                expected_job_version = job_version_.load();
             } else {
                 return;
             }
@@ -376,9 +368,18 @@ namespace MiningPool {
             return;
         }
 
-        // Check matching_bits directly against required bits
+        // Submit shares that meet difficulty AND are from current job
         for (const auto &result : current_results) {
+            // Check job version to avoid stale shares
+            if (result.job_version != expected_job_version) {
+                LOG_DEBUG("SHARE", "Discarding result from old job version ",
+                          result.job_version, " (current: ", expected_job_version, ")");
+                continue;
+            }
+
             if (result.matching_bits >= job_difficulty_bits) {
+                LOG_DEBUG("SHARE", "Found share with ", result.matching_bits,
+                          " bits (required: ", job_difficulty_bits, ")");
                 submit_share(result);
             }
         }
@@ -738,34 +739,59 @@ namespace MiningPool {
 
     void PoolMiningSystem::on_new_job(const PoolJob &job) {
         LOG_INFO("POOL", "New job received: ", job.job_id,
-                 " (difficulty: ", job.job_data.target_difficulty, " bits)"); // NOW IN BITS
+                 " (difficulty: ", job.job_data.target_difficulty, " bits)");
 
-        // CRITICAL: Update current difficulty immediately
-        current_difficulty_.store(job.job_data.target_difficulty); // Store BITS
+        // Update current difficulty immediately
+        current_difficulty_.store(job.job_data.target_difficulty);
 
+        // Use live update instead of stopping mining
+        update_mining_job_live(job);
+    }
+
+    void PoolMiningSystem::update_mining_job_live(const PoolJob &pool_job) {
+        // Increment job version
+        uint64_t new_version = job_version_.fetch_add(1) + 1;
+
+        LOG_INFO("POOL", "Updating job live to version ", new_version);
+
+        // Convert to mining job
+        MiningJob new_mining_job = convert_to_mining_job(pool_job.job_data);
+
+        // Update job data atomically
         {
             std::lock_guard<std::mutex> lock(job_mutex_);
-            current_job_ = job;
-            current_mining_job_ = convert_to_mining_job(job.job_data);
-            current_job_id_for_mining_ = job.job_id;
+
+            // Store old job ID for logging
+            std::string old_job_id = current_job_id_for_mining_;
+
+            // Update current job
+            current_job_ = pool_job;
+            current_mining_job_ = new_mining_job;  // CRITICAL: Set this!
+            current_job_id_for_mining_ = pool_job.job_id;
+
+            // Clear old results
+            {
+                std::lock_guard<std::mutex> results_lock(results_mutex_);
+                current_mining_results_.clear();
+            }
+
+            // If mining hasn't started yet, just notify the mining thread
+            if (!mining_active_.load()) {
+                LOG_INFO("POOL", "Mining not active yet, notifying mining thread");
+                job_cv_.notify_all();
+                return;
+            }
+
+            // Update GPU job data WITHOUT stopping
+            if (multi_gpu_manager_) {
+                multi_gpu_manager_->updateJobLive(new_mining_job, new_version);
+            } else if (mining_system_) {
+                mining_system_->updateJobLive(new_mining_job, new_version);
+            }
+
+            LOG_INFO("POOL", "Switched from job ", old_job_id, " to ", pool_job.job_id,
+                     " without stopping mining");
         }
-
-        // Clear any pending results from previous job to avoid submitting old shares
-        {
-            std::lock_guard<std::mutex> lock(results_mutex_);
-            current_mining_results_.clear();
-        }
-
-        // Update mining job
-        update_mining_job(job);
-
-        // Notify mining thread
-        job_cv_.notify_all();
-
-        LOG_INFO("POOL", "Job updated - Mining difficulty set to: ",
-                 current_difficulty_.load(), " bits");
-        LOG_INFO("POOL", "Will only submit shares with ",
-                 current_difficulty_.load(), "+ bits");
     }
 
     void PoolMiningSystem::on_job_cancelled(const std::string &job_id) {

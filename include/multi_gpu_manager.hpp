@@ -10,6 +10,7 @@
 #include <functional>
 #include "sha1_miner.cuh"
 #include "../src/mining_system.hpp"
+#include "../logging/logger.hpp"
 
 // Callback type for multi-GPU results
 using MiningResultCallback = std::function<void(const std::vector<MiningResult> &)>;
@@ -72,6 +73,17 @@ public:
                 worker->mining_system->stopMining();
             }
         }
+    }
+
+    void updateJobLive(const MiningJob &job, uint64_t job_version) const {
+        // Update job on all GPUs
+        for (auto &worker : workers_) {
+            if (worker->mining_system) {
+                worker->mining_system->updateJobLive(job, job_version);
+            }
+        }
+
+        LOG_INFO("MULTI_GPU", "Updated job on all GPUs to version ", job_version);
     }
 
     // Add interruptible mining method

@@ -105,52 +105,113 @@ __global__ void sha1_mining_kernel_amd(
     uint32_t result_capacity,
     uint64_t nonce_base,
     uint32_t nonces_per_thread,
-    uint64_t * __restrict__ actual_nonces_processed
+    uint64_t * __restrict__ actual_nonces_processed,
+    volatile JobUpdateRequest * __restrict__ job_update,  // ADD THIS
+    uint64_t * __restrict__ current_job_version          // ADD THIS
 ) {
     // Thread indices
     const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const uint32_t lane_id = threadIdx.x & 63; // Assume 64-thread wavefront
+    const uint32_t lane_id = threadIdx.x & 63; // 64-thread wavefront
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
 
-    uint8_t base_msg[32];
-    uint4* base_msg_vec = (uint4*)base_msg;
-    const uint4* base_message_vec = (const uint4*)base_message;
-    base_msg_vec[0] = base_message_vec[0];  // Loads 16 bytes
-    base_msg_vec[1] = base_message_vec[1];  // Loads next 16 bytes
+    // Check if live updates are enabled
+    const bool live_updates_enabled = (job_update != nullptr && current_job_version != nullptr);
 
-    // Load target (already in correct format)
-    uint32_t target[5];
-#pragma unroll
-    for (int i = 0; i < 5; i++) {
-        target[i] = target_hash[i];
+    // Shared memory for job data (same as NVIDIA)
+    __shared__ uint8_t shared_base_msg[32];
+    __shared__ uint32_t shared_target[5];
+    __shared__ uint32_t shared_difficulty;
+    __shared__ uint64_t shared_job_version;
+    __shared__ volatile bool job_needs_update;
+
+    // Initialize shared memory
+    if (threadIdx.x == 0) {
+        shared_job_version = live_updates_enabled ? *current_job_version : 0;
+        job_needs_update = false;
     }
+    __syncthreads();
+
+    // Load initial job data
+    if (threadIdx.x < 8) {
+        ((uint4*)shared_base_msg)[threadIdx.x] = ((const uint4*)base_message)[threadIdx.x];
+    }
+    if (threadIdx.x < 5) {
+        shared_target[threadIdx.x] = target_hash[threadIdx.x];
+    }
+    if (threadIdx.x == 0) {
+        shared_difficulty = difficulty;
+    }
+    __syncthreads();
 
     // Track processed nonces
     uint32_t nonces_processed = 0;
 
     // Main mining loop
     for (uint32_t i = 0; i < nonces_per_thread; i++) {
+        // Only check for job updates if enabled (same as NVIDIA)
+        if (live_updates_enabled && (i & 0xFFF) == 0) {
+            if (threadIdx.x == 0) {
+                if (job_update->job_updated) {
+                    uint64_t new_version = job_update->job_version;
+                    if (new_version > shared_job_version) {
+                        job_needs_update = true;
+                        shared_job_version = new_version;
+                    }
+                }
+            }
+            __syncthreads();
+
+            // If job needs update, load new data
+            if (job_needs_update) {
+                // Load new job data from the update structure
+                if (threadIdx.x < 8) {
+                    ((uint4*)shared_base_msg)[threadIdx.x] = ((uint4*)job_update->base_message)[threadIdx.x];
+                }
+                if (threadIdx.x < 5) {
+                    shared_target[threadIdx.x] = job_update->target_hash[threadIdx.x];
+                }
+                if (threadIdx.x == 0) {
+                    shared_difficulty = job_update->difficulty;
+
+                    // Update the global job version
+                    *current_job_version = shared_job_version;
+
+                    // Clear the update flag after we've consumed it
+                    job_update->job_updated = false;
+
+                    // Reset result count for new job
+                    *result_count = 0;
+
+                    job_needs_update = false;
+
+#ifdef DEBUG_SHA1
+                    printf("[GPU %d Block %d] Job updated to version %llu\n",
+                           blockIdx.x / 256, blockIdx.x % 256, shared_job_version);
+#endif
+                }
+                __syncthreads();
+            }
+        }
+
         uint64_t nonce = thread_nonce_base + i;
         if (nonce == 0) continue;
 
         nonces_processed++;
 
-        // Create a copy of the message
+        // Create message copy from shared memory (instead of global)
         uint8_t msg_bytes[32];
+        #pragma unroll
+        for (int j = 0; j < 32; j++) {
+            msg_bytes[j] = shared_base_msg[j];
+        }
 
-        // Vectorized version - 2 operations
-        uint4* msg_bytes_vec = (uint4*)msg_bytes;
-        msg_bytes_vec[0] = base_msg_vec[0];  // Copies bytes 0-15
-        msg_bytes_vec[1] = base_msg_vec[1];  // Copies bytes 16-31
-
-        // Apply nonce to last 8 bytes by XORing (big-endian)
+        // Apply nonce
         uint32_t* msg_words = (uint32_t*)msg_bytes;
         msg_words[6] ^= __builtin_bswap32((uint32_t)(nonce >> 32));
         msg_words[7] ^= __builtin_bswap32((uint32_t)(nonce & 0xFFFFFFFF));
 
-        // Convert message bytes to big-endian words for SHA-1 - MATCHING NVIDIA
+        // Convert message bytes to big-endian words for SHA-1
         uint32_t W[16];
-
         uint32_t* msg_words_local = (uint32_t*)msg_bytes;
 #pragma unroll
         for (int j = 0; j < 8; j++) {
@@ -158,12 +219,12 @@ __global__ void sha1_mining_kernel_amd(
         }
 
         // Apply SHA-1 padding
-        W[8] = 0x80000000; // Padding bit
+        W[8] = 0x80000000;
 #pragma unroll
         for (int j = 9; j < 15; j++) {
             W[j] = 0;
         }
-        W[15] = 0x00000100; // Message length: 256 bits in big-endian
+        W[15] = 0x00000100;
 
         // Initialize hash values
         uint32_t a = H0[0];
@@ -197,7 +258,6 @@ __global__ void sha1_mining_kernel_amd(
         for (int t = 40; t < 60; t++) {
             W[t & 15] = amd_rotl32(W[(t-3) & 15] ^ W[(t-8) & 15] ^
                                    W[(t-14) & 15] ^ W[(t-16) & 15], 1);
-            // Optimized majority: (b & c) | (d & (b ^ c))
             uint32_t temp = amd_rotl32(a, 5) + ((b & c) | (d & (b ^ c))) + e + K[2] + W[t & 15];
             e = d; d = c; c = amd_rotl32(b, 30); b = a; a = temp;
         }
@@ -225,13 +285,13 @@ __global__ void sha1_mining_kernel_amd(
         hash[3] = d + H0[3];
         hash[4] = e + H0[4];
 
-        // Count matching bits
-        uint32_t matching_bits = count_leading_zeros_160bit_amd(hash, target);
+        // Count matching bits (use shared target)
+        uint32_t matching_bits = count_leading_zeros_160bit_amd(hash, shared_target);
 
-        // Check if we found a match
-        if (matching_bits >= difficulty) {
+        // Check if we found a match (use shared difficulty)
+        if (matching_bits >= shared_difficulty) {
             // Use AMD's wavefront vote operations
-            uint64_t mask = __ballot(matching_bits >= difficulty);
+            uint64_t mask = __ballot(matching_bits >= shared_difficulty);
 
             if (mask != 0) {
                 // Count set bits in mask up to our lane
@@ -254,6 +314,7 @@ __global__ void sha1_mining_kernel_amd(
                         results[idx].nonce = nonce;
                         results[idx].matching_bits = matching_bits;
                         results[idx].difficulty_score = matching_bits;
+                        results[idx].job_version = shared_job_version; // ADD THIS
 #pragma unroll
                         for (int j = 0; j < 5; j++) {
                             results[idx].hash[j] = hash[j];
@@ -263,7 +324,7 @@ __global__ void sha1_mining_kernel_amd(
             }
         }
     }
-    
+
     atomicAdd(actual_nonces_processed, nonces_processed);
 }
 
@@ -308,9 +369,9 @@ extern "C" void launch_mining_kernel_amd(
     const KernelConfig &config
 ) {
     // Get device properties once and cache
-    static thread_local hipDeviceProp_t props_cached;
-    static thread_local bool props_initialized = false;
-    static thread_local int last_device_id = -1;
+    thread_local hipDeviceProp_t props_cached;
+    thread_local bool props_initialized = false;
+    thread_local int last_device_id = -1;
 
     int current_device;
     hipGetDevice(&current_device);
@@ -435,7 +496,9 @@ extern "C" void launch_mining_kernel_amd(
         pool.capacity,
         nonce_offset,
         nonces_per_thread,
-        pool.nonces_processed
+        pool.nonces_processed,
+        device_job.job_update,
+        pool.job_version
     );
 
     // Check for launch errors

@@ -1,7 +1,6 @@
 #ifndef SHA1_MINER_FUNCTIONS_H
 #define SHA1_MINER_FUNCTIONS_H
 
-#include <cstdint>
 #include "sha1_miner.cuh"
 
 // Mining system initialization and cleanup

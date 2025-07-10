@@ -13,6 +13,7 @@
 
 #include "gpu_platform.hpp"
 #include "sha1_miner.cuh"
+#include "../logging/logger.hpp"
 
 #ifdef USE_HIP
 #include "gpu_architecture.hpp"
@@ -70,30 +71,6 @@ enum class GPUVendor {
  * Supports both NVIDIA and AMD GPUs
  */
 class MiningSystem {
-private:
-    std::atomic<bool> stop_mining_{false};
-
-    // Event-based synchronization
-    std::vector<gpuEvent_t> kernel_complete_events_;
-    std::vector<std::chrono::high_resolution_clock::time_point> kernel_launch_times_;
-
-    // Reduce CPU usage with better scheduling
-    std::condition_variable work_cv_;
-    std::mutex work_mutex_;
-    std::atomic<int> active_streams_{0};
-
-    // Structure to track per-stream state
-    struct StreamData {
-        uint64_t nonce_offset;
-        bool busy;
-        std::chrono::high_resolution_clock::time_point launch_time;
-        uint64_t last_nonces_processed;
-    };
-
-    // Helper methods
-    void launchKernelOnStream(int stream_idx, uint64_t nonce_offset, const MiningJob &job);
-    void processStreamResults(int stream_idx, StreamData &stream_data);
-
 public:
     struct Config {
         int device_id;
@@ -245,6 +222,34 @@ public:
     void runMiningLoopInterruptible(const MiningJob &job, std::function<bool()> should_continue);
 
     MiningStats getStats() const;
+
+    void updateJobLive(const MiningJob &job, uint64_t job_version);
+
+private:
+    std::atomic<bool> stop_mining_{false};
+
+    // Event-based synchronization
+    std::vector<gpuEvent_t> kernel_complete_events_;
+    std::vector<std::chrono::high_resolution_clock::time_point> kernel_launch_times_;
+
+    // Reduce CPU usage with better scheduling
+    std::condition_variable work_cv_;
+    std::mutex work_mutex_;
+    std::atomic<int> active_streams_{0};
+
+    // Structure to track per-stream state
+    struct StreamData {
+        uint64_t nonce_offset;
+        bool busy;
+        std::chrono::high_resolution_clock::time_point launch_time;
+        uint64_t last_nonces_processed;
+    };
+
+    std::atomic<uint64_t> current_job_version_{0};
+
+    // Helper methods
+    void launchKernelOnStream(int stream_idx, uint64_t nonce_offset, const MiningJob &job);
+    void processStreamResults(int stream_idx, StreamData &stream_data);
 
 protected:
     // Configuration and device properties

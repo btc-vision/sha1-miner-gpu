@@ -647,10 +647,6 @@ namespace MiningPool {
                                std::chrono::seconds(job.expires_in_seconds);
         pool_job.is_active = true;
 
-        // Log job with bit difficulty
-        LOG_INFO("CLIENT", "New job ", job.job_id,
-                 " - difficulty: ", job.target_difficulty, " bits");
-
         {
             std::lock_guard<std::mutex> lock(jobs_mutex_);
 
