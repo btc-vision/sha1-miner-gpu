@@ -201,7 +201,7 @@ __global__ void sha1_mining_kernel_amd(
             uint32_t temp = amd_rotl32(a, 5) + ((b & c) | (d & (b ^ c))) + e + K[2] + W[t & 15];
             e = d; d = c; c = amd_rotl32(b, 30); b = a; a = temp;
         }
-        
+
         // Rounds 60-79
 #pragma unroll
         for (int t = 60; t < 80; t++) {
@@ -263,12 +263,8 @@ __global__ void sha1_mining_kernel_amd(
             }
         }
     }
-
-    // Update processed nonce count
-    if (threadIdx.x == 0) {
-        atomicAdd((unsigned long long *) actual_nonces_processed,
-                  (unsigned long long) (blockDim.x * nonces_processed));
-    }
+    
+    atomicAdd(actual_nonces_processed, nonces_processed);
 }
 
 /**

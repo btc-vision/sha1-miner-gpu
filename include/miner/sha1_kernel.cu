@@ -49,68 +49,64 @@ __global__ void sha1_mining_kernel_nvidia(
     uint32_t result_capacity,
     uint64_t nonce_base,
     uint32_t nonces_per_thread,
-    uint64_t * __restrict__ actual_nonces_processed // ADD THIS for accurate tracking
+    uint64_t * __restrict__ actual_nonces_processed
 ) {
     // Thread indices
     const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t warp_id = threadIdx.x >> 5;
+    const uint32_t lane_id = threadIdx.x & 31;
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
 
-    // Track how many nonces this thread actually processes
-    uint32_t nonces_processed = 0;
-
-    // Load the base message as bytes
+    // Load base message using vectorized access
     uint8_t base_msg[32];
     uint4* base_msg_vec = (uint4*)base_msg;
     const uint4* base_message_vec = (const uint4*)base_message;
-    base_msg_vec[0] = base_message_vec[0];  // Loads 16 bytes
-    base_msg_vec[1] = base_message_vec[1];  // Loads next 16 bytes
+    base_msg_vec[0] = base_message_vec[0];
+    base_msg_vec[1] = base_message_vec[1];
 
-    // Load target (already in correct format)
+    // Load target
     uint32_t target[5];
 #pragma unroll
     for (int i = 0; i < 5; i++) {
         target[i] = target_hash[i];
     }
 
-    // Process nonces for this thread
+    // Track processed nonces
+    uint32_t nonces_processed = 0;
+
+    // Main mining loop
     for (uint32_t i = 0; i < nonces_per_thread; i++) {
         uint64_t nonce = thread_nonce_base + i;
         if (nonce == 0) continue;
 
-        // Count this nonce as processed
         nonces_processed++;
 
-        // Create a copy of the message
+        // Create message copy with vectorized ops
         uint8_t msg_bytes[32];
-
-        // Vectorized version - 2 operations
         uint4* msg_bytes_vec = (uint4*)msg_bytes;
-        msg_bytes_vec[0] = base_msg_vec[0];  // Copies bytes 0-15
-        msg_bytes_vec[1] = base_msg_vec[1];  // Copies bytes 16-31
+        msg_bytes_vec[0] = base_msg_vec[0];
+        msg_bytes_vec[1] = base_msg_vec[1];
 
-        // Apply nonce to last 8 bytes by XORing (big-endian)
-#pragma unroll
-        for (int j = 0; j < 8; j++) {
-            msg_bytes[24 + j] ^= (nonce >> (56 - j * 8)) & 0xFF;
-        }
+        // Apply nonce efficiently using word-level XOR
+        uint32_t* msg_words = (uint32_t*)msg_bytes;
+        msg_words[6] ^= __byte_perm(nonce >> 32, 0, 0x0123);     // bswap32 for NVIDIA
+        msg_words[7] ^= __byte_perm(nonce & 0xFFFFFFFF, 0, 0x0123);
 
-        // Convert message bytes to big-endian words for SHA-1
+        // Convert to big-endian words for SHA-1
         uint32_t W[16];
+        uint32_t* msg_words_local = (uint32_t*)msg_bytes;
 #pragma unroll
         for (int j = 0; j < 8; j++) {
-            W[j] = (static_cast<uint32_t>(msg_bytes[j * 4]) << 24) |
-                   (static_cast<uint32_t>(msg_bytes[j * 4 + 1]) << 16) |
-                   (static_cast<uint32_t>(msg_bytes[j * 4 + 2]) << 8) |
-                   static_cast<uint32_t>(msg_bytes[j * 4 + 3]);
+            W[j] = __byte_perm(msg_words_local[j], 0, 0x0123);
         }
 
         // Apply SHA-1 padding
-        W[8] = 0x80000000; // Padding bit
+        W[8] = 0x80000000;
 #pragma unroll
         for (int j = 9; j < 15; j++) {
             W[j] = 0;
         }
-        W[15] = 0x00000100; // Message length: 256 bits in big-endian
+        W[15] = 0x00000100;
 
         // Initialize hash values
         uint32_t a = H0[0];
@@ -119,62 +115,51 @@ __global__ void sha1_mining_kernel_nvidia(
         uint32_t d = H0[3];
         uint32_t e = H0[4];
 
-        // SHA-1 rounds 0-19
+        // SHA-1 rounds 0-19 with combined operations
 #pragma unroll
         for (int t = 0; t < 20; t++) {
             if (t >= 16) {
-                uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15];
-                W[t & 15] = __funnelshift_l(temp, temp, 1);
+                W[t & 15] = __funnelshift_l(W[(t-3) & 15] ^ W[(t-8) & 15] ^
+                                           W[(t-14) & 15] ^ W[(t-16) & 15],
+                                           W[(t-3) & 15] ^ W[(t-8) & 15] ^
+                                           W[(t-14) & 15] ^ W[(t-16) & 15], 1);
             }
-            uint32_t f = (b & c) | (~b & d);
-            uint32_t temp = __funnelshift_l(a, a, 5) + f + e + K[0] + W[t & 15];
-            e = d;
-            d = c;
-            c = __funnelshift_l(b, b, 30);
-            b = a;
-            a = temp;
+            uint32_t temp = __funnelshift_l(a, a, 5) + ((b & c) | (~b & d)) + e + K[0] + W[t & 15];
+            e = d; d = c; c = __funnelshift_l(b, b, 30); b = a; a = temp;
         }
 
-        // Rounds 20-39
+        // Rounds 20-39 with combined operations
 #pragma unroll
         for (int t = 20; t < 40; t++) {
-            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15];
-            W[t & 15] = __funnelshift_l(temp, temp, 1);
-            uint32_t f = b ^ c ^ d;
-            uint32_t temp2 = __funnelshift_l(a, a, 5) + f + e + K[1] + W[t & 15];
-            e = d;
-            d = c;
-            c = __funnelshift_l(b, b, 30);
-            b = a;
-            a = temp2;
+            W[t & 15] = __funnelshift_l(W[(t-3) & 15] ^ W[(t-8) & 15] ^
+                                       W[(t-14) & 15] ^ W[(t-16) & 15],
+                                       W[(t-3) & 15] ^ W[(t-8) & 15] ^
+                                       W[(t-14) & 15] ^ W[(t-16) & 15], 1);
+            uint32_t temp = __funnelshift_l(a, a, 5) + (b ^ c ^ d) + e + K[1] + W[t & 15];
+            e = d; d = c; c = __funnelshift_l(b, b, 30); b = a; a = temp;
         }
 
-        // Rounds 40-59
+        // Rounds 40-59 with optimized majority function
 #pragma unroll
         for (int t = 40; t < 60; t++) {
-            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15];
-            W[t & 15] = __funnelshift_l(temp, temp, 1);
-            uint32_t f = (b & c) | (b & d) | (c & d);
-            uint32_t temp2 = __funnelshift_l(a, a, 5) + f + e + K[2] + W[t & 15];
-            e = d;
-            d = c;
-            c = __funnelshift_l(b, b, 30);
-            b = a;
-            a = temp2;
+            W[t & 15] = __funnelshift_l(W[(t-3) & 15] ^ W[(t-8) & 15] ^
+                                       W[(t-14) & 15] ^ W[(t-16) & 15],
+                                       W[(t-3) & 15] ^ W[(t-8) & 15] ^
+                                       W[(t-14) & 15] ^ W[(t-16) & 15], 1);
+            // Optimized majority: (b & c) | (d & (b ^ c))
+            uint32_t temp = __funnelshift_l(a, a, 5) + ((b & c) | (d & (b ^ c))) + e + K[2] + W[t & 15];
+            e = d; d = c; c = __funnelshift_l(b, b, 30); b = a; a = temp;
         }
 
         // Rounds 60-79
 #pragma unroll
         for (int t = 60; t < 80; t++) {
-            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15];
-            W[t & 15] = __funnelshift_l(temp, temp, 1);
-            uint32_t f = b ^ c ^ d;
-            uint32_t temp2 = __funnelshift_l(a, a, 5) + f + e + K[3] + W[t & 15];
-            e = d;
-            d = c;
-            c = __funnelshift_l(b, b, 30);
-            b = a;
-            a = temp2;
+            W[t & 15] = __funnelshift_l(W[(t-3) & 15] ^ W[(t-8) & 15] ^
+                                       W[(t-14) & 15] ^ W[(t-16) & 15],
+                                       W[(t-3) & 15] ^ W[(t-8) & 15] ^
+                                       W[(t-14) & 15] ^ W[(t-16) & 15], 1);
+            uint32_t temp = __funnelshift_l(a, a, 5) + (b ^ c ^ d) + e + K[3] + W[t & 15];
+            e = d; d = c; c = __funnelshift_l(b, b, 30); b = a; a = temp;
         }
 
         // Add initial hash values
@@ -188,38 +173,43 @@ __global__ void sha1_mining_kernel_nvidia(
         // Count matching bits
         uint32_t matching_bits = count_leading_zeros_160bit(hash, target);
 
-#ifdef DEBUG_SHA1
-        if (blockIdx.x == 0 && threadIdx.x == 0 && i == 0) {
-            printf("[DEBUG] Thread 0: nonce=%llu, matching_bits=%u, difficulty=%u\n",
-                   nonce, matching_bits, difficulty);
-        }
-#endif
-
-        // If this meets difficulty, save it
+        // Check if we found a match using warp voting
         if (matching_bits >= difficulty) {
-            uint32_t idx = atomicAdd(result_count, 1);
-            if (idx < result_capacity) {
-                results[idx].nonce = nonce;
-                results[idx].matching_bits = matching_bits;
-                results[idx].difficulty_score = matching_bits;
-#pragma unroll
-                for (int j = 0; j < 5; j++) {
-                    results[idx].hash[j] = hash[j];
+            // Use warp vote functions for efficient result writing
+            unsigned mask = __ballot_sync(0xffffffff, matching_bits >= difficulty);
+
+            if (mask != 0) {
+                // Count matches before this lane
+                unsigned lane_mask = (1U << lane_id) - 1;
+                unsigned prefix_sum = __popc(mask & lane_mask);
+
+                // First active lane reserves space for all matches
+                unsigned base_idx;
+                if (lane_id == __ffs(mask) - 1) {
+                    base_idx = atomicAdd(result_count, __popc(mask));
                 }
 
-#ifdef DEBUG_SHA1
-                if (idx == 0) {
-                    printf("[DEBUG] Found collision! nonce=%llu, bits=%u\n", nonce, matching_bits);
+                // Broadcast base index to all lanes
+                base_idx = __shfl_sync(0xffffffff, base_idx, __ffs(mask) - 1);
+
+                // Each matching lane writes its result
+                if ((mask >> lane_id) & 1) {
+                    unsigned idx = base_idx + prefix_sum;
+                    if (idx < result_capacity) {
+                        results[idx].nonce = nonce;
+                        results[idx].matching_bits = matching_bits;
+                        results[idx].difficulty_score = matching_bits;
+#pragma unroll
+                        for (int j = 0; j < 5; j++) {
+                            results[idx].hash[j] = hash[j];
+                        }
+                    }
                 }
-#endif
-            } else {
-                atomicSub(result_count, 1);
             }
         }
     }
 
-    // At end of kernel, atomically add the actual count of nonces processed
-    atomicAdd((unsigned long long *) actual_nonces_processed, (unsigned long long) nonces_processed);
+    atomicAdd(actual_nonces_processed,  nonces_processed);
 }
 
 /**
