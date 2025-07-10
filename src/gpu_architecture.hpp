@@ -229,13 +229,12 @@ public:
 
             case AMDArchitecture::RDNA1:
                 blocks_per_cu = 24;
-                config.threads_per_block = 512;  // Reduce from 256 to allow more blocks
-                config.num_streams = 16;  // Increase from 8
-                config.result_buffer_size = 1024;  // Increase from 1024
+                config.threads_per_block = 512;
+                config.num_streams = 16;
+                config.result_buffer_size = 1024;
                 config.blocks_per_stream = actual_cus * blocks_per_cu;
-                std::cout << " Using " << config.blocks_per_stream << " blocks per stream\n";
-                if (config.blocks_per_stream > 8192) {  // Increase limit from 2560
-                    config.blocks_per_stream = 8192;
+                if (config.blocks_per_stream > 2048) {
+                    config.blocks_per_stream = 2048;
                 }
                 break;
 
