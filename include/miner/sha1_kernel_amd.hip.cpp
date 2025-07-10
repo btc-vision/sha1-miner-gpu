@@ -94,7 +94,7 @@ __device__ __forceinline__ void expand_message_amd(uint32_t W[16], int t) {
  * Main SHA-1 mining kernel for AMD GPUs
  * Optimized for RDNA4 with dynamic work distribution
  */
-__global__ __launch_bounds__(128, 40) void sha1_mining_kernel_amd(
+__global__ void sha1_mining_kernel_amd(
     const uint8_t * __restrict__ base_message,
     const uint32_t * __restrict__ target_hash,
     uint32_t difficulty,
