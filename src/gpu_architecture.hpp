@@ -2,7 +2,6 @@
 #define GPU_ARCHITECTURE_HPP
 
 #include "gpu_platform.hpp"
-#include "mining_system.hpp"
 #include <string>
 #include <map>
 #include <iostream>
@@ -160,7 +159,9 @@ public:
         return AMDArchParams::getFromDevice(props, arch);
     }
 
-    static void configureForArchitecture(MiningSystem::Config& config,
+    // Template version to avoid circular dependency
+    template<typename ConfigType>
+    static void configureForArchitecture(ConfigType& config,
                                     const hipDeviceProp_t& props,
                                     AMDArchitecture arch) {
         // Get actual parameters from device
