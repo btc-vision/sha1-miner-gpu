@@ -137,8 +137,8 @@ __global__ void sha1_mining_kernel_amd(
         // Create a copy of the message
         uint8_t msg_bytes[32];
 #pragma unroll
-        for (int j = 0; j < 8; j++) {
-            ((uint32_t*)msg_bytes)[j] = ((uint32_t*)base_msg)[j];
+        for (int j = 0; j < 32; j++) {
+            msg_bytes[j] = base_msg[j];
         }
 
         // Apply nonce to last 8 bytes by XORing (big-endian) - MATCHING NVIDIA
