@@ -144,10 +144,9 @@ __global__ void sha1_mining_kernel_amd(
         msg_bytes_vec[1] = base_msg_vec[1];  // Copies bytes 16-31
 
         // Apply nonce to last 8 bytes by XORing (big-endian) - MATCHING NVIDIA
-#pragma unroll
-        for (int j = 0; j < 8; j++) {
-            msg_bytes[24 + j] ^= (nonce >> (56 - j * 8)) & 0xFF;
-        }
+        uint32_t* msg_words = (uint32_t*)msg_bytes;
+        msg_words[6] ^= __builtin_bswap32((uint32_t)(nonce >> 32));
+        msg_words[7] ^= __builtin_bswap32((uint32_t)(nonce & 0xFFFFFFFF));
 
         // Convert message bytes to big-endian words for SHA-1 - MATCHING NVIDIA
         uint32_t W[16];
