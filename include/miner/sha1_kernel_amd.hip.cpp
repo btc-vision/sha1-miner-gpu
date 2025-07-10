@@ -138,10 +138,11 @@ __global__ void sha1_mining_kernel_amd(
 
         // Create a copy of the message
         uint8_t msg_bytes[32];
-#pragma unroll
-        for (int j = 0; j < 8; j++) {
-            ((uint32_t*)msg_bytes)[j] = ((uint32_t*)base_msg)[j];
-        }
+
+        // Vectorized version - 2 operations
+        uint4* msg_bytes_vec = (uint4*)msg_bytes;
+        msg_bytes_vec[0] = base_msg_vec[0];  // Copies bytes 0-15
+        msg_bytes_vec[1] = base_msg_vec[1];  // Copies bytes 16-31
 
         // Apply nonce to last 8 bytes by XORing (big-endian) - MATCHING NVIDIA
 #pragma unroll
