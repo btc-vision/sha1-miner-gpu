@@ -229,7 +229,7 @@ public:
 
             case AMDArchitecture::RDNA1:
                 blocks_per_cu = 24;
-                config.threads_per_block = 128;  // Reduce from 256 to allow more blocks
+                config.threads_per_block = 64;  // Reduce from 256 to allow more blocks
                 config.num_streams = 12;  // Increase from 8
                 config.result_buffer_size = 2048;  // Increase from 1024
                 config.blocks_per_stream = actual_cus * blocks_per_cu;
