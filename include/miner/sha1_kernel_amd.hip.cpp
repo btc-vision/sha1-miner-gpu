@@ -384,6 +384,11 @@ extern "C" void launch_mining_kernel_amd(
                     (device_name.find("6800") != std::string::npos) ||
                     (device_name.find("6700") != std::string::npos);
 
+    bool is_rdna1 = (arch_name.find("gfx101") != std::string::npos) ||
+                    (device_name.find("5700") != std::string::npos) ||
+                    (device_name.find("5600") != std::string::npos) ||
+                    (device_name.find("5500") != std::string::npos);
+
     if (is_rdna4) {
         target_nonces_per_kernel = NONCES_PER_THREAD_RDNA4;
     } else if (is_rdna3) {
@@ -399,29 +404,6 @@ extern "C" void launch_mining_kernel_amd(
     // Calculate nonces per thread
     uint64_t total_threads = static_cast<uint64_t>(blocks) * static_cast<uint64_t>(threads);
     nonces_per_thread = target_nonces_per_kernel / total_threads;
-
-    // Ensure minimum work per thread based on architecture
-    uint32_t min_nonces;
-    if (is_rdna4) {
-        min_nonces = 64;  // RDNA4 minimum
-    } else if (is_rdna3) {
-        min_nonces = 32;  // RDNA3 minimum
-    } else if (is_rdna2) {
-        min_nonces = 16;  // RDNA2 minimum
-    } else if (is_rdna1) {
-        min_nonces = 32;  // RDNA1 needs more work per thread
-    } else {
-        min_nonces = 16;  // Older GPUs
-    }
-
-    // Ensure we have at least minimum work per thread
-    if (nonces_per_thread < min_nonces) {
-        nonces_per_thread = min_nonces;
-    }
-
-    // Calculate nonces_per_thread to match NONCES_PER_THREAD total work
-    uint64_t total_threads = static_cast<uint64_t>(blocks) * static_cast<uint64_t>(threads);
-    nonces_per_thread = NONCES_PER_THREAD / total_threads;
 
     // Ensure minimum work per thread based on architecture
     uint32_t min_nonces;
