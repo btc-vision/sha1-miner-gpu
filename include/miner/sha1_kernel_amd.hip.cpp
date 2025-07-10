@@ -415,7 +415,7 @@ extern "C" void launch_mining_kernel_amd(
     } else if (is_rdna2) {
         min_nonces = 16;  // RDNA2 minimum
     } else if (is_rdna1) {
-        min_nonces = 16;  // RDNA1 needs more work per thread
+        min_nonces = 48;  // RDNA1 needs more work per thread
     } else {
         min_nonces = 16;  // Older GPUs
     }
