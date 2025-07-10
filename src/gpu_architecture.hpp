@@ -190,8 +190,8 @@ public:
         // Architecture-specific tuning
         switch (arch) {
             case AMDArchitecture::RDNA4:
-                blocks_per_cu = 24;
-                config.threads_per_block = 256;
+                blocks_per_cu = 32;
+                config.threads_per_block = 512;
                 config.num_streams = 16;
                 config.result_buffer_size = 1024;
                 config.blocks_per_stream = actual_cus * blocks_per_cu;
