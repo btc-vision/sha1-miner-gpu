@@ -366,13 +366,13 @@ extern "C" void launch_mining_kernel_amd(
 
     // Dynamic nonces_per_thread calculation for proper hash counting
     uint32_t nonces_per_thread;
-    uint32_t target_nonces_per_kernel;
+    //uint32_t target_nonces_per_kernel;
 
     // Detect architecture from device properties
-    std::string arch_name = props.gcnArchName ? props.gcnArchName : "";
-    std::string device_name = props.name ? props.name : "";
+    //std::string arch_name = props.gcnArchName ? props.gcnArchName : "";
+    //std::string device_name = props.name ? props.name : "";
 
-    bool is_rdna4 = (arch_name.find("gfx12") != std::string::npos) ||
+    /*bool is_rdna4 = (arch_name.find("gfx12") != std::string::npos) ||
                     (props.major == 12) ||
                     (device_name.find("9070") != std::string::npos) ||
                     (device_name.find("9080") != std::string::npos);
@@ -401,11 +401,11 @@ extern "C" void launch_mining_kernel_amd(
         target_nonces_per_kernel = NONCES_PER_THREAD_RDNA1;
     } else {
         target_nonces_per_kernel = NONCES_PER_THREAD; // Default
-    }
+    }*/
 
     // Calculate nonces per thread
     uint64_t total_threads = static_cast<uint64_t>(blocks) * static_cast<uint64_t>(threads);
-    nonces_per_thread = target_nonces_per_kernel / total_threads;
+    nonces_per_thread = NONCES_PER_THREAD / total_threads;
 
     // Ensure minimum work per thread based on architecture
     /*uint32_t min_nonces;
@@ -430,8 +430,6 @@ extern "C" void launch_mining_kernel_amd(
     if (nonces_per_thread == 0) {
         nonces_per_thread = 1;
     }
-
-    std::cout << nonces_per_thread << std::endl;
 
     // Reset result count asynchronously
     hipError_t err = hipMemsetAsync(pool.count, 0, sizeof(uint32_t), config.stream);
