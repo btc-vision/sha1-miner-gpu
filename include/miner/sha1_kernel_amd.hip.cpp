@@ -409,7 +409,7 @@ extern "C" void launch_mining_kernel_amd(
     // Ensure minimum work per thread based on architecture
     uint32_t min_nonces;
     if (is_rdna4) {
-        min_nonces = 16;  // RDNA4 minimum
+        min_nonces = 48;  // RDNA4 minimum
     } else if (is_rdna3) {
         min_nonces = 32;  // RDNA3 minimum
     } else if (is_rdna2) {
