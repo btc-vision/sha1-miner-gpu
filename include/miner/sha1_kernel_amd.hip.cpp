@@ -186,33 +186,22 @@ __global__ void sha1_mining_kernel_amd(
         // Rounds 20-39
 #pragma unroll
         for (int t = 20; t < 40; t++) {
-            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
-                            W[(t - 14) & 15] ^ W[(t - 16) & 15];
-            W[t & 15] = amd_rotl32(temp, 1);
-            uint32_t f = b ^ c ^ d;
-            uint32_t temp2 = amd_rotl32(a, 5) + f + e + K[1] + W[t & 15];
-            e = d;
-            d = c;
-            c = amd_rotl32(b, 30);
-            b = a;
-            a = temp2;
+            W[t & 15] = amd_rotl32(W[(t-3) & 15] ^ W[(t-8) & 15] ^
+                                   W[(t-14) & 15] ^ W[(t-16) & 15], 1);
+            uint32_t temp = amd_rotl32(a, 5) + (b ^ c ^ d) + e + K[1] + W[t & 15];
+            e = d; d = c; c = amd_rotl32(b, 30); b = a; a = temp;
         }
 
         // Rounds 40-59
 #pragma unroll
         for (int t = 40; t < 60; t++) {
-            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
-                            W[(t - 14) & 15] ^ W[(t - 16) & 15];
-            W[t & 15] = amd_rotl32(temp, 1);
-            uint32_t f = (b & c) | (b & d) | (c & d);
-            uint32_t temp2 = amd_rotl32(a, 5) + f + e + K[2] + W[t & 15];
-            e = d;
-            d = c;
-            c = amd_rotl32(b, 30);
-            b = a;
-            a = temp2;
+            W[t & 15] = amd_rotl32(W[(t-3) & 15] ^ W[(t-8) & 15] ^
+                                   W[(t-14) & 15] ^ W[(t-16) & 15], 1);
+            // Optimized majority: (b & c) | (d & (b ^ c))
+            uint32_t temp = amd_rotl32(a, 5) + ((b & c) | (d & (b ^ c))) + e + K[2] + W[t & 15];
+            e = d; d = c; c = amd_rotl32(b, 30); b = a; a = temp;
         }
-
+        
         // Rounds 60-79
 #pragma unroll
         for (int t = 60; t < 80; t++) {
