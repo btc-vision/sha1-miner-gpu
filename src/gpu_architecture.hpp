@@ -233,8 +233,9 @@ public:
                 config.num_streams = 16;  // Increase from 8
                 config.result_buffer_size = 1024;  // Increase from 1024
                 config.blocks_per_stream = actual_cus * blocks_per_cu;
-                if (config.blocks_per_stream > 4096) {  // Increase limit from 2560
-                    config.blocks_per_stream = 4096;
+                std::cout << " Using " << config.blocks_per_stream << " blocks per stream\n";
+                if (config.blocks_per_stream > 8192) {  // Increase limit from 2560
+                    config.blocks_per_stream = 8192;
                 }
                 break;
 
