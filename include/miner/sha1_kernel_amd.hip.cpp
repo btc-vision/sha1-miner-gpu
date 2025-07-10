@@ -422,12 +422,14 @@ extern "C" void launch_mining_kernel_amd(
     // Ensure we have at least minimum work per thread
     if (nonces_per_thread < min_nonces) {
         nonces_per_thread = min_nonces;
-    }
+    }*/
 
     // For very high thread counts, ensure we don't overflow
     if (nonces_per_thread == 0) {
         nonces_per_thread = 1;
-    }*/
+    }
+
+    std::cout << nonces_per_thread << std::endl;
 
     // Reset result count asynchronously
     hipError_t err = hipMemsetAsync(pool.count, 0, sizeof(uint32_t), config.stream);
