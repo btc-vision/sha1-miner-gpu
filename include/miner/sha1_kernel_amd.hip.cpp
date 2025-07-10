@@ -151,12 +151,11 @@ __global__ void sha1_mining_kernel_amd(
 
         // Convert message bytes to big-endian words for SHA-1 - MATCHING NVIDIA
         uint32_t W[16];
+
+        uint32_t* msg_words = (uint32_t*)msg_bytes;
 #pragma unroll
         for (int j = 0; j < 8; j++) {
-            W[j] = (static_cast<uint32_t>(msg_bytes[j * 4]) << 24) |
-                   (static_cast<uint32_t>(msg_bytes[j * 4 + 1]) << 16) |
-                   (static_cast<uint32_t>(msg_bytes[j * 4 + 2]) << 8) |
-                   static_cast<uint32_t>(msg_bytes[j * 4 + 3]);
+            W[j] = __builtin_bswap32(msg_words[j]);
         }
 
         // Apply SHA-1 padding
