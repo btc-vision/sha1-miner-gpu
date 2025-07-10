@@ -1018,26 +1018,6 @@ uint64_t MiningSystem::getTotalThreads() const {
 }
 
 uint64_t MiningSystem::getHashesPerKernel() const {
-#ifdef USE_HIP
-    // For AMD, return architecture-specific values
-    if (detected_arch_ == AMDArchitecture::RDNA4) {
-        return static_cast<uint64_t>(config_.blocks_per_stream) *
-               static_cast<uint64_t>(config_.threads_per_block) *
-               static_cast<uint64_t>(NONCES_PER_THREAD_RDNA4);
-    } else if (detected_arch_ == AMDArchitecture::RDNA3) {
-        return static_cast<uint64_t>(config_.blocks_per_stream) *
-               static_cast<uint64_t>(config_.threads_per_block) *
-               static_cast<uint64_t>(NONCES_PER_THREAD_RDNA3);
-    } else if (detected_arch_ == AMDArchitecture::RDNA2) {
-        return static_cast<uint64_t>(config_.blocks_per_stream) *
-               static_cast<uint64_t>(config_.threads_per_block) *
-               static_cast<uint64_t>(NONCES_PER_THREAD_RDNA2);
-    } else if (detected_arch_ == AMDArchitecture::RDNA1) {
-        return static_cast<uint64_t>(config_.blocks_per_stream) *
-               static_cast<uint64_t>(config_.threads_per_block) *
-               static_cast<uint64_t>(NONCES_PER_THREAD_RDNA1);
-    }
-#endif
     // Default calculation
     return static_cast<uint64_t>(config_.blocks_per_stream) *
            static_cast<uint64_t>(config_.threads_per_block) *
