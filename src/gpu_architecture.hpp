@@ -61,15 +61,7 @@ struct AMDArchParams {
                 params.max_waves_per_eu = 8; // 16 waves total per CU (8 per SIMD)
                 break;
             case AMDArchitecture::RDNA1:
-                blocks_per_cu = 20;  // Increase from 8 to 20 for RDNA1
-                config.threads_per_block = 256;
-                config.num_streams = 6;
-                config.result_buffer_size = 256;
-                config.blocks_per_stream = actual_cus * blocks_per_cu;
-                // RDNA1 can handle up to 1280 blocks efficiently
-                if (config.blocks_per_stream > 1280) {
-                    config.blocks_per_stream = 1280;
-                }
+                params.max_waves_per_eu = 10; // 20 waves total per CU
                 break;
             case AMDArchitecture::CDNA3:
             case AMDArchitecture::CDNA2:
@@ -232,6 +224,17 @@ public:
                 config.blocks_per_stream = actual_cus * blocks_per_cu;
                 if (config.blocks_per_stream > 2048) {
                     config.blocks_per_stream = 2048;
+                }
+                break;
+
+            case AMDArchitecture::RDNA1:
+                blocks_per_cu = 20;
+                config.threads_per_block = 256;
+                config.num_streams = 6;
+                config.result_buffer_size = 256;
+                config.blocks_per_stream = actual_cus * blocks_per_cu;
+                if (config.blocks_per_stream > 1280) {
+                    config.blocks_per_stream = 1280;
                 }
                 break;
 

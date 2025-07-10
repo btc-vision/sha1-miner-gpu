@@ -385,9 +385,10 @@ extern "C" void launch_mining_kernel_amd(
                     (device_name.find("6700") != std::string::npos);
 
     bool is_rdna1 = (arch_name.find("gfx101") != std::string::npos) ||
-                    (device_name.find("5700") != std::string::npos) ||
-                    (device_name.find("5600") != std::string::npos) ||
-                    (device_name.find("5500") != std::string::npos);
+                (arch_name.find("gfx1010") != std::string::npos) ||
+                (device_name.find("5700") != std::string::npos) ||
+                (device_name.find("5600") != std::string::npos) ||
+                (device_name.find("5500") != std::string::npos);
 
     if (is_rdna4) {
         target_nonces_per_kernel = NONCES_PER_THREAD_RDNA4;
