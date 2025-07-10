@@ -1018,19 +1018,30 @@ uint64_t MiningSystem::getTotalThreads() const {
 }
 
 uint64_t MiningSystem::getHashesPerKernel() const {
-    // Base calculation
-    uint64_t base_hashes = static_cast<uint64_t>(config_.blocks_per_stream) *
-                          static_cast<uint64_t>(config_.threads_per_block) *
-                          static_cast<uint64_t>(NONCES_PER_THREAD);
-
 #ifdef USE_HIP
-    // For AMD, the kernel might do different work per thread
-    // But we should still return NONCES_PER_THREAD total
-    // The kernel will distribute this work across threads
-    return base_hashes;
-#else
-    return base_hashes;
+    // For AMD, return architecture-specific values
+    if (detected_arch_ == AMDArchitecture::RDNA4) {
+        return static_cast<uint64_t>(config_.blocks_per_stream) *
+               static_cast<uint64_t>(config_.threads_per_block) *
+               static_cast<uint64_t>(NONCES_PER_THREAD_RDNA4);
+    } else if (detected_arch_ == AMDArchitecture::RDNA3) {
+        return static_cast<uint64_t>(config_.blocks_per_stream) *
+               static_cast<uint64_t>(config_.threads_per_block) *
+               static_cast<uint64_t>(NONCES_PER_THREAD_RDNA3);
+    } else if (detected_arch_ == AMDArchitecture::RDNA2) {
+        return static_cast<uint64_t>(config_.blocks_per_stream) *
+               static_cast<uint64_t>(config_.threads_per_block) *
+               static_cast<uint64_t>(NONCES_PER_THREAD_RDNA2);
+    } else if (detected_arch_ == AMDArchitecture::RDNA1) {
+        return static_cast<uint64_t>(config_.blocks_per_stream) *
+               static_cast<uint64_t>(config_.threads_per_block) *
+               static_cast<uint64_t>(NONCES_PER_THREAD_RDNA1);
+    }
 #endif
+    // Default calculation
+    return static_cast<uint64_t>(config_.blocks_per_stream) *
+           static_cast<uint64_t>(config_.threads_per_block) *
+           static_cast<uint64_t>(NONCES_PER_THREAD);
 }
 
 void MiningSystem::optimizeForGPU() {

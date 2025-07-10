@@ -25,12 +25,19 @@
 #define MAX_CANDIDATES_PER_BATCH 1024
 
 #ifdef USE_HIP
-    #define NONCES_PER_THREAD 32768 // Reasonable for AMD
+    // AMD GPUs need different values based on architecture
+    // This will be overridden at runtime
+    #define NONCES_PER_THREAD 8192  // Default for older AMD
+    #define NONCES_PER_THREAD_RDNA1 8192
+    #define NONCES_PER_THREAD_RDNA2 16384
+    #define NONCES_PER_THREAD_RDNA3 24576
+    #define NONCES_PER_THREAD_RDNA4 32768
     #define DEFAULT_THREADS_PER_BLOCK 256
 #else
-#define NONCES_PER_THREAD 8192
-#define DEFAULT_THREADS_PER_BLOCK 512
+    #define NONCES_PER_THREAD 8192
+    #define DEFAULT_THREADS_PER_BLOCK 512
 #endif
+
 
 // Debug mode flag
 #define SHA1_MINER_DEBUG 0

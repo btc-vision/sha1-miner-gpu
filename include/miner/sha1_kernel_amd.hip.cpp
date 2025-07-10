@@ -364,6 +364,7 @@ extern "C" void launch_mining_kernel_amd(
 
     // Dynamic nonces_per_thread calculation for proper hash counting
     uint32_t nonces_per_thread;
+    uint32_t target_nonces_per_kernel;
 
     // Detect architecture from device properties
     std::string arch_name = props.gcnArchName ? props.gcnArchName : "";
@@ -383,6 +384,41 @@ extern "C" void launch_mining_kernel_amd(
                     (device_name.find("6800") != std::string::npos) ||
                     (device_name.find("6700") != std::string::npos);
 
+    if (is_rdna4) {
+        target_nonces_per_kernel = NONCES_PER_THREAD_RDNA4;
+    } else if (is_rdna3) {
+        target_nonces_per_kernel = NONCES_PER_THREAD_RDNA3;
+    } else if (is_rdna2) {
+        target_nonces_per_kernel = NONCES_PER_THREAD_RDNA2;
+    } else if (is_rdna1) {
+        target_nonces_per_kernel = NONCES_PER_THREAD_RDNA1;
+    } else {
+        target_nonces_per_kernel = NONCES_PER_THREAD; // Default
+    }
+
+    // Calculate nonces per thread
+    uint64_t total_threads = static_cast<uint64_t>(blocks) * static_cast<uint64_t>(threads);
+    nonces_per_thread = target_nonces_per_kernel / total_threads;
+
+    // Ensure minimum work per thread based on architecture
+    uint32_t min_nonces;
+    if (is_rdna4) {
+        min_nonces = 64;  // RDNA4 minimum
+    } else if (is_rdna3) {
+        min_nonces = 32;  // RDNA3 minimum
+    } else if (is_rdna2) {
+        min_nonces = 16;  // RDNA2 minimum
+    } else if (is_rdna1) {
+        min_nonces = 32;  // RDNA1 needs more work per thread
+    } else {
+        min_nonces = 16;  // Older GPUs
+    }
+
+    // Ensure we have at least minimum work per thread
+    if (nonces_per_thread < min_nonces) {
+        nonces_per_thread = min_nonces;
+    }
+
     // Calculate nonces_per_thread to match NONCES_PER_THREAD total work
     uint64_t total_threads = static_cast<uint64_t>(blocks) * static_cast<uint64_t>(threads);
     nonces_per_thread = NONCES_PER_THREAD / total_threads;
@@ -395,15 +431,15 @@ extern "C" void launch_mining_kernel_amd(
         min_nonces = 32;  // RDNA3 minimum
     } else if (is_rdna2) {
         min_nonces = 16;  // RDNA2 minimum
+    } else if (is_rdna1) {
+        min_nonces = 32;  // RDNA1 needs more work per thread
     } else {
-        min_nonces = 8;   // Older GPUs
+        min_nonces = 16;  // Older GPUs
     }
 
     // Ensure we have at least minimum work per thread
     if (nonces_per_thread < min_nonces) {
         nonces_per_thread = min_nonces;
-        // If this happens, we're doing more work than NONCES_PER_THREAD
-        // The actual_nonces_processed counter will track real work
     }
 
     // For very high thread counts, ensure we don't overflow
