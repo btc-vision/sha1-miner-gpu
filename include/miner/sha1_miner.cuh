@@ -27,7 +27,7 @@
 #ifdef USE_HIP
     // AMD GPUs need different values based on architecture
     // This will be overridden at runtime
-    #define NONCES_PER_THREAD 8192
+    #define NONCES_PER_THREAD 100663296
     #define NONCES_PER_THREAD_RDNA1 24576
     #define NONCES_PER_THREAD_RDNA2 24576
     #define NONCES_PER_THREAD_RDNA3 32768
