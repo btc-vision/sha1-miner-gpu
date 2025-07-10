@@ -114,12 +114,10 @@ __global__ void sha1_mining_kernel_amd(
 
     uint8_t base_msg[32];
 #pragma unroll
-    //for (int i = 0; i < 32; i++) {
-    //    base_msg[i] = base_message[i];
-    //}
-    for (int j = 0; j < 8; j++) {
-        ((uint32_t*)base_msg)[j] = ((uint32_t*)base_message)[j];
-    }
+    uint4* base_msg_vec = (uint4*)base_msg;
+    const uint4* base_message_vec = (const uint4*)base_message;
+    base_msg_vec[0] = base_message_vec[0];  // Loads 16 bytes
+    base_msg_vec[1] = base_message_vec[1];  // Loads next 16 bytes
 
     // Load target (already in correct format)
     uint32_t target[5];
