@@ -112,11 +112,13 @@ __global__ void sha1_mining_kernel_amd(
     const uint32_t lane_id = threadIdx.x & 63; // Assume 64-thread wavefront
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
 
-    // Load the base message as bytes (matching NVIDIA)
     uint8_t base_msg[32];
 #pragma unroll
-    for (int i = 0; i < 32; i++) {
-        base_msg[i] = base_message[i];
+    //for (int i = 0; i < 32; i++) {
+    //    base_msg[i] = base_message[i];
+    //}
+    for (int j = 0; j < 8; j++) {
+        ((uint32_t*)base_msg)[j] = ((uint32_t*)base_message)[j];
     }
 
     // Load target (already in correct format)
