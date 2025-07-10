@@ -1,3 +1,5 @@
+#include <iostream>
+
 #include "sha1_miner.cuh"
 #include "gpu_platform.hpp"
 
@@ -428,7 +430,9 @@ extern "C" void launch_mining_kernel_amd(
     if (nonces_per_thread == 0) {
         nonces_per_thread = 1;
     }
-    
+
+    std::cout << nonces_per_thread << std::endl;
+
     // Reset result count asynchronously
     hipError_t err = hipMemsetAsync(pool.count, 0, sizeof(uint32_t), config.stream);
     if (err != hipSuccess) {
