@@ -15,7 +15,7 @@
 #include "sha1_miner.cuh"
 
 #ifdef USE_HIP
-enum class AMDArchitecture;
+#include "gpu_architecture.hpp"
 #endif
 
 // Forward declare the global shutdown flag
@@ -147,7 +147,7 @@ public:
         kernel_config.stream = streams_[0]; // Use first stream
         kernel_config.shared_memory_size = 0;
         // Reset nonce counter
-        gpuMemsetAsync(gpu_pools_[0].nonces_processed, 0, sizeof(uint64_t), streams_[0]);
+        (void)gpuMemsetAsync(gpu_pools_[0].nonces_processed, 0, sizeof(uint64_t), streams_[0]);
         // Launch kernel
         launch_mining_kernel(
             device_jobs_[0],
@@ -157,10 +157,10 @@ public:
             kernel_config
         );
         // Wait for completion
-        gpuStreamSynchronize(streams_[0]);
+        (void)gpuStreamSynchronize(streams_[0]);
         // Get actual nonces processed
         uint64_t actual_nonces = 0;
-        gpuMemcpy(&actual_nonces, gpu_pools_[0].nonces_processed, sizeof(uint64_t), gpuMemcpyDeviceToHost);
+        (void)gpuMemcpy(&actual_nonces, gpu_pools_[0].nonces_processed, sizeof(uint64_t), gpuMemcpyDeviceToHost);
         // Process results
         processResultsOptimized(0);
         // Update total hashes
@@ -176,10 +176,10 @@ public:
         std::vector<MiningResult> results;
         // Get result count from first pool
         uint32_t count;
-        gpuMemcpy(&count, gpu_pools_[0].count, sizeof(uint32_t), gpuMemcpyDeviceToHost);
+        (void)gpuMemcpy(&count, gpu_pools_[0].count, sizeof(uint32_t), gpuMemcpyDeviceToHost);
         if (count > 0 && count <= gpu_pools_[0].capacity) {
             results.resize(count);
-            gpuMemcpy(results.data(), gpu_pools_[0].results, sizeof(MiningResult) * count, gpuMemcpyDeviceToHost);
+            (void)gpuMemcpy(results.data(), gpu_pools_[0].results, sizeof(MiningResult) * count, gpuMemcpyDeviceToHost);
         }
         return results;
     }
@@ -311,9 +311,5 @@ protected:
 
 // Declare the global mining system pointer
 extern std::unique_ptr<MiningSystem> g_mining_system;
-
-#ifdef USE_HIP
-#include "gpu_architecture.hpp"
-#endif
 
 #endif // MINING_SYSTEM_HPP
