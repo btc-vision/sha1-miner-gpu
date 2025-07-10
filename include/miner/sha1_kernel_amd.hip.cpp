@@ -413,7 +413,7 @@ extern "C" void launch_mining_kernel_amd(
     } else if (is_rdna3) {
         min_nonces = 64;  // RDNA3 minimum
     } else if (is_rdna2) {
-        min_nonces = 64;  // RDNA2 minimum
+        min_nonces = 56;  // RDNA2 minimum
     } else if (is_rdna1) {
         min_nonces = 56;  // RDNA1 needs more work per thread
     } else {
