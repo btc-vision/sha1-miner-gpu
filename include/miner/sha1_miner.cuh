@@ -28,10 +28,10 @@
     // AMD GPUs need different values based on architecture
     // This will be overridden at runtime
     #define NONCES_PER_THREAD 4096
-    #define NONCES_PER_THREAD_RDNA1 2048
+    #define NONCES_PER_THREAD_RDNA1 4096
     #define NONCES_PER_THREAD_RDNA2 4096
-    #define NONCES_PER_THREAD_RDNA3 4096
-    #define NONCES_PER_THREAD_RDNA4 32768
+    #define NONCES_PER_THREAD_RDNA3 8192
+    #define NONCES_PER_THREAD_RDNA4 8192
     #define DEFAULT_THREADS_PER_BLOCK 512
 #else
     #define NONCES_PER_THREAD 8192
