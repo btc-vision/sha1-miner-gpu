@@ -194,7 +194,7 @@ public:
                 blocks_per_cu = 32;  // Maximum blocks per CU
                 config.threads_per_block = 256;
                 config.num_streams = 16;  // More streams for better overlap
-                config.result_buffer_size = 512;  // Larger buffer for more results
+                config.result_buffer_size = 1024;  // Larger buffer for more results
 
                 // For 64 CUs: 64 * 32 = 2048 blocks
                 config.blocks_per_stream = actual_cus * blocks_per_cu;
