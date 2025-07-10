@@ -196,7 +196,6 @@ public:
                 config.result_buffer_size = 1024;
                 config.blocks_per_stream = actual_cus * blocks_per_cu;
 
-                // Don't cap at 2048 for RDNA4 - it can handle more
                 if (config.blocks_per_stream > 4096) {
                     config.blocks_per_stream = 4096;
                 }
