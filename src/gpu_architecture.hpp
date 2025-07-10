@@ -228,7 +228,7 @@ public:
                 break;
 
             case AMDArchitecture::RDNA1:
-                blocks_per_cu = 25;
+                blocks_per_cu = 24;
                 config.threads_per_block = 512;
                 config.num_streams = 16;
                 config.result_buffer_size = 1024;
