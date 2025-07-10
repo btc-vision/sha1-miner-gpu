@@ -190,13 +190,10 @@ public:
         // Architecture-specific tuning
         switch (arch) {
             case AMDArchitecture::RDNA4:
-                // RDNA4 can handle MUCH more work
-                blocks_per_cu = 32;  // Maximum blocks per CU
-                config.threads_per_block = 256;
-                config.num_streams = 16;  // More streams for better overlap
-                config.result_buffer_size = 1024;  // Larger buffer for more results
-
-                // For 64 CUs: 64 * 32 = 2048 blocks
+                blocks_per_cu = 24;
+                config.threads_per_block = 512;
+                config.num_streams = 16;
+                config.result_buffer_size = 1024;
                 config.blocks_per_stream = actual_cus * blocks_per_cu;
 
                 // Don't cap at 2048 for RDNA4 - it can handle more
@@ -207,9 +204,9 @@ public:
 
             case AMDArchitecture::RDNA3:
                 blocks_per_cu = 24;
-                config.threads_per_block = 256;
-                config.num_streams = 8;
-                config.result_buffer_size = 256;
+                config.threads_per_block = 512;
+                config.num_streams = 16;
+                config.result_buffer_size = 1024;
                 config.blocks_per_stream = actual_cus * blocks_per_cu;
                 if (config.blocks_per_stream > 3072) {
                     config.blocks_per_stream = 3072;
@@ -217,10 +214,10 @@ public:
                 break;
 
             case AMDArchitecture::RDNA2:
-                blocks_per_cu = 16;
-                config.threads_per_block = 256;
-                config.num_streams = 6;
-                config.result_buffer_size = 128;
+                blocks_per_cu = 24;
+                config.threads_per_block = 512;
+                config.num_streams = 16;
+                config.result_buffer_size = 1024;
                 config.blocks_per_stream = actual_cus * blocks_per_cu;
                 if (config.blocks_per_stream > 2048) {
                     config.blocks_per_stream = 2048;
