@@ -61,14 +61,7 @@ struct AMDArchParams {
                 params.max_waves_per_eu = 8; // 16 waves total per CU (8 per SIMD)
                 break;
             case AMDArchitecture::RDNA1:
-                blocks_per_cu = 8;  // Less aggressive for RDNA1
-                config.threads_per_block = 256;
-                config.num_streams = 4;
-                config.result_buffer_size = 128;
-                config.blocks_per_stream = actual_cus * blocks_per_cu;
-                if (config.blocks_per_stream > 512) {  // Lower cap for RDNA1
-                    config.blocks_per_stream = 512;
-                }
+                params.max_waves_per_eu = 10; // 20 waves total per CU
                 break;
             case AMDArchitecture::CDNA3:
             case AMDArchitecture::CDNA2:
