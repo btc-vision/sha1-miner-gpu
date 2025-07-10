@@ -176,17 +176,11 @@ __global__ void sha1_mining_kernel_amd(
 #pragma unroll
         for (int t = 0; t < 20; t++) {
             if (t >= 16) {
-                uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
-                                W[(t - 14) & 15] ^ W[(t - 16) & 15];
-                W[t & 15] = amd_rotl32(temp, 1);
+                W[t & 15] = amd_rotl32(W[(t-3) & 15] ^ W[(t-8) & 15] ^
+                                       W[(t-14) & 15] ^ W[(t-16) & 15], 1);
             }
-            uint32_t f = (b & c) | (~b & d);
-            uint32_t temp = amd_rotl32(a, 5) + f + e + K[0] + W[t & 15];
-            e = d;
-            d = c;
-            c = amd_rotl32(b, 30);
-            b = a;
-            a = temp;
+            uint32_t temp = amd_rotl32(a, 5) + ((b & c) | (~b & d)) + e + K[0] + W[t & 15];
+            e = d; d = c; c = amd_rotl32(b, 30); b = a; a = temp;
         }
 
         // Rounds 20-39
