@@ -1164,16 +1164,9 @@ uint64_t MiningSystem::getTotalThreads() const {
 }
 
 uint64_t MiningSystem::getHashesPerKernel() const {
-
-#ifdef USE_HIP
-    // Default calculation
-    return static_cast<uint64_t>(NONCES_PER_THREAD);
-#else
-    // Default calculation
     return static_cast<uint64_t>(config_.blocks_per_stream) *
-           static_cast<uint64_t>(config_.threads_per_block) *
-           static_cast<uint64_t>(NONCES_PER_THREAD);
-#endif
+               static_cast<uint64_t>(config_.threads_per_block) *
+               static_cast<uint64_t>(NONCES_PER_THREAD);
 }
 
 void MiningSystem::optimizeForGPU() {

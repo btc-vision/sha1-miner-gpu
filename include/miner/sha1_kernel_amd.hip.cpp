@@ -313,13 +313,13 @@ extern "C" void launch_mining_kernel_amd(
     }
 
     // Calculate nonces per thread
-    uint64_t total_threads = static_cast<uint64_t>(blocks) * static_cast<uint64_t>(threads);
-    uint32_t nonces_per_thread = NONCES_PER_THREAD / total_threads;
+    //uint64_t total_threads = static_cast<uint64_t>(blocks) * static_cast<uint64_t>(threads);
+    uint32_t nonces_per_thread = NONCES_PER_THREAD; // total_threads;
 
     // Ensure we have at least 1 nonce per thread
-    if (nonces_per_thread == 0) {
-        nonces_per_thread = 1;
-    }
+    //if (nonces_per_thread == 0) {
+    //    nonces_per_thread = 1;
+    //}
 
     // Reset result count asynchronously
     hipError_t err = hipMemsetAsync(pool.count, 0, sizeof(uint32_t), config.stream);
