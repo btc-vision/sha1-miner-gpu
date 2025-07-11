@@ -108,8 +108,6 @@ __global__ void sha1_mining_kernel_amd(
     uint64_t * __restrict__ actual_nonces_processed,
     uint64_t job_version
 ) {
-    printf("run!");
-
     // Thread indices
     const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     const uint32_t lane_id = threadIdx.x & 63; // 64-thread wavefront
