@@ -296,7 +296,7 @@ namespace MiningPool {
                 }
 
                 LOG_DEBUG("MINING", "Mining stopped for job version ", mining_job_version,
-                         " at nonce offset ", final_nonce);
+                          " at nonce offset ", final_nonce);
             } catch (const std::exception &e) {
                 LOG_ERROR("MINING", "Mining loop exception: ", e.what());
             }
@@ -440,9 +440,9 @@ namespace MiningPool {
             return;
         }
 
-        LOG_WARN("SHARE", "Scanning ", results_to_process.size(), " results for job ",
-                 current_job_id, " version ", expected_job_version,
-                 " with difficulty ", job_difficulty_bits, " bits");
+        LOG_DEBUG("SHARE", "Scanning ", results_to_process.size(), " results for job ",
+                  current_job_id, " version ", expected_job_version,
+                  " with difficulty ", job_difficulty_bits, " bits");
 
         // Submit shares that meet difficulty AND are from current job
         int valid_shares = 0;
@@ -467,8 +467,9 @@ namespace MiningPool {
         if (stale_shares > 0) {
             LOG_WARN("SHARE", "Discarded ", stale_shares, " stale results from old job versions");
         }
+
         if (valid_shares > 0) {
-            LOG_WARN("SHARE", "Submitted ", valid_shares, " valid shares for job ", current_job_id);
+            LOG_DEBUG("SHARE", "Submitted ", valid_shares, " valid shares for job ", current_job_id);
         }
     }
 

@@ -235,7 +235,7 @@ namespace MiningPool {
 
         // Reconnection settings
         uint32_t reconnect_delay_ms = 5000;
-        uint32_t max_reconnect_delay_ms = 60000;
+        uint32_t max_reconnect_delay_ms = 10000;
         int reconnect_attempts = -1;
 
         // Performance settings

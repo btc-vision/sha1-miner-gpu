@@ -445,7 +445,7 @@ namespace MiningPool {
 
             // Wait for connection result
             if (!connection_future.get()) {
-                running_ = false;
+                //running_ = false;
                 connected_ = false;
                 return false;
             }
@@ -472,7 +472,7 @@ namespace MiningPool {
             return true;
         } catch (const std::exception &e) {
             LOG_ERROR("CLIENT", "Connection error: ", e.what());
-            running_ = false;
+            //running_ = false;
             connected_ = false;
             return false;
         }
@@ -1448,20 +1448,21 @@ namespace MiningPool {
                 } else {
                     LOG_ERROR("CLIENT", "Reconnection failed");
                     reconnecting_ = false;
-
-                    // Schedule another attempt if we should
+                    // The logic here needs adjustment - don't check running_ after connect() fails
                     bool should_retry = config_.reconnect_attempts < 0 ||
                                         reconnect_attempt_count_ < static_cast<unsigned>(config_.reconnect_attempts);
                     LOG_DEBUG("CLIENT", "Should retry? ", should_retry ? "YES" : "NO",
                               " (attempts=", reconnect_attempt_count_.load(),
                               ", max=", config_.reconnect_attempts, ")");
-                    if (should_retry && running_.load()) {
+
+                    if (should_retry) {
+                        // Remove "&& running_.load()" check here
                         LOG_INFO("CLIENT", "Scheduling another reconnect attempt...");
                         // Don't immediately retry - wait a bit
                         std::this_thread::sleep_for(std::chrono::seconds(2));
                         reconnect();
                     } else {
-                        // Give up
+                        // Only NOW set running_ = false when we've exhausted all attempts
                         LOG_ERROR("CLIENT", "Giving up on reconnection");
                         running_ = false;
                         event_handler_->on_error(ErrorCode::CONNECTION_LOST,
