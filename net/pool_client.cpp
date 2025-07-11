@@ -60,6 +60,7 @@ namespace MiningPool {
 
             // IMPORTANT: Start the IO thread FIRST before any other operations
             io_thread_ = std::make_unique<std::thread>(&PoolClient::io_loop, this);
+
             // Give IO thread time to start
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -142,6 +143,7 @@ namespace MiningPool {
 
                     connected_ = true;
                     worker_stats_.connected_since = std::chrono::steady_clock::now();
+
                     // Start reading immediately in the IO thread
                     LOG_DEBUG("CLIENT", "Starting async read loop");
                     do_read();
@@ -159,6 +161,9 @@ namespace MiningPool {
                 return false;
             }
 
+            // Connection successful, notify handler
+            event_handler_->on_connected();
+
             HelloMessage hello;
             hello.protocol_version = PROTOCOL_VERSION;
             hello.client_version = "SHA1-Miner/1.0";
@@ -173,9 +178,6 @@ namespace MiningPool {
 
             LOG_INFO("CLIENT", "Sending HELLO message");
             send_message(msg);
-
-            // Connection successful, notify handler
-            event_handler_->on_connected();
 
             return true;
         } catch (const std::exception &e) {
@@ -262,9 +264,13 @@ namespace MiningPool {
                 msg.type == MessageType::SUBMIT_SHARE ||
                 msg.type == MessageType::GET_JOB) {
                 std::lock_guard<std::mutex> lock(pending_mutex_);
-                pending_requests_[msg.id] = std::chrono::steady_clock::now();
-                LOG_DEBUG("CLIENT", "Added message ID ", msg.id, " to pending requests");
-            }
+                PendingRequest req;
+                req.timestamp = std::chrono::steady_clock::now();
+                req.type = msg.type;
+                pending_requests_[msg.id] = req;
+                LOG_DEBUG("CLIENT", "Added message ID ", msg.id, " (type ", static_cast<int>(msg.type),
+                          ") to pending requests");
+                }
 
             // Queue message for sending
             {
@@ -504,6 +510,12 @@ namespace MiningPool {
                 case MessageType::ERROR_PROBLEM: // This is 0x17 = 23
                     handle_error(msg);
                     break;
+                case MessageType::KEEP_ALIVE_RESPONSE:
+                    LOG_DEBUG("CLIENT", "Received KEEP_ALIVE_RESPONSE, ignoring");
+                    break;
+                case MessageType::REPORT_RECEIVED:
+                    LOG_DEBUG("CLIENT", "Received REPORT_RECEIVED, ignoring");
+                    break;
                 case MessageType::RECONNECT:
                     // Server requested reconnect
                     reconnect();
@@ -615,6 +627,9 @@ namespace MiningPool {
             }
 
             event_handler_->on_authenticated(worker_id_);
+
+            // Request initial job
+            request_job();
         } else {
             authenticated_ = false;
             event_handler_->on_auth_failed(response.error_code, response.error_message);
@@ -622,9 +637,6 @@ namespace MiningPool {
     }
 
     void PoolClient::request_job() {
-        // Add small delay to avoid triggering rate limits
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
         Message msg;
         msg.type = MessageType::GET_JOB;
         msg.id = Utils::generate_message_id();
@@ -917,11 +929,28 @@ namespace MiningPool {
 
         for (auto it = pending_requests_.begin(); it != pending_requests_.end();) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - it->second
+                now - it->second.timestamp
             ).count();
 
             if (elapsed > config_.response_timeout_ms) {
-                LOG_ERROR("CLIENT", "Request timeout: message_id=", it->first);
+                std::string msg_type_str;
+                switch (it->second.type) {
+                    case MessageType::AUTH:
+                        msg_type_str = "AUTH";
+                        break;
+                    case MessageType::SUBMIT_SHARE:
+                        msg_type_str = "SUBMIT_SHARE";
+                        break;
+                    case MessageType::GET_JOB:
+                        msg_type_str = "GET_JOB";
+                        break;
+                    default:
+                        msg_type_str = "UNKNOWN";
+                }
+
+                LOG_ERROR("CLIENT", "Request timeout: message_id=", it->first,
+                          ", type=", msg_type_str,
+                          ", elapsed=", elapsed, "ms");
                 it = pending_requests_.erase(it);
             } else {
                 ++it;
@@ -990,9 +1019,6 @@ namespace MiningPool {
             connected_ = true;
             worker_stats_.connected_since = std::chrono::steady_clock::now();
             event_handler_->on_connected();
-
-            // Send hello message
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
             HelloMessage hello;
             hello.protocol_version = PROTOCOL_VERSION;

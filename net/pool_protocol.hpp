@@ -30,7 +30,9 @@ namespace MiningPool {
         DIFFICULTY_ADJUST = 0x15,
         POOL_STATUS = 0x16,
         ERROR_PROBLEM = 0x17,
-        RECONNECT = 0x18
+        RECONNECT = 0x18,
+        KEEP_ALIVE_RESPONSE = 0x19,
+        REPORT_RECEIVED = 0x1A
     };
 
     // Error codes

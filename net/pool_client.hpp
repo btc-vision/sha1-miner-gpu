@@ -123,7 +123,12 @@ namespace MiningPool {
 
         // Pending requests
         std::mutex pending_mutex_;
-        std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> pending_requests_;
+
+        struct PendingRequest {
+            std::chrono::steady_clock::time_point timestamp;
+            MessageType type;
+        };
+        std::map<uint64_t, PendingRequest> pending_requests_;
 
         // Internal methods
         void io_loop();
