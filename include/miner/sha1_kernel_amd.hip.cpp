@@ -313,7 +313,8 @@ extern "C" void launch_mining_kernel_amd(
     }
 
     // Calculate nonces per thread
-    uint32_t nonces_per_thread = NONCES_PER_THREAD;
+    uint64_t total_threads = static_cast<uint64_t>(blocks) * static_cast<uint64_t>(threads);
+    uint32_t nonces_per_thread = NONCES_PER_THREAD / total_threads;
 
     // Ensure we have at least 1 nonce per thread
     if (nonces_per_thread == 0) {
