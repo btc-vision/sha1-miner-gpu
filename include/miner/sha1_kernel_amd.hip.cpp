@@ -110,7 +110,7 @@ __global__ void sha1_mining_kernel_amd(
 ) {
     // Thread indices
     const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const uint32_t lane_id = threadIdx.x & 63; // 64-thread wavefront
+    const uint32_t lane_id = threadIdx.x & 31; // 32-thread wavefront for RDNA
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
 
     // Load base message using vectorized access
@@ -151,14 +151,14 @@ __global__ void sha1_mining_kernel_amd(
         // Convert message bytes to big-endian words for SHA-1
         uint32_t W[16];
         uint32_t* msg_words_local = (uint32_t*)msg_bytes;
-#pragma unroll
+        #pragma unroll
         for (int j = 0; j < 8; j++) {
             W[j] = __builtin_bswap32(msg_words_local[j]);
         }
 
         // Apply SHA-1 padding
         W[8] = 0x80000000;
-#pragma unroll
+        #pragma unroll
         for (int j = 9; j < 15; j++) {
             W[j] = 0;
         }
@@ -172,7 +172,7 @@ __global__ void sha1_mining_kernel_amd(
         uint32_t e = H0[4];
 
         // SHA-1 rounds 0-19
-#pragma unroll
+        #pragma unroll
         for (int t = 0; t < 20; t++) {
             if (t >= 16) {
                 W[t & 15] = amd_rotl32(W[(t-3) & 15] ^ W[(t-8) & 15] ^
@@ -183,7 +183,7 @@ __global__ void sha1_mining_kernel_amd(
         }
 
         // Rounds 20-39
-#pragma unroll
+        #pragma unroll
         for (int t = 20; t < 40; t++) {
             W[t & 15] = amd_rotl32(W[(t-3) & 15] ^ W[(t-8) & 15] ^
                                    W[(t-14) & 15] ^ W[(t-16) & 15], 1);
@@ -192,7 +192,7 @@ __global__ void sha1_mining_kernel_amd(
         }
 
         // Rounds 40-59
-#pragma unroll
+        #pragma unroll
         for (int t = 40; t < 60; t++) {
             W[t & 15] = amd_rotl32(W[(t-3) & 15] ^ W[(t-8) & 15] ^
                                    W[(t-14) & 15] ^ W[(t-16) & 15], 1);
@@ -201,18 +201,12 @@ __global__ void sha1_mining_kernel_amd(
         }
 
         // Rounds 60-79
-#pragma unroll
+        #pragma unroll
         for (int t = 60; t < 80; t++) {
-            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
-                            W[(t - 14) & 15] ^ W[(t - 16) & 15];
-            W[t & 15] = amd_rotl32(temp, 1);
-            uint32_t f = b ^ c ^ d;
-            uint32_t temp2 = amd_rotl32(a, 5) + f + e + K[3] + W[t & 15];
-            e = d;
-            d = c;
-            c = amd_rotl32(b, 30);
-            b = a;
-            a = temp2;
+            W[t & 15] = amd_rotl32(W[(t-3) & 15] ^ W[(t-8) & 15] ^
+                                   W[(t-14) & 15] ^ W[(t-16) & 15], 1);
+            uint32_t temp = amd_rotl32(a, 5) + (b ^ c ^ d) + e + K[3] + W[t & 15];
+            e = d; d = c; c = amd_rotl32(b, 30); b = a; a = temp;
         }
 
         // Add initial hash values
@@ -226,34 +220,34 @@ __global__ void sha1_mining_kernel_amd(
         // Count matching bits
         uint32_t matching_bits = count_leading_zeros_160bit_amd(hash, target);
 
-        // Check if we found a match
+        // Check if we found a match using CORRECT wavefront size
         if (matching_bits >= difficulty) {
-            // Use AMD's wavefront vote operations
-            uint64_t mask = __ballot(matching_bits >= difficulty);
+            // Use AMD's wavefront vote operations with 32-thread waves
+            unsigned mask = __ballot(matching_bits >= difficulty);
 
             if (mask != 0) {
-                // Count set bits in mask up to our lane
-                uint32_t lane_mask = (1ULL << lane_id) - 1;
-                uint32_t prefix_sum = __builtin_popcountll(mask & lane_mask);
+                // Count matches before this lane
+                unsigned lane_mask = (1U << lane_id) - 1;
+                unsigned prefix_sum = __builtin_popcountl(mask & lane_mask);
 
-                // First lane does the atomic add
-                uint32_t base_idx;
-                if (lane_id == __builtin_ffsll(mask) - 1) {
-                    base_idx = atomicAdd(result_count, __builtin_popcountll(mask));
+                // First active lane reserves space
+                unsigned base_idx;
+                if (lane_id == __builtin_ffsl(mask) - 1) {
+                    base_idx = atomicAdd(result_count, __builtin_popcountl(mask));
                 }
 
-                // Broadcast base index to all lanes
-                base_idx = __shfl(base_idx, __builtin_ffsll(mask) - 1, 64);
+                // Broadcast base index to all lanes in the 32-thread wave
+                base_idx = __shfl(base_idx, __builtin_ffsl(mask) - 1);
 
-                // Each matching lane writes its result
+                // Write result if this lane has a match
                 if ((mask >> lane_id) & 1) {
-                    uint32_t idx = base_idx + prefix_sum;
+                    unsigned idx = base_idx + prefix_sum;
                     if (idx < result_capacity) {
                         results[idx].nonce = nonce;
                         results[idx].matching_bits = matching_bits;
                         results[idx].difficulty_score = matching_bits;
                         results[idx].job_version = job_version;
-#pragma unroll
+                        #pragma unroll
                         for (int j = 0; j < 5; j++) {
                             results[idx].hash[j] = hash[j];
                         }
