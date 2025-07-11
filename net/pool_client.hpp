@@ -74,8 +74,12 @@ namespace MiningPool {
         bool is_authenticated() const;
 
     private:
+        std::atomic<int> reconnect_attempt_count_{0};
+        std::atomic<bool> reconnecting_{false};
+
         std::atomic<bool> write_in_progress_{false};
         std::string current_write_payload_;
+
         // Configuration
         PoolConfig config_;
         IPoolEventHandler *event_handler_;

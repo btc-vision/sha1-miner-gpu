@@ -1,11 +1,11 @@
+#include "mining_system.hpp"
+#include "sha1_miner.cuh"
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
 #include <cstring>
 #include "gpu_architecture.hpp"
 #include "utilities.hpp"
-#include "mining_system.hpp"
-#include "sha1_miner.cuh"
 
 // Global system instance
 std::unique_ptr<MiningSystem> g_mining_system;
@@ -375,17 +375,6 @@ bool MiningSystem::initialize() {
 }
 
 void MiningSystem::runMiningLoopInterruptible(const MiningJob &job, std::function<bool()> should_continue) {
-    std::cout << "Starting interruptible mining...\n";
-    std::cout << "Target difficulty: " << job.difficulty << " bits\n";
-    std::cout << "Target hash: ";
-    for (int i = 0; i < 5; i++) {
-        std::cout << std::hex << std::setw(8) << std::setfill('0')
-                << job.target_hash[i] << " ";
-    }
-    std::cout << "\n" << std::dec;
-    std::cout << "Mining will stop when connection is lost.\n";
-    std::cout << "=====================================\n\n";
-
     // Copy job to device
     for (int i = 0; i < config_.num_streams; i++) {
         device_jobs_[i].copyFromHost(job);
@@ -499,7 +488,6 @@ void MiningSystem::runMiningLoopInterruptible(const MiningJob &job, std::functio
     }
 
     // Stop flag was set - wait for all streams to complete
-    std::cout << "\n[MINING] Waiting for active streams to complete...\n";
     for (int i = 0; i < config_.num_streams; i++) {
         gpuStreamSynchronize(streams_[i]);
 
@@ -753,6 +741,8 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
 
     // Limit to capacity
     if (count > pool.capacity) {
+        LOG_WARN("MINING", "Result count (", count, ") exceeds capacity (",
+                 pool.capacity, "), capping results");
         count = pool.capacity;
     }
 
@@ -767,6 +757,9 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
                          std::chrono::high_resolution_clock::now() - copy_start
                      ).count() / 1000.0;
 
+    LOG_TRACE("MINING", "Copied ", count, " results from stream ", stream_idx,
+              " in ", copy_time, " ms");
+
     // Update timing stats with proper lock
     {
         std::lock_guard<std::mutex> lock(timing_mutex_);
@@ -775,6 +768,7 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
 
     // Process results
     std::vector<MiningResult> valid_results;
+    uint32_t stale_count = 0;
 
     for (uint32_t i = 0; i < count; i++) {
         if (results[i].nonce == 0) continue;
@@ -782,6 +776,9 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
         // Check if result is from current job version
         if (results[i].job_version != current_job_version_) {
             // Skip stale results from old job versions
+            stale_count++;
+            LOG_TRACE("MINING", "Skipping stale result from job version ",
+                      results[i].job_version);
             continue;
         }
 
@@ -795,23 +792,57 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
                 std::chrono::steady_clock::now() - start_time_
             );
 
-            std::cout << "\n[NEW BEST!] Time: " << elapsed.count() << "s\n";
-            std::cout << "  Platform: " << getGPUPlatformName() << "\n";
-            std::cout << "  Nonce: 0x" << std::hex << results[i].nonce << std::dec << "\n";
-            std::cout << "  Matching bits: " << results[i].matching_bits << "\n";
-            std::cout << "  Hash: ";
+            std::string hash_str = "0x";
             for (int j = 0; j < 5; j++) {
-                std::cout << std::hex << std::setw(8) << std::setfill('0')
-                        << results[i].hash[j];
-                if (j < 4) std::cout << " ";
+                char buf[9];
+                snprintf(buf, sizeof(buf), "%08x", results[i].hash[j]);
+                hash_str += buf;
             }
-            std::cout << std::dec << "\n";
-            std::cout << "  Rate: " << std::fixed << std::setprecision(2)
-                    << static_cast<double>(total_hashes_.load()) / elapsed.count() / 1e9
-                    << " GH/s\n";
+
+            double hash_rate = static_cast<double>(total_hashes_.load()) / elapsed.count() / 1e9;
+
+            // Helper function to pad string to fixed width
+            auto pad_right = [](const std::string& str, size_t width) -> std::string {
+                if (str.length() >= width) return str;
+                return str + std::string(width - str.length(), ' ');
+            };
+
+            // Format all values
+            std::string time_str = std::to_string(elapsed.count()) + "s";
+            std::string platform_str = getGPUPlatformName();
+
+            // Format nonce using snprintf to avoid locale issues
+            char nonce_buffer[32];
+            snprintf(nonce_buffer, sizeof(nonce_buffer), "0x%llx", (unsigned long long)results[i].nonce);
+            std::string nonce_str = nonce_buffer;
+
+            std::string bits_str = std::to_string(results[i].matching_bits);
+
+            std::stringstream rate_stream;
+            rate_stream << std::fixed << std::setprecision(2) << hash_rate << " GH/s";
+            std::string rate_str = rate_stream.str();
+
+            // Build complete colored strings to avoid logger parsing issues
+            std::stringstream line;
+
+            // Log new best as a single line
+            LOG_INFO("MINING", Color::BRIGHT_CYAN, "NEW BEST! ",
+                     Color::RESET, "Time: ", Color::BRIGHT_WHITE, time_str,
+                     Color::RESET, " | Nonce: ", Color::BRIGHT_GREEN, nonce_str,
+                     Color::RESET, " | Bits: ", Color::BRIGHT_MAGENTA, bits_str,
+                     Color::RESET, " | Hash: ", Color::BRIGHT_YELLOW, hash_str);
         }
 
-        total_candidates_++;
+        ++total_candidates_;
+    }
+
+    if (stale_count > 0) {
+        LOG_DEBUG("MINING", "Discarded ", stale_count, " stale results from stream ", stream_idx);
+    }
+
+    if (!valid_results.empty()) {
+        LOG_DEBUG("MINING", "Found ", valid_results.size(), " valid results from stream ",
+                  stream_idx);
     }
 
     // Store results for batch processing
@@ -825,6 +856,8 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
         {
             std::lock_guard<std::mutex> callback_lock(callback_mutex_);
             if (result_callback_) {
+                LOG_TRACE("MINING", "Invoking result callback with ",
+                          valid_results.size(), " results");
                 result_callback_(valid_results);
             }
         }
@@ -832,6 +865,7 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
 
     // Reset pool count
     gpuMemsetAsync(pool.count, 0, sizeof(uint32_t), streams_[stream_idx]);
+    LOG_TRACE("MINING", "Reset result count for stream ", stream_idx);
 }
 
 MiningStats MiningSystem::getStats() const {

@@ -132,9 +132,8 @@ void run_mining_loop(MiningJob job);
 // C++ only functions (not extern "C")
 #ifdef __cplusplus
 
-// Forward declare the platform-specific launch functions
-#ifdef USE_HIP
-void launch_mining_kernel_hip(
+// Launch mining kernel - uses C++ references
+void launch_mining_kernel(
     const DeviceMiningJob &device_job,
     uint32_t difficulty,
     uint64_t nonce_offset,
@@ -142,32 +141,6 @@ void launch_mining_kernel_hip(
     const KernelConfig &config,
     uint64_t job_version
 );
-#else
-void launch_mining_kernel_nvidia(
-    const DeviceMiningJob &device_job,
-    uint32_t difficulty,
-    uint64_t nonce_offset,
-    const ResultPool &pool,
-    const KernelConfig &config,
-    uint64_t job_version
-);
-#endif
-
-// Generic launch function that delegates to platform-specific implementation
-inline void launch_mining_kernel(
-    const DeviceMiningJob &device_job,
-    uint32_t difficulty,
-    uint64_t nonce_offset,
-    const ResultPool &pool,
-    const KernelConfig &config,
-    uint64_t job_version
-) {
-#ifdef USE_HIP
-    launch_mining_kernel_hip(device_job, difficulty, nonce_offset, pool, config, job_version);
-#else
-    launch_mining_kernel_nvidia(device_job, difficulty, nonce_offset, pool, config, job_version);
-#endif
-}
 
 #endif // __cplusplus
 

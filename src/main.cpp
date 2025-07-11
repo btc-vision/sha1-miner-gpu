@@ -621,7 +621,6 @@ int run_pool_mining(const MiningConfig &config) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
-        LOG_INFO("POOL", "\n\nStopping mining...");
         pool_mining->stop();
     }
 

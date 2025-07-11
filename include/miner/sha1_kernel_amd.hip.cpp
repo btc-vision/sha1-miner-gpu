@@ -276,7 +276,7 @@ extern "C" void launch_mining_kernel_amd(
     uint64_t nonce_offset,
     const ResultPool &pool,
     const KernelConfig &config,
-    uint64_t job_version  // Added to match NVIDIA signature
+    uint64_t job_version
 ) {
     // Get device properties once and cache
     thread_local hipDeviceProp_t props_cached;

@@ -363,7 +363,7 @@ namespace MiningPool {
                 if (error_msg.find('\xd9') != std::string::npos || error_msg.find('\xda') != std::string::npos ||
                     error_msg.find('\xc6') != std::string::npos) {
                     error_msg = "Connection closed by remote host (error code: " + std::to_string(ec.value()) + ")";
-                }
+                    }
 #endif
                 LOG_ERROR("CLIENT", "Read error: ", error_msg);
             }
@@ -372,12 +372,15 @@ namespace MiningPool {
             authenticated_ = false;
             event_handler_->on_disconnected(ec.message());
 
-            if (running_.load() && config_.reconnect_attempts != 0) {
-                net::post(ioc_, [this]() {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
+            // Always attempt to reconnect if running and reconnects are enabled
+            if (running_.load() && (config_.reconnect_attempts == 0 ||
+                                    reconnect_attempt_count_.load() < config_.reconnect_attempts)) {
+                // Schedule reconnect
+                std::thread([this]() {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     reconnect();
-                });
-            }
+                }).detach();
+                                    }
             return;
         }
 
@@ -963,9 +966,17 @@ namespace MiningPool {
             return;
         }
 
-        LOG_INFO("CLIENT", "Attempting to reconnect...");
+        // Prevent multiple reconnect attempts
+        bool expected = false;
+        if (!reconnecting_.compare_exchange_strong(expected, true)) {
+            LOG_DEBUG("CLIENT", "Reconnect already in progress");
+            return;
+        }
 
-        // Reset connection state
+        LOG_INFO("CLIENT", "Attempting to reconnect... (attempt #",
+                 reconnect_attempt_count_.load() + 1, ")");
+
+        // Reset connection state but keep running
         connected_ = false;
         authenticated_ = false;
 
@@ -986,67 +997,152 @@ namespace MiningPool {
             // Ignore errors
         }
 
-        // Reset work guard and restart io_context
-        work_guard_.reset();
-        ioc_.restart();
-        work_guard_ = std::make_unique<net::executor_work_guard<net::io_context::executor_type> >(
-            ioc_.get_executor()
-        );
-
-        // Try to reconnect
-        try {
-            auto parsed = parse_url(config_.url);
-
-            // Resolve host
-            tcp::resolver resolver{ioc_};
-            auto const results = resolver.resolve(parsed.host, parsed.port);
-
-            if (config_.use_tls) {
-                // Create new SSL stream
-                wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket> > >(ioc_, ssl_ctx_);
-                beast::get_lowest_layer(*wss_).connect(results.begin()->endpoint());
-                wss_->next_layer().handshake(ssl::stream_base::client);
-                wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-                wss_->handshake(parsed.host, parsed.path);
-            } else {
-                // Create new plain WebSocket stream
-                ws_ = std::make_unique<websocket::stream<tcp::socket> >(ioc_);
-                beast::get_lowest_layer(*ws_).connect(results.begin()->endpoint());
-                ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-                ws_->handshake(parsed.host + ":" + parsed.port, parsed.path);
-            }
-
-            connected_ = true;
-            worker_stats_.connected_since = std::chrono::steady_clock::now();
-            event_handler_->on_connected();
-
-            HelloMessage hello;
-            hello.protocol_version = PROTOCOL_VERSION;
-            hello.client_version = "SHA1-Miner/1.0";
-            hello.capabilities = {"gpu", "multi-gpu", "vardiff"};
-            hello.user_agent = "SHA1-Miner";
-
-            Message msg;
-            msg.type = MessageType::HELLO;
-            msg.id = Utils::generate_message_id();
-            msg.timestamp = Utils::current_timestamp_ms();
-            msg.payload = hello.to_json();
-
-            send_message(msg);
-
-            // Start read loop
-            do_read();
-        } catch (const std::exception &e) {
-            LOG_ERROR("CLIENT", "Reconnection failed: ", e.what());
-
-            // Schedule another reconnection attempt
-            if (config_.reconnect_attempts != 0) {
-                net::post(ioc_, [this]() {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
-                    reconnect();
-                });
-            }
+        // Stop the io_context
+        if (work_guard_) {
+            work_guard_.reset();
         }
+        ioc_.stop();
+
+        // Wait for io_thread to finish if it exists
+        if (io_thread_ && io_thread_->joinable() &&
+            io_thread_->get_id() != std::this_thread::get_id()) {
+            io_thread_->join();
+        }
+
+        // Schedule reconnection attempt
+        std::thread([this]() {
+            // Delay before reconnecting
+            std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
+
+            // Check if we should still reconnect
+            if (!running_.load()) {
+                reconnecting_ = false;
+                return;
+            }
+
+            try {
+                // Restart io_context
+                ioc_.restart();
+                work_guard_ = std::make_unique<net::executor_work_guard<net::io_context::executor_type>>(
+                    ioc_.get_executor()
+                );
+
+                // Restart io thread
+                io_thread_ = std::make_unique<std::thread>(&PoolClient::io_loop, this);
+
+                // Give IO thread time to start
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+                auto parsed = parse_url(config_.url);
+
+                // Create promise for connection result
+                std::promise<bool> connection_promise;
+                auto connection_future = connection_promise.get_future();
+
+                // Post connection work to io_context
+                net::post(ioc_, [this, parsed, &connection_promise]() {
+                    try {
+                        // Resolve host
+                        tcp::resolver resolver{ioc_};
+                        boost::system::error_code ec;
+                        auto const results = resolver.resolve(parsed.host, parsed.port, ec);
+
+                        if (ec) {
+                            throw std::runtime_error("Failed to resolve host: " + parsed.host +
+                                                   " - " + ec.message());
+                        }
+
+                        if (config_.use_tls) {
+                            // Create new SSL stream
+                            wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket>>>(ioc_, ssl_ctx_);
+                            beast::get_lowest_layer(*wss_).connect(results.begin()->endpoint());
+                            wss_->next_layer().handshake(ssl::stream_base::client);
+                            wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+                            wss_->handshake(parsed.host, parsed.path);
+                        } else {
+                            // Create new plain WebSocket stream
+                            ws_ = std::make_unique<websocket::stream<tcp::socket>>(ioc_);
+                            beast::get_lowest_layer(*ws_).connect(results.begin()->endpoint());
+                            ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+                            ws_->handshake(parsed.host + ":" + parsed.port, parsed.path);
+                        }
+
+                        connected_ = true;
+                        worker_stats_.connected_since = std::chrono::steady_clock::now();
+
+                        // Start reading
+                        do_read();
+
+                        connection_promise.set_value(true);
+                    } catch (const std::exception &e) {
+                        LOG_ERROR("CLIENT", "Reconnection error: ", e.what());
+                        connection_promise.set_value(false);
+                    }
+                });
+
+                // Wait for connection result
+                bool connected = connection_future.get();
+
+                if (connected) {
+                    // Success! Reset counter and send HELLO
+                    reconnect_attempt_count_ = 0;
+                    reconnecting_ = false;
+
+                    event_handler_->on_connected();
+
+                    HelloMessage hello;
+                    hello.protocol_version = PROTOCOL_VERSION;
+                    hello.client_version = "SHA1-Miner/1.0";
+                    hello.capabilities = {"gpu", "multi-gpu", "vardiff"};
+                    hello.user_agent = "SHA1-Miner";
+
+                    Message msg;
+                    msg.type = MessageType::HELLO;
+                    msg.id = Utils::generate_message_id();
+                    msg.timestamp = Utils::current_timestamp_ms();
+                    msg.payload = hello.to_json();
+
+                    send_message(msg);
+
+                    LOG_INFO("CLIENT", Color::GREEN, "Reconnection successful!", Color::RESET);
+                } else {
+                    // Failed - schedule another attempt
+                    reconnect_attempt_count_++;
+                    reconnecting_ = false;
+
+                    // Check if we should keep trying
+                    if (config_.reconnect_attempts == 0 ||
+                        reconnect_attempt_count_.load() < config_.reconnect_attempts) {
+
+                        // Calculate backoff delay (exponential backoff with cap)
+                        int backoff_multiplier = std::min(reconnect_attempt_count_.load(), 6);
+                        int delay = config_.reconnect_delay_ms * (1 << backoff_multiplier);
+                        delay = std::min(delay, 60000); // Cap at 60 seconds
+
+                        LOG_WARN("CLIENT", "Reconnection failed, retrying in ", delay, "ms");
+
+                        // Schedule next attempt
+                        std::thread([this]() {
+                            reconnect();
+                        }).detach();
+                    } else {
+                        LOG_ERROR("CLIENT", "Maximum reconnection attempts reached, giving up");
+                        running_ = false;
+                    }
+                }
+            } catch (const std::exception &e) {
+                LOG_ERROR("CLIENT", "Reconnection exception: ", e.what());
+                reconnecting_ = false;
+
+                // Schedule retry
+                if (config_.reconnect_attempts == 0 ||
+                    reconnect_attempt_count_.load() < config_.reconnect_attempts) {
+                    std::thread([this]() {
+                        reconnect();
+                    }).detach();
+                }
+            }
+        }).detach();
     }
 
     // PoolClientManager implementation
