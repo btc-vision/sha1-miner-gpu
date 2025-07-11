@@ -814,7 +814,7 @@ int main(int argc, char *argv[]) {
                  " seconds @ 1 GH/s");
 
         LOG_INFO("MAIN", "Starting infinite mining. Press Ctrl+C to stop.");
-        g_mining_system->runMiningLoop(job); // <-- Remove duration parameter
+        g_mining_system->runMiningLoop(job);
         cleanup_mining_system();
     }
 

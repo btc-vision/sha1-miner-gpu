@@ -486,6 +486,14 @@ void MultiGPUManager::runMiningInterruptible(const MiningJob& job,
     //printCombinedStats();
 }
 
+void MultiGPUManager::sync() const {
+    for (const auto& worker : workers_) {
+        if (worker->mining_system && worker->active) {
+            worker->mining_system->sync();
+        }
+    }
+}
+
 void MultiGPUManager::updateJobLive(const MiningJob& job, uint64_t job_version) const {
     // Update job on all active GPUs
     for (const auto& worker : workers_) {

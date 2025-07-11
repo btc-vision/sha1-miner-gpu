@@ -506,14 +506,6 @@ void MiningSystem::runMiningLoopInterruptible(const MiningJob &job, std::functio
     //if (monitor_thread_ && monitor_thread_->joinable()) {
     //    monitor_thread_->join();
     //}
-
-    std::cout << "\n\nMining stopped. Kernels launched: " << kernels_launched << "\n";
-    std::cout << "Actual hashes computed: " << static_cast<double>(total_hashes_) / 1e9 << " GH\n";
-    std::cout << "Final best match: " << best_tracker_.getBestBits() << " bits\n";
-
-    if (!should_continue()) {
-        std::cout << "Mining stopped due to lost pool connection.\n";
-    }
 }
 
 void MiningSystem::runMiningLoop(const MiningJob &job) {
@@ -637,10 +629,6 @@ void MiningSystem::runMiningLoop(const MiningJob &job) {
     //if (monitor_thread_ && monitor_thread_->joinable()) {
     //    monitor_thread_->join();
     //}
-
-    std::cout << "\n\nMining stopped. Kernels launched: " << kernels_launched << "\n";
-    std::cout << "Actual hashes computed: " << static_cast<double>(total_hashes_) / 1e9 << " GH\n";
-    std::cout << "Final best match: " << best_tracker_.getBestBits() << " bits\n";
 }
 
 void MiningSystem::launchKernelOnStream(int stream_idx, uint64_t nonce_offset, const MiningJob &job) {
@@ -704,9 +692,16 @@ void MiningSystem::processStreamResults(int stream_idx, StreamData &stream_data)
     }
 }
 
-void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version) {
-    LOG_INFO("MINING", "Updating job to version ", job_version);
+void MiningSystem::sync() const {
+    // Synchronize all streams in this MiningSystem instance
+    for (int i = 0; i < config_.num_streams; i++) {
+        if (streams_[i]) {
+            gpuStreamSynchronize(streams_[i]);
+        }
+    }
+}
 
+void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version) {
     // Store current job version first
     current_job_version_ = job_version;
 

@@ -93,6 +93,8 @@ public:
         }
     };
 
+    void sync() const;
+
     /**
      * Stop all mining operations
      */
@@ -231,6 +233,7 @@ private:
     // Helper methods
     void launchKernelOnStream(int stream_idx, uint64_t nonce_offset, const MiningJob &job);
     void processStreamResults(int stream_idx, StreamData &stream_data);
+
     void performanceMonitorInterruptible(const std::function<bool()> &should_continue) const;
 
 protected:

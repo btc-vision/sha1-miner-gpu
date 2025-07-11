@@ -58,6 +58,8 @@ public:
      */
     void runMining(const MiningJob& job);
 
+    void sync() const;
+
     /**
      * Run mining with interruption capability
      * @param job Mining job configuration
