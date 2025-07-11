@@ -425,7 +425,7 @@ namespace MiningPool {
         {
             std::lock_guard<std::mutex> lock(job_mutex_);
             if (!current_job_.has_value()) {
-                LOG_DEBUG("SHARE", "No current job, discarding ", results_to_process.size(), " results");
+                LOG_WARN("SHARE", "No current job, discarding ", results_to_process.size(), " results");
                 return;
             }
             current_job_id = current_job_->job_id;
@@ -440,7 +440,7 @@ namespace MiningPool {
             return;
         }
 
-        LOG_TRACE("SHARE", "Scanning ", results_to_process.size(), " results for job ",
+        LOG_WARN("SHARE", "Scanning ", results_to_process.size(), " results for job ",
                   current_job_id, " version ", expected_job_version,
                   " with difficulty ", job_difficulty_bits, " bits");
 
@@ -452,7 +452,7 @@ namespace MiningPool {
             // Double-check job version
             if (result.job_version != expected_job_version) {
                 stale_shares++;
-                LOG_TRACE("SHARE", "Discarding stale result from job version ",
+                LOG_WARN("SHARE", "Discarding stale result from job version ",
                           result.job_version, " (current: ", expected_job_version, ")");
                 continue;
             }
@@ -465,10 +465,10 @@ namespace MiningPool {
         }
 
         if (stale_shares > 0) {
-            LOG_DEBUG("SHARE", "Discarded ", stale_shares, " stale results from old job versions");
+            LOG_WARN("SHARE", "Discarded ", stale_shares, " stale results from old job versions");
         }
         if (valid_shares > 0) {
-            LOG_DEBUG("SHARE", "Submitted ", valid_shares, " valid shares for job ", current_job_id);
+            LOG_WARN("SHARE", "Submitted ", valid_shares, " valid shares for job ", current_job_id);
         }
     }
 
