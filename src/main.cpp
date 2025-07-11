@@ -56,7 +56,7 @@ struct MiningConfig {
     std::string message_hex;
 
     // Performance configuration
-    int num_streams = 4;
+    int num_streams = 8;
     int threads_per_block = 256;
     bool auto_tune = true;
 
@@ -284,16 +284,16 @@ void auto_tune_parameters(MiningSystem::Config &config, int device_id) {
             blocks_per_sm = 8;
             optimal_threads = 256;
         } else {
-            blocks_per_sm = 4;
+            blocks_per_sm = 8;
             optimal_threads = 256;
         }
     } else if (props.major == 5) {
         // Maxwell (GTX 9xx, GTX 750)
-        blocks_per_sm = 4;
+        blocks_per_sm = 8;
         optimal_threads = 128;
     } else {
         // Kepler and older
-        blocks_per_sm = 2;
+        blocks_per_sm = 4;
         optimal_threads = 128;
     }
 

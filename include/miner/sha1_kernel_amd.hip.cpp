@@ -301,7 +301,7 @@ extern "C" void launch_mining_kernel_amd(
     if (blocks <= 0) {
         // Calculate optimal blocks based on architecture
         int compute_units = props.multiProcessorCount;
-        int waves_per_cu = 4; // Reduced for better scheduling
+        int waves_per_cu = 8; // Reduced for better scheduling
         int total_waves = compute_units * waves_per_cu;
         blocks = (total_waves * props.warpSize) / threads;
     }

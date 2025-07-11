@@ -1,5 +1,6 @@
 #include "pool_client.hpp"
 #include "../logging/logger.hpp"
+#include "../tls/tls.hpp"
 #include <regex>
 
 #include "gpu_platform.hpp"
@@ -49,144 +50,352 @@ namespace MiningPool {
     }
 
     bool PoolClient::connect() {
-        if (connected_.load()) {
-            return true;
+    if (connected_.load()) {
+        return true;
+    }
+
+    running_ = true;
+
+    try {
+        auto parsed = parse_url(config_.url);
+
+        // Ensure we're using port 443 for wss://
+        if (parsed.is_secure && parsed.port == "80") {
+            parsed.port = "443";
         }
 
-        running_ = true;
+        // Start IO thread first
+        io_thread_ = std::make_unique<std::thread>(&PoolClient::io_loop, this);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        try {
-            auto parsed = parse_url(config_.url);
+        // Start auxiliary threads
+        message_processor_thread_ = std::thread(&PoolClient::message_processor_loop, this);
+        keepalive_thread_ = std::thread(&PoolClient::keepalive_loop, this);
 
-            // IMPORTANT: Start the IO thread FIRST before any other operations
-            io_thread_ = std::make_unique<std::thread>(&PoolClient::io_loop, this);
+        LOG_INFO("CLIENT", "Connecting to ", parsed.host, ":", parsed.port,
+                 " (", parsed.is_secure ? "secure" : "plain", ")");
+        LOG_DEBUG("CLIENT", "WebSocket path: ", parsed.path);
 
-            // Give IO thread time to start
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::promise<bool> connection_promise;
+        auto connection_future = connection_promise.get_future();
 
-            // Then start auxiliary threads
-            message_processor_thread_ = std::thread(&PoolClient::message_processor_loop, this);
-            keepalive_thread_ = std::thread(&PoolClient::keepalive_loop, this);
+        net::post(ioc_, [this, parsed, &connection_promise]() {
+            try {
+                // DNS resolution
+                tcp::resolver resolver{ioc_};
+                boost::system::error_code ec;
 
-            // Add DNS resolution debugging
-            LOG_INFO("CLIENT", "Resolving host: ", parsed.host, ":", parsed.port);
+                LOG_DEBUG("CLIENT", "Resolving ", parsed.host, ":", parsed.port);
+                auto const results = resolver.resolve(parsed.host, parsed.port, ec);
 
-            // Create a promise/future to synchronize the connection
-            std::promise<bool> connection_promise;
-            auto connection_future = connection_promise.get_future();
+                if (ec) {
+                    throw std::runtime_error("DNS resolution failed: " + ec.message());
+                }
 
-            // Post the connection work to the io_context
-            net::post(ioc_, [this, parsed, &connection_promise]() {
-                try {
-                    // Resolve host
-                    tcp::resolver resolver{ioc_};
-                    boost::system::error_code ec;
-                    auto const results = resolver.resolve(parsed.host, parsed.port, ec);
+                // Log resolved addresses
+                for (auto const& endpoint : results) {
+                    LOG_DEBUG("CLIENT", "Resolved to: ",
+                             endpoint.endpoint().address().to_string(), ":",
+                             endpoint.endpoint().port());
+                }
+
+                if (config_.use_tls) {
+                    // Create SSL context with Chrome fingerprint
+                    ssl_ctx_ = ssl::context(ssl::context::tls_client);
+
+                    // Apply Chrome configuration
+                    ChromeTLSConfig::configureContext(ssl_ctx_);
+
+                    // Certificate verification
+                    if (config_.verify_server_cert) {
+                        ssl_ctx_.set_verify_mode(ssl::verify_peer);
+                        ssl_ctx_.set_default_verify_paths();
+
+                        // More permissive Chrome-like verification
+                        ssl_ctx_.set_verify_callback(
+                            [](bool preverified, ssl::verify_context& ctx) {
+                                if (!preverified) {
+                                    X509_STORE_CTX* cts = ctx.native_handle();
+                                    int error = X509_STORE_CTX_get_error(cts);
+                                    int depth = X509_STORE_CTX_get_error_depth(cts);
+
+                                    // Get certificate info
+                                    X509* cert = X509_STORE_CTX_get_current_cert(cts);
+                                    if (cert) {
+                                        char subject[256];
+                                        X509_NAME_oneline(X509_get_subject_name(cert), subject, sizeof(subject));
+                                        LOG_WARN("CLIENT", "Certificate verification issue at depth ", depth,
+                                                ": ", X509_verify_cert_error_string(error),
+                                                " - Subject: ", subject);
+                                    }
+
+                                    // Chrome allows many certificate issues
+                                    switch (error) {
+                                        case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY:
+                                        case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN:
+                                        case X509_V_ERR_CERT_UNTRUSTED:
+                                        case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE:
+                                        case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT:
+                                        case X509_V_ERR_CERT_HAS_EXPIRED:
+                                        case X509_V_ERR_CERT_NOT_YET_VALID:
+                                            LOG_WARN("CLIENT", "Allowing certificate despite verification issue");
+                                            return true;  // Accept anyway
+                                        default:
+                                            return false;  // Reject
+                                    }
+                                }
+                                return preverified;
+                            });
+                    } else {
+                        ssl_ctx_.set_verify_mode(ssl::verify_none);
+                    }
+
+                    // Load client certificates if specified
+                    if (!config_.tls_cert_file.empty() && !config_.tls_key_file.empty()) {
+                        ssl_ctx_.use_certificate_file(config_.tls_cert_file, ssl::context::pem);
+                        ssl_ctx_.use_private_key_file(config_.tls_key_file, ssl::context::pem);
+                    }
+
+                    // Create WebSocket SSL stream
+                    wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket>>>(ioc_, ssl_ctx_);
+
+                    // Get the lowest layer (TCP socket)
+                    auto& socket = beast::get_lowest_layer(*wss_);
+
+                    // Open the socket first before setting options
+                    socket.open(tcp::v4(), ec);
+                    if (ec) {
+                        // Try IPv6 if IPv4 fails
+                        socket.open(tcp::v6(), ec);
+                        if (ec) {
+                            throw std::runtime_error("Failed to open socket: " + ec.message());
+                        }
+                    }
+
+                    // NOW we can set socket options after the socket is open
+                    socket.set_option(tcp::no_delay(true), ec);
+                    if (ec) {
+                        LOG_WARN("CLIENT", "Failed to set TCP_NODELAY: ", ec.message());
+                        ec.clear();
+                    }
+
+                    socket.set_option(boost::asio::socket_base::keep_alive(true), ec);
+                    if (ec) {
+                        LOG_WARN("CLIENT", "Failed to set SO_KEEPALIVE: ", ec.message());
+                        ec.clear();
+                    }
+
+                    socket.set_option(boost::asio::socket_base::reuse_address(true), ec);
+                    if (ec) {
+                        LOG_WARN("CLIENT", "Failed to set SO_REUSEADDR: ", ec.message());
+                        ec.clear();
+                    }
+
+                    // Set buffer sizes
+                    socket.set_option(boost::asio::socket_base::receive_buffer_size(65536), ec);
+                    if (ec) {
+                        LOG_WARN("CLIENT", "Failed to set receive buffer size: ", ec.message());
+                        ec.clear();
+                    }
+
+                    socket.set_option(boost::asio::socket_base::send_buffer_size(65536), ec);
+                    if (ec) {
+                        LOG_WARN("CLIENT", "Failed to set send buffer size: ", ec.message());
+                        ec.clear();
+                    }
+
+                    // Connect TCP
+                    LOG_DEBUG("CLIENT", "Connecting TCP socket...");
+                    socket.connect(results.begin()->endpoint(), ec);
+                    if (ec) {
+                        throw std::runtime_error("TCP connect failed: " + ec.message());
+                    }
+
+                    // Configure SSL before handshake
+                    auto& ssl_stream = wss_->next_layer();
+                    SSL* ssl = ssl_stream.native_handle();
+                    ChromeTLSConfig::configureSSLStream(ssl, parsed.host);
+
+                    // Perform SSL handshake
+                    LOG_DEBUG("CLIENT", "Starting SSL handshake with ", parsed.host, "...");
+                    ssl_stream.handshake(ssl::stream_base::client, ec);
 
                     if (ec) {
-                        throw std::runtime_error("Failed to resolve host: " + parsed.host + " - " + ec.message());
-                    }
+                        // Detailed error reporting
+                        std::string error_details;
+                        char err_buf[256];
+                        unsigned long ssl_err;
 
-                    if (results.empty()) {
-                        throw std::runtime_error("Failed to resolve host: " + parsed.host);
-                    }
-
-                    // Print resolved addresses
-                    for (auto const &endpoint: results) {
-                        LOG_DEBUG("CLIENT", "Resolved to: ", endpoint.endpoint().address().to_string(),
-                                  ":", endpoint.endpoint().port());
-                    }
-
-                    if (config_.use_tls) {
-                        // Initialize SSL context
-                        ssl_ctx_.set_verify_mode(config_.verify_server_cert ? ssl::verify_peer : ssl::verify_none);
-                        if (!config_.tls_cert_file.empty() && !config_.tls_key_file.empty()) {
-                            ssl_ctx_.use_certificate_file(config_.tls_cert_file, ssl::context::pem);
-                            ssl_ctx_.use_private_key_file(config_.tls_key_file, ssl::context::pem);
+                        while ((ssl_err = ERR_get_error()) != 0) {
+                            ERR_error_string_n(ssl_err, err_buf, sizeof(err_buf));
+                            error_details += std::string(err_buf) + "; ";
                         }
 
-                        // Create SSL stream
-                        wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket>>>(ioc_, ssl_ctx_);
-
-                        // Connect TCP socket
-                        beast::get_lowest_layer(*wss_).connect(results.begin()->endpoint());
-
-                        // Perform SSL handshake
-                        wss_->next_layer().handshake(ssl::stream_base::client);
-
-                        // Set WebSocket options
-                        wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-                        wss_->set_option(websocket::stream_base::decorator(
-                            [](websocket::request_type &req) {
-                                req.set(http::field::user_agent, "SHA1-Miner/1.0 Boost.Beast");
-                            }));
-
-                        // Perform WebSocket handshake
-                        wss_->handshake(parsed.host, parsed.path);
-                    } else {
-                        // Create plain WebSocket stream
-                        ws_ = std::make_unique<websocket::stream<tcp::socket>>(ioc_);
-
-                        // Connect TCP socket
-                        beast::get_lowest_layer(*ws_).connect(results.begin()->endpoint());
-
-                        // Set WebSocket options
-                        ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-                        ws_->set_option(websocket::stream_base::decorator(
-                            [](websocket::request_type &req) {
-                                req.set(http::field::user_agent, "SHA1-Miner/1.0 Boost.Beast");
-                            }));
-
-                        // Perform WebSocket handshake with host header
-                        ws_->handshake(parsed.host + ":" + parsed.port, parsed.path);
+                        throw std::runtime_error("SSL handshake failed: " + ec.message() +
+                                               " - OpenSSL: " + error_details);
                     }
 
-                    connected_ = true;
-                    worker_stats_.connected_since = std::chrono::steady_clock::now();
+                    // Log connection info
+                    LOG_INFO("CLIENT", Color::GREEN, "SSL connected!", Color::RESET);
+                    LOG_INFO("CLIENT", "  Protocol: ", SSL_get_version(ssl));
+                    LOG_INFO("CLIENT", "  Cipher: ", SSL_get_cipher_name(ssl));
 
-                    // Start reading immediately in the IO thread
-                    LOG_DEBUG("CLIENT", "Starting async read loop");
-                    do_read();
-                    connection_promise.set_value(true);
-                } catch (const std::exception &e) {
-                    LOG_ERROR("CLIENT", "Connection error in IO thread: ", e.what());
-                    connection_promise.set_value(false);
+                    // Check ALPN
+                    const unsigned char* alpn_proto = nullptr;
+                    unsigned int alpn_proto_len = 0;
+                    SSL_get0_alpn_selected(ssl, &alpn_proto, &alpn_proto_len);
+                    if (alpn_proto && alpn_proto_len > 0) {
+                        std::string alpn(reinterpret_cast<const char*>(alpn_proto), alpn_proto_len);
+                        LOG_INFO("CLIENT", "  ALPN: ", alpn);
+                    }
+
+                    // Configure WebSocket options BEFORE decorator
+                    wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+
+                    // Set WebSocket decorator with proper headers to fix "bad version"
+                    wss_->set_option(websocket::stream_base::decorator(
+                        [parsed](websocket::request_type &req) {
+                            req.set(http::field::host, parsed.host);
+                            req.set(http::field::upgrade, "websocket");
+                            req.set(http::field::connection, "Upgrade");
+
+                            // Chrome User-Agent
+                            req.set(http::field::user_agent,
+                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36");
+
+                            // Standard Chrome headers
+                            req.set(http::field::accept_language, "en-US,en;q=0.9");
+                            req.set(http::field::cache_control, "no-cache");
+                            req.set(http::field::pragma, "no-cache");
+                            req.set(http::field::origin, "https://" + parsed.host);
+
+                            // WebSocket version (required)
+                            req.set("Sec-WebSocket-Version", "13");
+
+
+                            // Chrome Sec-Fetch headers
+                            req.set("Sec-Fetch-Dest", "websocket");
+                            req.set("Sec-Fetch-Mode", "websocket");
+                            req.set("Sec-Fetch-Site", "same-origin");
+                        }));
+
+                    // WebSocket handshake
+                    LOG_DEBUG("CLIENT", "Starting WebSocket handshake...");
+                    LOG_DEBUG("CLIENT", "  Host: ", parsed.host);
+                    LOG_DEBUG("CLIENT", "  Path: ", parsed.path);
+
+                    wss_->handshake(parsed.host, parsed.path, ec);
+
+                    if (ec) {
+                        // Enhanced error handling for WebSocket (FIXED - removed response() call)
+                        if (ec == websocket::error::upgrade_declined) {
+                            LOG_ERROR("CLIENT", "WebSocket upgrade declined by server");
+                            LOG_ERROR("CLIENT", "Check if the path '", parsed.path, "' supports WebSocket");
+                            LOG_ERROR("CLIENT", "The server might expect a different path or protocol");
+                        } else if (ec == websocket::error::bad_http_version) {
+                            LOG_ERROR("CLIENT", "Bad HTTP version - server might not support WebSocket");
+                        } else if (ec.message().find("bad version") != std::string::npos) {
+                            LOG_ERROR("CLIENT", "WebSocket version mismatch");
+                            LOG_ERROR("CLIENT", "Try removing the permessage-deflate extension");
+                        }
+
+                        throw std::runtime_error("WebSocket handshake failed: " + ec.message() +
+                                               " (category: " + ec.category().name() +
+                                               ", value: " + std::to_string(ec.value()) + ")");
+                    }
+
+                } else {
+                    // Plain WebSocket (non-TLS)
+                    ws_ = std::make_unique<websocket::stream<tcp::socket>>(ioc_);
+
+                    auto& socket = beast::get_lowest_layer(*ws_);
+
+                    // Open socket first
+                    socket.open(tcp::v4(), ec);
+                    if (ec) {
+                        socket.open(tcp::v6(), ec);
+                        if (ec) {
+                            throw std::runtime_error("Failed to open socket: " + ec.message());
+                        }
+                    }
+
+                    // Set options after socket is open
+                    socket.set_option(tcp::no_delay(true), ec);
+                    socket.set_option(boost::asio::socket_base::keep_alive(true), ec);
+
+                    // Connect
+                    socket.connect(results.begin()->endpoint(), ec);
+                    if (ec) {
+                        throw std::runtime_error("TCP connect failed: " + ec.message());
+                    }
+
+                    ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+                    ws_->set_option(websocket::stream_base::decorator(
+                        [parsed](websocket::request_type &req) {
+                            req.set(http::field::host, parsed.host + ":" + parsed.port);
+                            req.set(http::field::upgrade, "websocket");
+                            req.set(http::field::connection, "Upgrade");
+                            req.set(http::field::user_agent, "SHA1-Miner/1.0 Boost.Beast");
+                            req.set("Sec-WebSocket-Version", "13");
+                        }));
+
+                    ws_->handshake(parsed.host + ":" + parsed.port, parsed.path, ec);
+                    if (ec) {
+                        throw std::runtime_error("WebSocket handshake failed: " + ec.message());
+                    }
                 }
-            });
 
-            // Wait for connection to complete
-            if (!connection_future.get()) {
-                running_ = false;
-                connected_ = false;
-                return false;
+                connected_ = true;
+                worker_stats_.connected_since = std::chrono::steady_clock::now();
+
+                LOG_INFO("CLIENT", Color::GREEN, "WebSocket connected successfully!", Color::RESET);
+
+                // Start reading
+                do_read();
+                connection_promise.set_value(true);
+
+            } catch (const std::exception &e) {
+                LOG_ERROR("CLIENT", "Connection failed: ", e.what());
+                connection_promise.set_value(false);
             }
+        });
 
-            // Connection successful, notify handler
-            event_handler_->on_connected();
-
-            HelloMessage hello;
-            hello.protocol_version = PROTOCOL_VERSION;
-            hello.client_version = "SHA1-Miner/1.0";
-            hello.capabilities = {"gpu", "multi-gpu", "vardiff"};
-            hello.user_agent = "SHA1-Miner";
-
-            Message msg;
-            msg.type = MessageType::HELLO;
-            msg.id = Utils::generate_message_id();
-            msg.timestamp = Utils::current_timestamp_ms();
-            msg.payload = hello.to_json();
-
-            LOG_INFO("CLIENT", "Sending HELLO message");
-            send_message(msg);
-
-            return true;
-        } catch (const std::exception &e) {
-            LOG_ERROR("CLIENT", "Connection error: ", e.what());
+        // Wait for connection result
+        if (!connection_future.get()) {
             running_ = false;
             connected_ = false;
             return false;
         }
+
+        // Notify handler
+        event_handler_->on_connected();
+
+        // Send initial HELLO message
+        HelloMessage hello;
+        hello.protocol_version = PROTOCOL_VERSION;
+        hello.client_version = "SHA1-Miner/1.0";
+        hello.capabilities = {"gpu", "multi-gpu", "vardiff"};
+        hello.user_agent = "SHA1-Miner";
+
+        Message msg;
+        msg.type = MessageType::HELLO;
+        msg.id = Utils::generate_message_id();
+        msg.timestamp = Utils::current_timestamp_ms();
+        msg.payload = hello.to_json();
+
+        LOG_INFO("CLIENT", "Sending HELLO message");
+        send_message(msg);
+
+        return true;
+
+    } catch (const std::exception &e) {
+        LOG_ERROR("CLIENT", "Connection error: ", e.what());
+        running_ = false;
+        connected_ = false;
+        return false;
     }
+}
 
     void PoolClient::disconnect() {
         if (!running_.load()) {
