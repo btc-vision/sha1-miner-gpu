@@ -124,6 +124,9 @@ void MiningSystem::autoTuneParameters() {
 
         // Base configuration for AMD architectures
         switch (arch) {
+            case AMDArchitecture::CDNA1:
+            case AMDArchitecture::CDNA2:
+            case AMDArchitecture::CDNA3:
             case AMDArchitecture::RDNA4:
                 blocks_per_sm = 4;  // Conservative for new architecture
                 optimal_threads = 256;
@@ -152,8 +155,9 @@ void MiningSystem::autoTuneParameters() {
                 config_.result_buffer_size = 128;
                 break;
 
-            case AMDArchitecture::GCN:
-            //case AMDArchitecture::VEGA:
+            case AMDArchitecture::GCN5:
+            case AMDArchitecture::GCN4:
+            case AMDArchitecture::GCN3:
                 blocks_per_sm = 4;
                 optimal_threads = 256;
                 config_.num_streams = 2;
