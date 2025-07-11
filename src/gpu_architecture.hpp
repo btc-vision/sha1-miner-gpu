@@ -237,7 +237,7 @@ public:
             default:
                 // Conservative for older architectures
                 blocks_per_cu = 8;
-                config.threads_per_block = 256;
+                config.threads_per_block = 128;
                 config.num_streams = 4;
                 config.result_buffer_size = 128;
                 config.blocks_per_stream = actual_cus * blocks_per_cu;

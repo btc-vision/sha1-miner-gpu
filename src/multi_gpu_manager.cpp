@@ -1,6 +1,4 @@
-// multi_gpu_manager.cpp
 #include "multi_gpu_manager.hpp"
-#include "utilities.hpp"
 #ifdef USE_HIP
 #include "gpu_architecture.hpp"
 #endif
