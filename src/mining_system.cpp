@@ -935,6 +935,8 @@ MiningStats MiningSystem::getStats() const {
 }
 
 bool MiningSystem::initializeGPUResources() {
+    std::cout << "[DEBUG] Starting GPU resource initialization\n";
+
     if (config_.blocks_per_stream <= 0) {
         std::cerr << "Invalid blocks_per_stream: " << config_.blocks_per_stream << "\n";
         return false;
@@ -949,6 +951,8 @@ bool MiningSystem::initializeGPUResources() {
     int priority_high, priority_low;
     gpuDeviceGetStreamPriorityRange(&priority_low, &priority_high);
 
+    std::cout << "[DEBUG] Creating " << config_.num_streams << " streams\n";
+
     for (int i = 0; i < config_.num_streams; i++) {
         int priority = (i == 0) ? priority_high : priority_low;
         gpuError_t err = gpuStreamCreateWithPriority(
@@ -959,10 +963,14 @@ bool MiningSystem::initializeGPUResources() {
                     << gpuGetErrorString(err) << "\n";
             return false;
         }
+        std::cout << "[DEBUG] Created stream " << i << "\n";
 
         gpuEventCreateWithFlags(&start_events_[i], gpuEventDisableTiming);
         gpuEventCreateWithFlags(&end_events_[i], gpuEventDisableTiming);
     }
+
+    // Continue with the rest...
+    std::cout << "[DEBUG] Allocating GPU memory pools\n";
 
     // Allocate GPU memory pools
     gpu_pools_.resize(config_.num_streams);
