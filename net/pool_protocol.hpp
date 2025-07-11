@@ -47,7 +47,8 @@ namespace MiningPool {
         PROTOCOL_ERROR = 1007,
         INTERNAL_ERROR = 1008,
         BANNED = 1009,
-        NO_WORK = 1010
+        NO_WORK = 1010,
+        CONNECTION_LOST = 1011,
     };
 
     // Share difficulty validation result
