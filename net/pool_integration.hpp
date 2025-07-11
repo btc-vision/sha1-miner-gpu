@@ -50,6 +50,7 @@ namespace MiningPool {
             // Connection
             bool connected = false;
             bool authenticated = false;
+
             std::string worker_id;
             std::string pool_name;
 

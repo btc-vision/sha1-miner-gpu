@@ -537,6 +537,44 @@ namespace MiningPool {
         }
     }
 
+    void PoolClient::shutdown_connection() {
+        LOG_DEBUG("CLIENT", "Shutting down connection...");
+        // First, cancel all async operations
+        if (config_.use_tls && wss_) {
+            try {
+                auto &socket = beast::get_lowest_layer(*wss_);
+                boost::system::error_code ec;
+                socket.cancel(ec);
+                if (wss_->is_open()) {
+                    wss_->async_close(websocket::close_code::normal,
+                                      [](beast::error_code) {
+                                          // Ignore close errors during shutdown
+                                      });
+                }
+            } catch (...) {
+            }
+        } else if (ws_) {
+            try {
+                auto &socket = beast::get_lowest_layer(*ws_);
+                boost::system::error_code ec;
+                socket.cancel(ec);
+                if (ws_->is_open()) {
+                    ws_->async_close(websocket::close_code::normal,
+                                     [](beast::error_code) {
+                                         // Ignore close errors during shutdown
+                                     });
+                }
+            } catch (...) {
+            }
+        }
+
+        // Give async operations time to complete
+        ioc_.run_for(std::chrono::milliseconds(100));
+
+        // Now stop the io_context
+        ioc_.stop();
+    }
+
     void PoolClient::send_message(const Message &msg) {
         LOG_DEBUG("CLIENT", "send_message called for type: ", static_cast<int>(msg.type), ", ID: ", msg.id);
         if (!connected_.load()) {
@@ -620,7 +658,7 @@ namespace MiningPool {
         lock.unlock();
 
         current_write_payload_ = msg.serialize();
-        auto write_handler = [this](beast::error_code ec, std::size_t bytes_transferred) {
+        auto write_handler = [this](const beast::error_code &ec, const std::size_t bytes_transferred) {
             write_in_progress_ = false;
             on_write(ec, bytes_transferred);
         };
@@ -639,7 +677,7 @@ namespace MiningPool {
         }
 
         // Check if more messages to send
-        std::lock_guard<std::mutex> lock(outgoing_mutex_);
+        std::lock_guard lock(outgoing_mutex_);
         if (!outgoing_queue_.empty()) {
             net::post(ioc_, [this]() { do_write(); });
         }
@@ -667,8 +705,9 @@ namespace MiningPool {
                                                             reconnect_attempts));
 
             if (should_reconnect) {
-                LOG_INFO("CLIENT", "Scheduling reconnect (attempt ", reconnect_attempt_count_.load() + 1,
-                         config_.reconnect_attempts < 0 ? "/∞" : "/" + std::to_string(config_.reconnect_attempts),
+                LOG_WARN("CLIENT", "Scheduling reconnect (attempt ", reconnect_attempt_count_.load() + 1,
+                         config_.reconnect_attempts < 0 ? "/infinite" : "/" + std::to_string(config_.reconnect_attempts
+                         ),
                          ")");
                 // Schedule reconnect
                 std::thread([this]() {
@@ -725,7 +764,11 @@ namespace MiningPool {
 
     void PoolClient::keepalive_loop() {
         while (running_.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(config_.keepalive_interval_s));
+            for (int i = 0; i < config_.keepalive_interval_s && running_.load(); i++) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+
+            if (!running_.load()) break;
 
             if (connected_.load() && authenticated_.load()) {
                 Message keepalive;
@@ -738,6 +781,7 @@ namespace MiningPool {
             // Check for timed out requests
             check_pending_timeouts();
         }
+        LOG_DEBUG("CLIENT", "Keepalive loop exiting");
     }
 
     void PoolClient::message_processor_loop() {
@@ -848,7 +892,7 @@ namespace MiningPool {
 
         // Update stats
         {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
+            std::lock_guard lock(stats_mutex_);
             worker_stats_.current_difficulty = welcome.min_difficulty; // IN BITS
         }
 
@@ -1270,28 +1314,29 @@ namespace MiningPool {
         }
     }
 
-    void PoolClient::reconnect() {
-        LOG_INFO("ATTEMPTING RECONNECT");
+    bool PoolClient::is_reconnecting() const {
+        return reconnecting_.load();
+    }
 
+    void PoolClient::reconnect() {
         bool expected = false;
         if (!reconnecting_.compare_exchange_strong(expected, true)) {
+            LOG_DEBUG("CLIENT", "Already reconnecting, skipping");
             return;
         }
 
-        // Don't reconnect if shutting down
         if (!running_.load()) {
             reconnecting_ = false;
             return;
         }
-
-        LOG_INFO("CLIENT", "Starting reconnection process...");
-
-        // We need to do the reconnection from a separate thread to avoid deadlocks
         std::thread reconnect_thread([this]() {
             try {
-                // Fix: Check max attempts properly
-                if (config_.reconnect_attempts >= 0 && // Only check if not infinite (-1)
-                    reconnect_attempt_count_ >= static_cast<unsigned>(config_.reconnect_attempts)) {
+                // Check max attempts
+                LOG_DEBUG("CLIENT", "Checking reconnect attempts: current=", reconnect_attempt_count_.load(),
+                          ", max=", config_.reconnect_attempts, " (",
+                          config_.reconnect_attempts < 0 ? "infinite" : "limited", ")");
+                if (config_.reconnect_attempts >= 0 && reconnect_attempt_count_ >= static_cast<unsigned>(config_.
+                        reconnect_attempts)) {
                     LOG_ERROR("CLIENT", "Maximum reconnection attempts (",
                               config_.reconnect_attempts, ") exceeded");
                     running_ = false;
@@ -1302,9 +1347,9 @@ namespace MiningPool {
                 ++reconnect_attempt_count_;
 
                 // Calculate delay with exponential backoff
-                int delay = config_.reconnect_delay_ms;
-                for (int i = 1; i < reconnect_attempt_count_; i++) {
-                    delay = std::min(delay * 2, 30000); // Cap at 30 seconds
+                uint32_t delay = config_.reconnect_delay_ms;
+                for (uint32_t i = 1; i < reconnect_attempt_count_; i++) {
+                    delay = std::min(delay * 2, config_.max_reconnect_delay_ms);
                 }
 
                 LOG_INFO("CLIENT", "Reconnection attempt #", reconnect_attempt_count_.load(),
@@ -1318,10 +1363,11 @@ namespace MiningPool {
                     return;
                 }
 
-                // First, properly disconnect everything
-                LOG_INFO("CLIENT", "Disconnecting current connection...");
+                // Properly shutdown everything
+                LOG_INFO("CLIENT", "Shutting down current connection...");
 
-                // Set flags
+                // Signal threads to stop
+                running_ = false;
                 connected_ = false;
                 authenticated_ = false;
                 write_in_progress_ = false;
@@ -1329,44 +1375,41 @@ namespace MiningPool {
                 // Clear session data
                 session_id_.clear();
 
-                // Stop accepting new work
+                // Stop work guard first
                 if (work_guard_) {
                     work_guard_.reset();
                 }
 
-                // Close websocket if open
-                try {
-                    if (config_.use_tls && wss_ && wss_->is_open()) {
-                        beast::error_code ec;
-                        wss_->close(websocket::close_code::normal, ec);
-                    }
-                    if (!config_.use_tls && ws_ && ws_->is_open()) {
-                        beast::error_code ec;
-                        ws_->close(websocket::close_code::normal, ec);
-                    }
-                } catch (...) {
-                    // Ignore close errors
-                }
+                // Shutdown connection cleanly
+                shutdown_connection();
 
-                // Stop io_context
-                ioc_.stop();
+                // Wake up all condition variables
+                incoming_cv_.notify_all();
+                outgoing_cv_.notify_all();
 
-                // Wait for io_thread to finish
+                // Wait for threads to finish
+                LOG_DEBUG("CLIENT", "Waiting for threads to finish...");
+                // io_thread should exit quickly now
                 if (io_thread_ && io_thread_->joinable()) {
                     io_thread_->join();
+                    LOG_DEBUG("CLIENT", "io_thread joined successfully");
                 }
                 io_thread_.reset();
 
-                // Wait for other threads
+                // message_processor_thread
                 if (message_processor_thread_.joinable()) {
-                    // Notify to wake up
                     incoming_cv_.notify_all();
                     message_processor_thread_.join();
+                    LOG_DEBUG("CLIENT", "message_processor_thread joined successfully");
                 }
 
+                // keepalive_thread
                 if (keepalive_thread_.joinable()) {
                     keepalive_thread_.join();
+                    LOG_DEBUG("CLIENT", "keepalive_thread joined successfully");
                 }
+
+                LOG_DEBUG("CLIENT", "All threads stopped cleanly");
 
                 // Clear websocket objects
                 wss_.reset();
@@ -1388,6 +1431,12 @@ namespace MiningPool {
 
                 // Reset io_context for fresh start
                 ioc_.restart();
+                // Reset work guard
+                work_guard_ = std::make_unique<net::executor_work_guard<net::io_context::executor_type> >(
+                    ioc_.get_executor());
+
+                // Reset state for fresh connection
+                running_ = true; // Set running back to true for the new connection
 
                 LOG_INFO("CLIENT", "Attempting to reconnect to ", config_.url, "...");
 
@@ -1400,35 +1449,45 @@ namespace MiningPool {
                     LOG_ERROR("CLIENT", "Reconnection failed");
                     reconnecting_ = false;
 
-                    // Try again if we should
-                    if (running_.load() &&
-                        (config_.reconnect_attempts == 0 ||
-                         reconnect_attempt_count_ < config_.reconnect_attempts)) {
-                        // Schedule another reconnect attempt
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                    // Schedule another attempt if we should
+                    bool should_retry = config_.reconnect_attempts < 0 ||
+                                        reconnect_attempt_count_ < static_cast<unsigned>(config_.reconnect_attempts);
+                    LOG_DEBUG("CLIENT", "Should retry? ", should_retry ? "YES" : "NO",
+                              " (attempts=", reconnect_attempt_count_.load(),
+                              ", max=", config_.reconnect_attempts, ")");
+                    if (should_retry && running_.load()) {
+                        LOG_INFO("CLIENT", "Scheduling another reconnect attempt...");
+                        // Don't immediately retry - wait a bit
+                        std::this_thread::sleep_for(std::chrono::seconds(2));
                         reconnect();
                     } else {
                         // Give up
+                        LOG_ERROR("CLIENT", "Giving up on reconnection");
                         running_ = false;
                         event_handler_->on_error(ErrorCode::CONNECTION_LOST,
-                                                 "Failed to reconnect");
+                                                 "Failed to reconnect after all attempts");
                     }
                 }
             } catch (const std::exception &e) {
                 LOG_ERROR("CLIENT", "Exception in reconnect thread: ", e.what());
                 reconnecting_ = false;
-                running_ = false;
 
+                // Try again if appropriate
                 bool should_retry = running_.load() &&
                                     (config_.reconnect_attempts < 0 ||
                                      reconnect_attempt_count_ < static_cast<unsigned>(config_.reconnect_attempts));
 
                 if (should_retry) {
+                    LOG_INFO("CLIENT", "Scheduling retry after exception");
                     // Schedule another attempt
                     std::thread([this]() {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5000));
                         reconnect();
                     }).detach();
+                } else {
+                    running_ = false;
+                    event_handler_->on_error(ErrorCode::CONNECTION_LOST,
+                                             "Failed to reconnect after exception: " + std::string(e.what()));
                 }
             }
         });

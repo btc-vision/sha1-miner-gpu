@@ -138,6 +138,8 @@ namespace MiningPool {
         // Internal methods
         void io_loop();
 
+        void shutdown_connection();
+
         void keepalive_loop();
 
         void message_processor_loop();
@@ -179,6 +181,8 @@ namespace MiningPool {
         void cleanup_expired_jobs();
 
         void check_pending_timeouts();
+
+        bool is_reconnecting() const;
 
         void reconnect();
 

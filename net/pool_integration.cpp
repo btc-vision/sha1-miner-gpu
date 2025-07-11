@@ -295,7 +295,7 @@ namespace MiningPool {
                     global_nonce_offset_.store(final_nonce);
                 }
 
-                LOG_INFO("MINING", "Mining stopped for job version ", mining_job_version,
+                LOG_DEBUG("MINING", "Mining stopped for job version ", mining_job_version,
                          " at nonce offset ", final_nonce);
             } catch (const std::exception &e) {
                 LOG_ERROR("MINING", "Mining loop exception: ", e.what());

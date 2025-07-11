@@ -562,7 +562,7 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
     //g_shutdown = true;
 
     // Return the final nonce offset so caller knows where we stopped
-    LOG_INFO("MINING", "Mining stopped at nonce offset: ", global_nonce_offset);
+    LOG_DEBUG("MINING", "Mining stopped at nonce offset: ", global_nonce_offset);
     return global_nonce_offset;
 }
 
