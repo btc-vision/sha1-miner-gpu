@@ -280,13 +280,6 @@ extern "C" void launch_mining_kernel_amd(
     const KernelConfig &config,
     uint64_t job_version
 ) {
-    fprintf(stderr, "[DEBUG] launch_mining_kernel_amd called:\n");
-    fprintf(stderr, "  - difficulty: %u\n", difficulty);
-    fprintf(stderr, "  - nonce_offset: %llu\n", (unsigned long long)nonce_offset);
-    fprintf(stderr, "  - blocks: %d\n", config.blocks);
-    fprintf(stderr, "  - threads: %d\n", config.threads_per_block);
-    fprintf(stderr, "  - job_version: %llu\n", (unsigned long long)job_version);
-
     // Get device properties once and cache
     thread_local hipDeviceProp_t props_cached;
     thread_local bool props_initialized = false;
