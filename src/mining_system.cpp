@@ -145,7 +145,7 @@ void MiningSystem::autoTuneParameters() {
                 config_.result_buffer_size = 256;
                 break;
 
-            case AMDArchitecture::RDNA:
+            case AMDArchitecture::RDNA1:
                 blocks_per_sm = 4;
                 optimal_threads = 256;
                 config_.num_streams = 2;
@@ -153,7 +153,7 @@ void MiningSystem::autoTuneParameters() {
                 break;
 
             case AMDArchitecture::GCN:
-            case AMDArchitecture::VEGA:
+            //case AMDArchitecture::VEGA:
                 blocks_per_sm = 4;
                 optimal_threads = 256;
                 config_.num_streams = 2;
