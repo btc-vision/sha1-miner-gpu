@@ -162,17 +162,27 @@ namespace MiningPool {
                         // Get the lowest layer (TCP socket)
                         auto &socket = beast::get_lowest_layer(*wss_);
 
-                        // Open the socket first before setting options
-                        socket.open(tcp::v4(), ec);
-                        if (ec) {
-                            // Try IPv6 if IPv4 fails
+                        // Get the first endpoint to connect to
+                        auto endpoint = results.begin()->endpoint();
+
+                        // Open socket with the correct protocol based on the endpoint
+                        if (endpoint.address().is_v4()) {
+                            socket.open(tcp::v4(), ec);
+                            LOG_DEBUG("CLIENT", "Opened IPv4 socket for address ",
+                                      endpoint.address().to_string());
+                        } else if (endpoint.address().is_v6()) {
                             socket.open(tcp::v6(), ec);
-                            if (ec) {
-                                throw std::runtime_error("Failed to open socket: " + ec.message());
-                            }
+                            LOG_DEBUG("CLIENT", "Opened IPv6 socket for address ",
+                                      endpoint.address().to_string());
+                        } else {
+                            throw std::runtime_error("Unknown address family");
                         }
 
-                        // NOW we can set socket options after the socket is open
+                        if (ec) {
+                            throw std::runtime_error("Failed to open socket: " + ec.message());
+                        }
+
+                        // NOW set socket options after the socket is open
                         socket.set_option(tcp::no_delay(true), ec);
                         if (ec) {
                             LOG_WARN("CLIENT", "Failed to set TCP_NODELAY: ", ec.message());
@@ -205,10 +215,44 @@ namespace MiningPool {
                         }
 
                         // Connect TCP
-                        LOG_DEBUG("CLIENT", "Connecting TCP socket...");
-                        socket.connect(results.begin()->endpoint(), ec);
+                        LOG_DEBUG("CLIENT", "Connecting TCP socket to ", endpoint.address().to_string(),
+                                  ":", endpoint.port(), "...");
+                        socket.connect(endpoint, ec);
                         if (ec) {
-                            throw std::runtime_error("TCP connect failed: " + ec.message());
+                            // If first address fails, try others
+                            bool connected = false;
+                            for (auto it = std::next(results.begin()); it != results.end(); ++it) {
+                                auto alt_endpoint = it->endpoint();
+                                LOG_DEBUG("CLIENT", "First connection failed, trying alternate address: ",
+                                          alt_endpoint.address().to_string(), ":", alt_endpoint.port());
+
+                                // Close and reopen socket with correct protocol
+                                socket.close(ec);
+
+                                if (alt_endpoint.address().is_v4()) {
+                                    socket.open(tcp::v4(), ec);
+                                } else if (alt_endpoint.address().is_v6()) {
+                                    socket.open(tcp::v6(), ec);
+                                }
+
+                                if (!ec) {
+                                    // Re-apply socket options
+                                    socket.set_option(tcp::no_delay(true), ec);
+                                    socket.set_option(boost::asio::socket_base::keep_alive(true), ec);
+                                    socket.set_option(boost::asio::socket_base::reuse_address(true), ec);
+
+                                    socket.connect(alt_endpoint, ec);
+                                    if (!ec) {
+                                        connected = true;
+                                        LOG_INFO("CLIENT", "Connected to alternate address");
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (!connected) {
+                                throw std::runtime_error("TCP connect failed to all addresses: " + ec.message());
+                            }
                         }
 
                         // Configure SSL before handshake
@@ -273,7 +317,6 @@ namespace MiningPool {
                                 // WebSocket version (required)
                                 req.set("Sec-WebSocket-Version", "13");
 
-
                                 // Chrome Sec-Fetch headers
                                 req.set("Sec-Fetch-Dest", "websocket");
                                 req.set("Sec-Fetch-Mode", "websocket");
@@ -288,7 +331,7 @@ namespace MiningPool {
                         wss_->handshake(parsed.host, parsed.path, ec);
 
                         if (ec) {
-                            // Enhanced error handling for WebSocket (FIXED - removed response() call)
+                            // Enhanced error handling for WebSocket
                             if (ec == websocket::error::upgrade_declined) {
                                 LOG_ERROR("CLIENT", "WebSocket upgrade declined by server");
                                 LOG_ERROR("CLIENT", "Check if the path '", parsed.path, "' supports WebSocket");
@@ -310,13 +353,24 @@ namespace MiningPool {
 
                         auto &socket = beast::get_lowest_layer(*ws_);
 
-                        // Open socket first
-                        socket.open(tcp::v4(), ec);
-                        if (ec) {
+                        // Get the first endpoint
+                        auto endpoint = results.begin()->endpoint();
+
+                        // Open socket with correct protocol
+                        if (endpoint.address().is_v4()) {
+                            socket.open(tcp::v4(), ec);
+                            LOG_DEBUG("CLIENT", "Opened IPv4 socket for address ",
+                                      endpoint.address().to_string());
+                        } else if (endpoint.address().is_v6()) {
                             socket.open(tcp::v6(), ec);
-                            if (ec) {
-                                throw std::runtime_error("Failed to open socket: " + ec.message());
-                            }
+                            LOG_DEBUG("CLIENT", "Opened IPv6 socket for address ",
+                                      endpoint.address().to_string());
+                        } else {
+                            throw std::runtime_error("Unknown address family");
+                        }
+
+                        if (ec) {
+                            throw std::runtime_error("Failed to open socket: " + ec.message());
                         }
 
                         // Set options after socket is open
@@ -324,9 +378,39 @@ namespace MiningPool {
                         socket.set_option(boost::asio::socket_base::keep_alive(true), ec);
 
                         // Connect
-                        socket.connect(results.begin()->endpoint(), ec);
+                        socket.connect(endpoint, ec);
                         if (ec) {
-                            throw std::runtime_error("TCP connect failed: " + ec.message());
+                            // Try alternate addresses if available
+                            bool connected = false;
+                            for (auto it = std::next(results.begin()); it != results.end(); ++it) {
+                                auto alt_endpoint = it->endpoint();
+                                LOG_DEBUG("CLIENT", "First connection failed, trying alternate address: ",
+                                          alt_endpoint.address().to_string(), ":", alt_endpoint.port());
+
+                                socket.close(ec);
+
+                                if (alt_endpoint.address().is_v4()) {
+                                    socket.open(tcp::v4(), ec);
+                                } else if (alt_endpoint.address().is_v6()) {
+                                    socket.open(tcp::v6(), ec);
+                                }
+
+                                if (!ec) {
+                                    socket.set_option(tcp::no_delay(true), ec);
+                                    socket.set_option(boost::asio::socket_base::keep_alive(true), ec);
+
+                                    socket.connect(alt_endpoint, ec);
+                                    if (!ec) {
+                                        connected = true;
+                                        LOG_INFO("CLIENT", "Connected to alternate address");
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (!connected) {
+                                throw std::runtime_error("TCP connect failed to all addresses: " + ec.message());
+                            }
                         }
 
                         ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
