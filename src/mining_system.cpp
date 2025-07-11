@@ -275,29 +275,29 @@ void MiningSystem::autoTuneParameters() {
 
     // 3. Calculate total concurrent threads
     uint64_t total_threads = static_cast<uint64_t>(config_.blocks_per_stream) *
-                            static_cast<uint64_t>(config_.threads_per_block) *
-                            static_cast<uint64_t>(config_.num_streams);
+                             static_cast<uint64_t>(config_.threads_per_block) *
+                             static_cast<uint64_t>(config_.num_streams);
 
     // 4. Sanity check total threads (should not exceed ~1 million for stability)
     const uint64_t MAX_TOTAL_THREADS = 1000000;
     if (total_threads > MAX_TOTAL_THREADS) {
         std::cout << "WARNING: Total thread count too high (" << total_threads
-                  << "), adjusting configuration...\n";
+                << "), adjusting configuration...\n";
 
         // First try reducing streams
         while (total_threads > MAX_TOTAL_THREADS && config_.num_streams > 1) {
             config_.num_streams--;
             total_threads = static_cast<uint64_t>(config_.blocks_per_stream) *
-                           static_cast<uint64_t>(config_.threads_per_block) *
-                           static_cast<uint64_t>(config_.num_streams);
+                            static_cast<uint64_t>(config_.threads_per_block) *
+                            static_cast<uint64_t>(config_.num_streams);
         }
 
         // Then reduce blocks if still too high
         while (total_threads > MAX_TOTAL_THREADS && config_.blocks_per_stream > 32) {
             config_.blocks_per_stream = (config_.blocks_per_stream * 3) / 4; // Reduce by 25%
             total_threads = static_cast<uint64_t>(config_.blocks_per_stream) *
-                           static_cast<uint64_t>(config_.threads_per_block) *
-                           static_cast<uint64_t>(config_.num_streams);
+                            static_cast<uint64_t>(config_.threads_per_block) *
+                            static_cast<uint64_t>(config_.num_streams);
         }
     }
 
@@ -316,7 +316,7 @@ void MiningSystem::autoTuneParameters() {
 
     if (config_.num_streams > max_streams_by_memory) {
         std::cout << "Reducing streams from " << config_.num_streams
-                  << " to " << max_streams_by_memory << " due to memory constraints\n";
+                << " to " << max_streams_by_memory << " due to memory constraints\n";
         config_.num_streams = max_streams_by_memory;
     }
 
@@ -329,12 +329,12 @@ void MiningSystem::autoTuneParameters() {
     // 7. Calculate actual occupancy (correctly)
     int max_threads_per_sm = device_props_.maxThreadsPerMultiProcessor;
     int threads_per_sm = blocks_per_sm * config_.threads_per_block;
-    float occupancy = (float)threads_per_sm / (float)max_threads_per_sm * 100.0f;
+    float occupancy = (float) threads_per_sm / (float) max_threads_per_sm * 100.0f;
 
     // Recalculate total threads after all adjustments
     total_threads = static_cast<uint64_t>(config_.blocks_per_stream) *
-                   static_cast<uint64_t>(config_.threads_per_block) *
-                   static_cast<uint64_t>(config_.num_streams);
+                    static_cast<uint64_t>(config_.threads_per_block) *
+                    static_cast<uint64_t>(config_.num_streams);
 
     // Print final configuration
     std::cout << "\nAuto-tuned configuration for " << device_props_.name << ":\n";
@@ -356,7 +356,7 @@ void MiningSystem::autoTuneParameters() {
     std::cout << "  Result buffer size: " << config_.result_buffer_size << "\n";
     std::cout << "  Total concurrent threads: " << total_threads << "\n";
     std::cout << "  Theoretical occupancy: " << std::fixed << std::setprecision(1)
-              << occupancy << "%\n";
+            << occupancy << "%\n";
 
     // Calculate expected memory usage
     size_t total_mem_usage = config_.num_streams * mem_per_stream;
@@ -433,8 +433,8 @@ bool MiningSystem::initialize() {
 }
 
 uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job,
-                                                           std::function<bool()> should_continue,
-                                                           uint64_t start_nonce) {
+                                                            std::function<bool()> should_continue,
+                                                            uint64_t start_nonce) {
     // Copy job to device
     for (int i = 0; i < config_.num_streams; i++) {
         device_jobs_[i].copyFromHost(job);
@@ -530,7 +530,7 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
             global_nonce_offset,
             gpu_pools_[current_stream],
             config,
-            current_job_version_  // Pass current job version
+            current_job_version_ // Pass current job version
         );
 
         stream_data[current_stream].launch_time = launch_start;
@@ -704,7 +704,7 @@ void MiningSystem::launchKernelOnStream(int stream_idx, uint64_t nonce_offset, c
         nonce_offset,
         gpu_pools_[stream_idx],
         config,
-        current_job_version_  // Pass current job version
+        current_job_version_ // Pass current job version
     );
 
     // Record event when kernel completes
@@ -737,10 +737,8 @@ void MiningSystem::processStreamResults(int stream_idx, StreamData &stream_data)
 
     // Update timing statistics
     auto kernel_time = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::high_resolution_clock::now() - kernel_launch_times_[stream_idx]
-    ).count() / 1000.0;
-
-    {
+                           std::chrono::high_resolution_clock::now() - kernel_launch_times_[stream_idx]
+                       ).count() / 1000.0; {
         std::lock_guard<std::mutex> lock(timing_mutex_);
         timing_stats_.kernel_execution_time_ms += kernel_time;
         timing_stats_.kernel_count++;
@@ -852,7 +850,7 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
             double hash_rate = static_cast<double>(total_hashes_.load()) / elapsed.count() / 1e9;
 
             // Helper function to pad string to fixed width
-            auto pad_right = [](const std::string& str, size_t width) -> std::string {
+            auto pad_right = [](const std::string &str, size_t width) -> std::string {
                 if (str.length() >= width) return str;
                 return str + std::string(width - str.length(), ' ');
             };
@@ -863,7 +861,7 @@ void MiningSystem::processResultsOptimized(int stream_idx) {
 
             // Format nonce using snprintf to avoid locale issues
             char nonce_buffer[32];
-            snprintf(nonce_buffer, sizeof(nonce_buffer), "0x%llx", (unsigned long long)results[i].nonce);
+            snprintf(nonce_buffer, sizeof(nonce_buffer), "0x%llx", (unsigned long long) results[i].nonce);
             std::string nonce_str = nonce_buffer;
 
             std::string bits_str = std::to_string(results[i].matching_bits);
@@ -927,9 +925,9 @@ MiningStats MiningSystem::getStats() const {
     stats.hashes_computed = total_hashes_.load();
     stats.candidates_found = total_candidates_.load();
     stats.best_match_bits = best_tracker_.getBestBits();
-    stats.hash_rate = elapsed.count() > 0 ?
-                      static_cast<double>(stats.hashes_computed) / static_cast<double>(elapsed.count()) :
-                      0.0;
+    stats.hash_rate = elapsed.count() > 0
+                          ? static_cast<double>(stats.hashes_computed) / static_cast<double>(elapsed.count())
+                          : 0.0;
 
     return stats;
 }
@@ -1135,12 +1133,13 @@ void MiningSystem::performanceMonitor() {
         uint64_t current_hashes = total_hashes_.load();
         uint64_t hash_diff = current_hashes - last_hashes;
 
-        double instant_rate = elapsed.count() > 0 ?
-                              static_cast<double>(hash_diff) / static_cast<double>(elapsed.count()) / 1e9 :
-                              0.0;
-        double average_rate = total_elapsed.count() > 0 ?
-                              static_cast<double>(current_hashes) / static_cast<double>(total_elapsed.count()) / 1e9 :
-                              0.0;
+        double instant_rate = elapsed.count() > 0
+                                  ? static_cast<double>(hash_diff) / static_cast<double>(elapsed.count()) / 1e9
+                                  : 0.0;
+        double average_rate = total_elapsed.count() > 0
+                                  ? static_cast<double>(current_hashes) / static_cast<double>(total_elapsed.count()) /
+                                    1e9
+                                  : 0.0;
 
         std::cout << "\r[" << total_elapsed.count() << "s] "
                 << "Rate: " << std::fixed << std::setprecision(2)
@@ -1173,12 +1172,13 @@ void MiningSystem::performanceMonitorInterruptible(const std::function<bool()> &
         uint64_t current_hashes = total_hashes_.load();
         uint64_t hash_diff = current_hashes - last_hashes;
 
-        double instant_rate = elapsed.count() > 0 ?
-                              static_cast<double>(hash_diff) / static_cast<double>(elapsed.count()) / 1e9 :
-                              0.0;
-        double average_rate = total_elapsed.count() > 0 ?
-                              static_cast<double>(current_hashes) / static_cast<double>(total_elapsed.count()) / 1e9 :
-                              0.0;
+        double instant_rate = elapsed.count() > 0
+                                  ? static_cast<double>(hash_diff) / static_cast<double>(elapsed.count()) / 1e9
+                                  : 0.0;
+        double average_rate = total_elapsed.count() > 0
+                                  ? static_cast<double>(current_hashes) / static_cast<double>(total_elapsed.count()) /
+                                    1e9
+                                  : 0.0;
 
         std::cout << "\r[" << total_elapsed.count() << "s] "
                 << "Rate: " << std::fixed << std::setprecision(2)
@@ -1231,8 +1231,8 @@ uint64_t MiningSystem::getTotalThreads() const {
 
 uint64_t MiningSystem::getHashesPerKernel() const {
     return static_cast<uint64_t>(config_.blocks_per_stream) *
-               static_cast<uint64_t>(config_.threads_per_block) *
-               static_cast<uint64_t>(NONCES_PER_THREAD);
+           static_cast<uint64_t>(config_.threads_per_block) *
+           static_cast<uint64_t>(NONCES_PER_THREAD);
 }
 
 void MiningSystem::optimizeForGPU() {
@@ -1241,7 +1241,7 @@ void MiningSystem::optimizeForGPU() {
 }
 
 // Additional methods needed by MiningSystem
-uint64_t MiningSystem::runSingleBatch(const MiningJob& job) {
+uint64_t MiningSystem::runSingleBatch(const MiningJob &job) {
     // Copy job to all device streams for consistency
     for (int i = 0; i < config_.num_streams; i++) {
         device_jobs_[i].copyFromHost(job);

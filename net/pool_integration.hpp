@@ -26,10 +26,10 @@ namespace MiningPool {
             int gpu_id = 0;
 
             // Pool settings
-            uint32_t min_share_difficulty = 20;   // Minimum difficulty in BITS (default: 20 bits)
-            uint32_t max_share_difficulty = 55;   // Maximum difficulty in BITS (default: 50 bits)
+            uint32_t min_share_difficulty = 20; // Minimum difficulty in BITS (default: 20 bits)
+            uint32_t max_share_difficulty = 55; // Maximum difficulty in BITS (default: 50 bits)
             bool enable_vardiff = true;
-            double target_share_time = 30.0;      // Target seconds between shares
+            double target_share_time = 30.0; // Target seconds between shares
             uint32_t share_scan_interval_ms = 100;
         };
 
@@ -64,10 +64,10 @@ namespace MiningPool {
             double share_success_rate = 0.0;
 
             // Difficulty - NOW TRACKING BITS
-            uint32_t current_difficulty = 0;      // Current difficulty in BITS
-            uint32_t current_bits = 0;            // Explicit bit tracking (same as current_difficulty)
-            uint32_t best_share_bits = 0;         // Best share found in BITS
-            double total_scaled_difficulty = 0;   // Total difficulty as sum of 2^bits
+            uint32_t current_difficulty = 0; // Current difficulty in BITS
+            uint32_t current_bits = 0; // Explicit bit tracking (same as current_difficulty)
+            uint32_t best_share_bits = 0; // Best share found in BITS
+            double total_scaled_difficulty = 0; // Total difficulty as sum of 2^bits
             double total_difficulty_accepted = 0; // Backward compatibility
 
             // Timing
@@ -117,7 +117,8 @@ namespace MiningPool {
             uint64_t version;
             std::string job_id;
         };
-        std::atomic<JobUpdate*> pending_job_update_{nullptr};
+
+        std::atomic<JobUpdate *> pending_job_update_{nullptr};
 
         std::atomic<uint64_t> job_version_{0};
         std::atomic<bool> job_update_pending_{false};

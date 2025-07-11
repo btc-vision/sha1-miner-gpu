@@ -327,7 +327,7 @@ void auto_tune_parameters(MiningSystem::Config &config, int device_id) {
 
     // Adjust streams based on available memory
     size_t free_mem, total_mem;
-    (void)gpuMemGetInfo(&free_mem, &total_mem);
+    (void) gpuMemGetInfo(&free_mem, &total_mem);
     size_t mem_per_stream = sizeof(MiningResult) * config.result_buffer_size +
                             (config.blocks_per_stream * config.threads_per_block * sizeof(uint32_t) * 5);
     int max_streams_by_memory = free_mem / (mem_per_stream * 2);

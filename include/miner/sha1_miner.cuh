@@ -25,33 +25,33 @@
     #define NONCES_PER_THREAD 16384
     #define DEFAULT_THREADS_PER_BLOCK 256
 #else
-    #define NONCES_PER_THREAD 8192
-    #define DEFAULT_THREADS_PER_BLOCK 512
+#define NONCES_PER_THREAD 8192
+#define DEFAULT_THREADS_PER_BLOCK 512
 #endif
 
 struct MiningJob {
-    uint8_t base_message[32];   // Base message to modify
-    uint32_t target_hash[5];     // Target hash we're trying to match
-    uint32_t difficulty;         // Number of bits that must match
-    uint64_t nonce_offset;       // Starting nonce for this job
+    uint8_t base_message[32]; // Base message to modify
+    uint32_t target_hash[5]; // Target hash we're trying to match
+    uint32_t difficulty; // Number of bits that must match
+    uint64_t nonce_offset; // Starting nonce for this job
 };
 
 // Result structure for found candidates
 struct MiningResult {
-    uint64_t nonce;              // The nonce that produced this result
-    uint32_t hash[5];            // The resulting hash
-    uint32_t matching_bits;      // Number of bits matching the target
-    uint32_t difficulty_score;   // Additional difficulty metric
-    uint64_t job_version;        // Job version for this result
+    uint64_t nonce; // The nonce that produced this result
+    uint32_t hash[5]; // The resulting hash
+    uint32_t matching_bits; // Number of bits matching the target
+    uint32_t difficulty_score; // Additional difficulty metric
+    uint64_t job_version; // Job version for this result
 };
 
 // GPU memory pool for results
 struct ResultPool {
-    MiningResult *results;       // Array of results
-    uint32_t *count;            // Count of results found
-    uint32_t capacity;          // Maximum results
+    MiningResult *results; // Array of results
+    uint32_t *count; // Count of results found
+    uint32_t capacity; // Maximum results
     uint64_t *nonces_processed; // Total nonces processed
-    uint64_t *job_version;      // Current job version (device memory)
+    uint64_t *job_version; // Current job version (device memory)
 };
 
 // Mining statistics
@@ -121,8 +121,11 @@ extern "C" {
 #endif
 
 bool init_mining_system(int device_id);
+
 MiningJob create_mining_job(const uint8_t *message, const uint8_t *target_hash, uint32_t difficulty);
+
 void cleanup_mining_system();
+
 void run_mining_loop(MiningJob job);
 
 #ifdef __cplusplus
@@ -152,11 +155,11 @@ __gpu_device__ __gpu_forceinline__ uint32_t rotl32(uint32_t x, uint32_t n) {
 #ifdef USE_HIP
     return __builtin_rotateleft32(x, n);
 #else
-    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 350
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 350
         return __funnelshift_l(x, x, n);
-    #else
+#else
         return (x << n) | (x >> (32 - n));
-    #endif
+#endif
 #endif
 }
 
@@ -165,14 +168,14 @@ __gpu_device__ __gpu_forceinline__ uint32_t swap_endian(uint32_t x) {
 #ifdef USE_HIP
     return __builtin_bswap32(x);
 #else
-    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 200
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 200
         return __byte_perm(x, 0, 0x0123);
-    #else
+#else
         return ((x & 0xFF000000) >> 24) |
                ((x & 0x00FF0000) >> 8)  |
                ((x & 0x0000FF00) << 8)  |
                ((x & 0x000000FF) << 24);
-    #endif
+#endif
 #endif
 }
 

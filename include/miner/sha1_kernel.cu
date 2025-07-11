@@ -57,14 +57,14 @@ __global__ void sha1_mining_kernel_nvidia(
 
     // Load base message using vectorized access
     uint8_t base_msg[32];
-    uint4* base_msg_vec = (uint4*)base_msg;
-    const uint4* base_message_vec = (const uint4*)base_message;
+    uint4 *base_msg_vec = (uint4 *) base_msg;
+    const uint4 *base_message_vec = (const uint4 *) base_message;
     base_msg_vec[0] = base_message_vec[0];
     base_msg_vec[1] = base_message_vec[1];
 
     // Load target
     uint32_t target[5];
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < 5; i++) {
         target[i] = target_hash[i];
     }
@@ -81,26 +81,26 @@ __global__ void sha1_mining_kernel_nvidia(
 
         // Create message copy with vectorized ops
         uint8_t msg_bytes[32];
-        uint4* msg_bytes_vec = (uint4*)msg_bytes;
+        uint4 *msg_bytes_vec = (uint4 *) msg_bytes;
         msg_bytes_vec[0] = base_msg_vec[0];
         msg_bytes_vec[1] = base_msg_vec[1];
 
         // Apply nonce efficiently
-        uint32_t* msg_words = (uint32_t*)msg_bytes;
+        uint32_t *msg_words = (uint32_t *) msg_bytes;
         msg_words[6] ^= __byte_perm(nonce >> 32, 0, 0x0123);
         msg_words[7] ^= __byte_perm(nonce & 0xFFFFFFFF, 0, 0x0123);
 
         // Convert to big-endian words for SHA-1
         uint32_t W[16];
-        uint32_t* msg_words_local = (uint32_t*)msg_bytes;
-        #pragma unroll
+        uint32_t *msg_words_local = (uint32_t *) msg_bytes;
+#pragma unroll
         for (int j = 0; j < 8; j++) {
             W[j] = __byte_perm(msg_words_local[j], 0, 0x0123);
         }
 
         // Apply SHA-1 padding
         W[8] = 0x80000000;
-        #pragma unroll
+#pragma unroll
         for (int j = 9; j < 15; j++) {
             W[j] = 0;
         }
@@ -114,49 +114,65 @@ __global__ void sha1_mining_kernel_nvidia(
         uint32_t e = H0[4];
 
         // SHA-1 rounds 0-19
-        #pragma unroll
+#pragma unroll
         for (int t = 0; t < 20; t++) {
             if (t >= 16) {
-                W[t & 15] = __funnelshift_l(W[(t-3) & 15] ^ W[(t-8) & 15] ^
-                                           W[(t-14) & 15] ^ W[(t-16) & 15],
-                                           W[(t-3) & 15] ^ W[(t-8) & 15] ^
-                                           W[(t-14) & 15] ^ W[(t-16) & 15], 1);
+                W[t & 15] = __funnelshift_l(W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
+                                            W[(t - 14) & 15] ^ W[(t - 16) & 15],
+                                            W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
+                                            W[(t - 14) & 15] ^ W[(t - 16) & 15], 1);
             }
             uint32_t temp = __funnelshift_l(a, a, 5) + ((b & c) | (~b & d)) + e + K[0] + W[t & 15];
-            e = d; d = c; c = __funnelshift_l(b, b, 30); b = a; a = temp;
+            e = d;
+            d = c;
+            c = __funnelshift_l(b, b, 30);
+            b = a;
+            a = temp;
         }
 
         // Rounds 20-39
-        #pragma unroll
+#pragma unroll
         for (int t = 20; t < 40; t++) {
-            W[t & 15] = __funnelshift_l(W[(t-3) & 15] ^ W[(t-8) & 15] ^
-                                       W[(t-14) & 15] ^ W[(t-16) & 15],
-                                       W[(t-3) & 15] ^ W[(t-8) & 15] ^
-                                       W[(t-14) & 15] ^ W[(t-16) & 15], 1);
+            W[t & 15] = __funnelshift_l(W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
+                                        W[(t - 14) & 15] ^ W[(t - 16) & 15],
+                                        W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
+                                        W[(t - 14) & 15] ^ W[(t - 16) & 15], 1);
             uint32_t temp = __funnelshift_l(a, a, 5) + (b ^ c ^ d) + e + K[1] + W[t & 15];
-            e = d; d = c; c = __funnelshift_l(b, b, 30); b = a; a = temp;
+            e = d;
+            d = c;
+            c = __funnelshift_l(b, b, 30);
+            b = a;
+            a = temp;
         }
 
         // Rounds 40-59
-        #pragma unroll
+#pragma unroll
         for (int t = 40; t < 60; t++) {
-            W[t & 15] = __funnelshift_l(W[(t-3) & 15] ^ W[(t-8) & 15] ^
-                                       W[(t-14) & 15] ^ W[(t-16) & 15],
-                                       W[(t-3) & 15] ^ W[(t-8) & 15] ^
-                                       W[(t-14) & 15] ^ W[(t-16) & 15], 1);
+            W[t & 15] = __funnelshift_l(W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
+                                        W[(t - 14) & 15] ^ W[(t - 16) & 15],
+                                        W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
+                                        W[(t - 14) & 15] ^ W[(t - 16) & 15], 1);
             uint32_t temp = __funnelshift_l(a, a, 5) + ((b & c) | (d & (b ^ c))) + e + K[2] + W[t & 15];
-            e = d; d = c; c = __funnelshift_l(b, b, 30); b = a; a = temp;
+            e = d;
+            d = c;
+            c = __funnelshift_l(b, b, 30);
+            b = a;
+            a = temp;
         }
 
         // Rounds 60-79
-        #pragma unroll
+#pragma unroll
         for (int t = 60; t < 80; t++) {
-            W[t & 15] = __funnelshift_l(W[(t-3) & 15] ^ W[(t-8) & 15] ^
-                                       W[(t-14) & 15] ^ W[(t-16) & 15],
-                                       W[(t-3) & 15] ^ W[(t-8) & 15] ^
-                                       W[(t-14) & 15] ^ W[(t-16) & 15], 1);
+            W[t & 15] = __funnelshift_l(W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
+                                        W[(t - 14) & 15] ^ W[(t - 16) & 15],
+                                        W[(t - 3) & 15] ^ W[(t - 8) & 15] ^
+                                        W[(t - 14) & 15] ^ W[(t - 16) & 15], 1);
             uint32_t temp = __funnelshift_l(a, a, 5) + (b ^ c ^ d) + e + K[3] + W[t & 15];
-            e = d; d = c; c = __funnelshift_l(b, b, 30); b = a; a = temp;
+            e = d;
+            d = c;
+            c = __funnelshift_l(b, b, 30);
+            b = a;
+            a = temp;
         }
 
         // Add initial hash values
@@ -197,7 +213,7 @@ __global__ void sha1_mining_kernel_nvidia(
                         results[idx].matching_bits = matching_bits;
                         results[idx].difficulty_score = matching_bits;
                         results[idx].job_version = job_version;
-                        #pragma unroll
+#pragma unroll
                         for (int j = 0; j < 5; j++) {
                             results[idx].hash[j] = hash[j];
                         }

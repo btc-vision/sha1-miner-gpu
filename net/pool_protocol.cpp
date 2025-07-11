@@ -327,11 +327,11 @@ namespace MiningPool {
         }
 
         j["difficulty_credited"] = difficulty_credited;
-        j["bits_matched"] = bits_matched;  // ADD THIS
+        j["bits_matched"] = bits_matched; // ADD THIS
         if (!message.empty()) j["message"] = message;
         if (share_value > 0) j["share_value"] = share_value;
         if (total_shares > 0) j["total_shares"] = total_shares;
-        if (!difficulty_info.is_null()) j["difficulty_info"] = difficulty_info;  // ADD THIS
+        if (!difficulty_info.is_null()) j["difficulty_info"] = difficulty_info; // ADD THIS
         return j;
     }
 
@@ -466,7 +466,7 @@ namespace MiningPool {
         return msg;
     }
 
-    bool ValidateJobMessage(const JobMessage& msg) {
+    bool ValidateJobMessage(const JobMessage &msg) {
         // Validate difficulty is reasonable
         if (msg.target_difficulty == 0 || msg.target_difficulty > 256) {
             LOG_ERROR("PROTOCOL", "Invalid target difficulty: ", msg.target_difficulty);
@@ -474,13 +474,14 @@ namespace MiningPool {
         }
 
         // Validate target pattern
-        if (msg.target_pattern.length() != 40) { // SHA-1 is 40 hex chars
+        if (msg.target_pattern.length() != 40) {
+            // SHA-1 is 40 hex chars
             LOG_ERROR("PROTOCOL", "Invalid target pattern length: ", msg.target_pattern.length());
             return false;
         }
 
         // Validate hex string
-        for (char c : msg.target_pattern) {
+        for (char c: msg.target_pattern) {
             if (!std::isxdigit(c)) {
                 LOG_ERROR("PROTOCOL", "Invalid hex character in target pattern");
                 return false;
@@ -496,7 +497,7 @@ namespace MiningPool {
         return true;
     }
 
-    bool ValidateShareResultMessage(const ShareResultMessage& msg) {
+    bool ValidateShareResultMessage(const ShareResultMessage &msg) {
         // Validate status is valid
         if (static_cast<int>(msg.status) < 0 || static_cast<int>(msg.status) > 4) {
             LOG_ERROR("PROTOCOL", "Invalid share status");

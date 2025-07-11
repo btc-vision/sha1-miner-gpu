@@ -24,7 +24,7 @@ namespace MiningPool {
 
     // PoolMiningSystem implementation
     PoolMiningSystem::PoolMiningSystem(const Config &config)
-    : config_(config) {
+        : config_(config) {
         // Initialize statistics
         stats_ = {};
         stats_.current_difficulty = config_.min_share_difficulty; // Now in BITS
@@ -55,7 +55,7 @@ namespace MiningPool {
         stop();
 
         // Clean up any pending job updates
-        JobUpdate* update = pending_job_update_.exchange(nullptr);
+        JobUpdate *update = pending_job_update_.exchange(nullptr);
         if (update) {
             delete update;
         }
@@ -227,7 +227,8 @@ namespace MiningPool {
             {
                 std::unique_lock<std::mutex> lock(job_mutex_);
                 job_cv_.wait(lock, [this] {
-                    return (current_job_.has_value() && current_mining_job_.has_value() && mining_active_.load()) || !running_.load();
+                    return (current_job_.has_value() && current_mining_job_.has_value() && mining_active_.load()) || !
+                           running_.load();
                 });
             }
 
@@ -246,8 +247,7 @@ namespace MiningPool {
 
             try {
                 // Get current job data and version
-                MiningJob job_copy;
-                {
+                MiningJob job_copy; {
                     std::lock_guard<std::mutex> lock(job_mutex_);
                     if (!current_mining_job_.has_value()) {
                         LOG_ERROR("MINING", "No mining job available!");
@@ -281,7 +281,8 @@ namespace MiningPool {
                 if (multi_gpu_manager_) {
                     multi_gpu_manager_->updateJobLive(job_copy, mining_job_version);
                     // Pass the global nonce offset atomic reference
-                    multi_gpu_manager_->runMiningInterruptibleWithOffset(job_copy, should_continue, global_nonce_offset_);
+                    multi_gpu_manager_->runMiningInterruptibleWithOffset(
+                        job_copy, should_continue, global_nonce_offset_);
                     // For multi-GPU, the global_nonce_offset_ is updated by the workers directly
                     final_nonce = global_nonce_offset_.load();
                 } else if (mining_system_) {
@@ -296,7 +297,6 @@ namespace MiningPool {
 
                 LOG_INFO("MINING", "Mining stopped for job version ", mining_job_version,
                          " at nonce offset ", final_nonce);
-
             } catch (const std::exception &e) {
                 LOG_ERROR("MINING", "Mining loop exception: ", e.what());
             }
@@ -441,19 +441,19 @@ namespace MiningPool {
         }
 
         LOG_WARN("SHARE", "Scanning ", results_to_process.size(), " results for job ",
-                  current_job_id, " version ", expected_job_version,
-                  " with difficulty ", job_difficulty_bits, " bits");
+                 current_job_id, " version ", expected_job_version,
+                 " with difficulty ", job_difficulty_bits, " bits");
 
         // Submit shares that meet difficulty AND are from current job
         int valid_shares = 0;
         int stale_shares = 0;
 
-        for (const auto &result : results_to_process) {
+        for (const auto &result: results_to_process) {
             // Double-check job version
             if (result.job_version != expected_job_version) {
                 stale_shares++;
                 LOG_WARN("SHARE", "Discarding stale result from job version ",
-                          result.job_version, " (current: ", expected_job_version, ")");
+                         result.job_version, " (current: ", expected_job_version, ")");
                 continue;
             }
 
@@ -520,8 +520,7 @@ namespace MiningPool {
         // Get current job difficulty and version
         uint32_t current_job_difficulty;
         uint64_t expected_job_version;
-        std::string current_job_id;
-        {
+        std::string current_job_id; {
             std::lock_guard<std::mutex> lock(job_mutex_);
             if (current_job_.has_value()) {
                 // Use current difficulty instead of job's original difficulty
@@ -542,7 +541,7 @@ namespace MiningPool {
         std::vector<MiningResult> filtered_results;
         int version_mismatches = 0;
 
-        for (const auto &result : results) {
+        for (const auto &result: results) {
             // Check job version to avoid stale shares
             if (result.job_version != expected_job_version) {
                 version_mismatches++;
@@ -579,8 +578,8 @@ namespace MiningPool {
                 }
 
                 pending_results_.insert(pending_results_.end(),
-                                      filtered_results.begin(),
-                                      filtered_results.end());
+                                        filtered_results.begin(),
+                                        filtered_results.end());
             }
             results_cv_.notify_one();
         }
@@ -601,11 +600,11 @@ namespace MiningPool {
         share.found_time = std::chrono::steady_clock::now();
 
         LOG_TRACE("SHARE", "Submitting share for job ", share.job_id,
-                 ", nonce: 0x", std::hex, share.nonce, std::dec,
-                 ", bits: ", share.matching_bits,
-                 ", hash: ", share.hash,
-                 ", result version: ", result.job_version,
-                 ", current version: ", job_version_.load());
+                  ", nonce: 0x", std::hex, share.nonce, std::dec,
+                  ", bits: ", share.matching_bits,
+                  ", hash: ", share.hash,
+                  ", result version: ", result.job_version,
+                  ", current version: ", job_version_.load());
 
         // Check share queue size
         {
@@ -726,13 +725,11 @@ namespace MiningPool {
                 std::lock_guard<std::mutex> results_lock(pending_results_mutex_);
                 pending_results_.clear();
                 pending_results_.shrink_to_fit();
-            }
-            {
+            } {
                 std::lock_guard<std::mutex> results_lock(results_mutex_);
                 current_mining_results_.clear();
                 current_mining_results_.shrink_to_fit();
-            }
-            {
+            } {
                 std::lock_guard<std::mutex> share_lock(share_mutex_);
                 std::queue<Share> empty;
                 std::swap(share_queue_, empty);
@@ -824,7 +821,8 @@ namespace MiningPool {
         // Log nonce progress periodically
         static uint64_t last_logged_nonce = 0;
         uint64_t current_nonce = global_nonce_offset_.load();
-        if (current_nonce - last_logged_nonce > 1000000000) { // Log every billion nonces
+        if (current_nonce - last_logged_nonce > 1000000000) {
+            // Log every billion nonces
             LOG_DEBUG("POOL", "Nonce progress: ", current_nonce,
                       " (", (current_nonce / 1000000000.0), " billion)");
             last_logged_nonce = current_nonce;
@@ -999,7 +997,7 @@ namespace MiningPool {
         // Log formatted difficulty if available
         if (!result.difficulty_info.is_null() && result.difficulty_info.contains("formatted_difficulty")) {
             LOG_INFO("POOL", Color::BRIGHT_GREEN, "Share accepted! Difficulty: ",
-                 result.difficulty_info["formatted_difficulty"].get<std::string>(), Color::RESET);
+                     result.difficulty_info["formatted_difficulty"].get<std::string>(), Color::RESET);
         } else {
             LOG_INFO("POOL", Color::BRIGHT_GREEN, "Share accepted!", Color::RESET);
         }

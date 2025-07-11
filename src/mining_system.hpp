@@ -124,10 +124,11 @@ public:
         std::vector<MiningResult> results;
         // Get result count from first pool
         uint32_t count;
-        (void)gpuMemcpy(&count, gpu_pools_[0].count, sizeof(uint32_t), gpuMemcpyDeviceToHost);
+        (void) gpuMemcpy(&count, gpu_pools_[0].count, sizeof(uint32_t), gpuMemcpyDeviceToHost);
         if (count > 0 && count <= gpu_pools_[0].capacity) {
             results.resize(count);
-            (void)gpuMemcpy(results.data(), gpu_pools_[0].results, sizeof(MiningResult) * count, gpuMemcpyDeviceToHost);
+            (void) gpuMemcpy(results.data(), gpu_pools_[0].results, sizeof(MiningResult) * count,
+                             gpuMemcpyDeviceToHost);
         }
         return results;
     }
@@ -169,6 +170,7 @@ public:
         int kernel_count = 0;
 
         void reset();
+
         void print() const;
     };
 
@@ -194,7 +196,8 @@ public:
      * @param job Mining job configuration
      * @param should_continue Function that returns false when mining should stop
      */
-    uint64_t runMiningLoopInterruptibleWithOffset(const MiningJob &job, std::function<bool()> should_continue, uint64_t start_nonce);
+    uint64_t runMiningLoopInterruptibleWithOffset(const MiningJob &job, std::function<bool()> should_continue,
+                                                  uint64_t start_nonce);
 
     /**
      * Get current mining statistics
@@ -232,6 +235,7 @@ private:
 
     // Helper methods
     void launchKernelOnStream(int stream_idx, uint64_t nonce_offset, const MiningJob &job);
+
     void processStreamResults(int stream_idx, StreamData &stream_data);
 
     void performanceMonitorInterruptible(const std::function<bool()> &should_continue) const;
@@ -278,16 +282,24 @@ protected:
 
     // Private methods
     bool initializeGPUResources();
+
     void cleanup();
+
     virtual void processResultsOptimized(int stream_idx);
+
     void performanceMonitor();
+
     void printFinalStats();
+
     uint64_t getTotalThreads() const;
+
     uint64_t getHashesPerKernel() const;
 
     // Platform detection and optimization
     GPUVendor detectGPUVendor() const;
+
     void optimizeForGPU();
+
     void autoTuneParameters();
 };
 

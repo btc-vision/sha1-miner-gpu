@@ -50,352 +50,349 @@ namespace MiningPool {
     }
 
     bool PoolClient::connect() {
-    if (connected_.load()) {
-        return true;
-    }
-
-    running_ = true;
-
-    try {
-        auto parsed = parse_url(config_.url);
-
-        // Ensure we're using port 443 for wss://
-        if (parsed.is_secure && parsed.port == "80") {
-            parsed.port = "443";
+        if (connected_.load()) {
+            return true;
         }
 
-        // Start IO thread first
-        io_thread_ = std::make_unique<std::thread>(&PoolClient::io_loop, this);
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        running_ = true;
 
-        // Start auxiliary threads
-        message_processor_thread_ = std::thread(&PoolClient::message_processor_loop, this);
-        keepalive_thread_ = std::thread(&PoolClient::keepalive_loop, this);
+        try {
+            auto parsed = parse_url(config_.url);
 
-        LOG_INFO("CLIENT", "Connecting to ", parsed.host, ":", parsed.port,
-                 " (", parsed.is_secure ? "secure" : "plain", ")");
-        LOG_DEBUG("CLIENT", "WebSocket path: ", parsed.path);
-
-        std::promise<bool> connection_promise;
-        auto connection_future = connection_promise.get_future();
-
-        net::post(ioc_, [this, parsed, &connection_promise]() {
-            try {
-                // DNS resolution
-                tcp::resolver resolver{ioc_};
-                boost::system::error_code ec;
-
-                LOG_DEBUG("CLIENT", "Resolving ", parsed.host, ":", parsed.port);
-                auto const results = resolver.resolve(parsed.host, parsed.port, ec);
-
-                if (ec) {
-                    throw std::runtime_error("DNS resolution failed: " + ec.message());
-                }
-
-                // Log resolved addresses
-                for (auto const& endpoint : results) {
-                    LOG_DEBUG("CLIENT", "Resolved to: ",
-                             endpoint.endpoint().address().to_string(), ":",
-                             endpoint.endpoint().port());
-                }
-
-                if (config_.use_tls) {
-                    // Create SSL context with Chrome fingerprint
-                    ssl_ctx_ = ssl::context(ssl::context::tls_client);
-
-                    // Apply Chrome configuration
-                    ChromeTLSConfig::configureContext(ssl_ctx_);
-
-                    // Certificate verification
-                    if (config_.verify_server_cert) {
-                        ssl_ctx_.set_verify_mode(ssl::verify_peer);
-                        ssl_ctx_.set_default_verify_paths();
-
-                        // More permissive Chrome-like verification
-                        ssl_ctx_.set_verify_callback(
-                            [](bool preverified, ssl::verify_context& ctx) {
-                                if (!preverified) {
-                                    X509_STORE_CTX* cts = ctx.native_handle();
-                                    int error = X509_STORE_CTX_get_error(cts);
-                                    int depth = X509_STORE_CTX_get_error_depth(cts);
-
-                                    // Get certificate info
-                                    X509* cert = X509_STORE_CTX_get_current_cert(cts);
-                                    if (cert) {
-                                        char subject[256];
-                                        X509_NAME_oneline(X509_get_subject_name(cert), subject, sizeof(subject));
-                                        LOG_WARN("CLIENT", "Certificate verification issue at depth ", depth,
-                                                ": ", X509_verify_cert_error_string(error),
-                                                " - Subject: ", subject);
-                                    }
-
-                                    // Chrome allows many certificate issues
-                                    switch (error) {
-                                        case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY:
-                                        case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN:
-                                        case X509_V_ERR_CERT_UNTRUSTED:
-                                        case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE:
-                                        case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT:
-                                        case X509_V_ERR_CERT_HAS_EXPIRED:
-                                        case X509_V_ERR_CERT_NOT_YET_VALID:
-                                            LOG_WARN("CLIENT", "Allowing certificate despite verification issue");
-                                            return true;  // Accept anyway
-                                        default:
-                                            return false;  // Reject
-                                    }
-                                }
-                                return preverified;
-                            });
-                    } else {
-                        ssl_ctx_.set_verify_mode(ssl::verify_none);
-                    }
-
-                    // Load client certificates if specified
-                    if (!config_.tls_cert_file.empty() && !config_.tls_key_file.empty()) {
-                        ssl_ctx_.use_certificate_file(config_.tls_cert_file, ssl::context::pem);
-                        ssl_ctx_.use_private_key_file(config_.tls_key_file, ssl::context::pem);
-                    }
-
-                    // Create WebSocket SSL stream
-                    wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket>>>(ioc_, ssl_ctx_);
-
-                    // Get the lowest layer (TCP socket)
-                    auto& socket = beast::get_lowest_layer(*wss_);
-
-                    // Open the socket first before setting options
-                    socket.open(tcp::v4(), ec);
-                    if (ec) {
-                        // Try IPv6 if IPv4 fails
-                        socket.open(tcp::v6(), ec);
-                        if (ec) {
-                            throw std::runtime_error("Failed to open socket: " + ec.message());
-                        }
-                    }
-
-                    // NOW we can set socket options after the socket is open
-                    socket.set_option(tcp::no_delay(true), ec);
-                    if (ec) {
-                        LOG_WARN("CLIENT", "Failed to set TCP_NODELAY: ", ec.message());
-                        ec.clear();
-                    }
-
-                    socket.set_option(boost::asio::socket_base::keep_alive(true), ec);
-                    if (ec) {
-                        LOG_WARN("CLIENT", "Failed to set SO_KEEPALIVE: ", ec.message());
-                        ec.clear();
-                    }
-
-                    socket.set_option(boost::asio::socket_base::reuse_address(true), ec);
-                    if (ec) {
-                        LOG_WARN("CLIENT", "Failed to set SO_REUSEADDR: ", ec.message());
-                        ec.clear();
-                    }
-
-                    // Set buffer sizes
-                    socket.set_option(boost::asio::socket_base::receive_buffer_size(65536), ec);
-                    if (ec) {
-                        LOG_WARN("CLIENT", "Failed to set receive buffer size: ", ec.message());
-                        ec.clear();
-                    }
-
-                    socket.set_option(boost::asio::socket_base::send_buffer_size(65536), ec);
-                    if (ec) {
-                        LOG_WARN("CLIENT", "Failed to set send buffer size: ", ec.message());
-                        ec.clear();
-                    }
-
-                    // Connect TCP
-                    LOG_DEBUG("CLIENT", "Connecting TCP socket...");
-                    socket.connect(results.begin()->endpoint(), ec);
-                    if (ec) {
-                        throw std::runtime_error("TCP connect failed: " + ec.message());
-                    }
-
-                    // Configure SSL before handshake
-                    auto& ssl_stream = wss_->next_layer();
-                    SSL* ssl = ssl_stream.native_handle();
-                    ChromeTLSConfig::configureSSLStream(ssl, parsed.host);
-
-                    // Perform SSL handshake
-                    LOG_DEBUG("CLIENT", "Starting SSL handshake with ", parsed.host, "...");
-                    ssl_stream.handshake(ssl::stream_base::client, ec);
-
-                    if (ec) {
-                        // Detailed error reporting
-                        std::string error_details;
-                        char err_buf[256];
-                        unsigned long ssl_err;
-
-                        while ((ssl_err = ERR_get_error()) != 0) {
-                            ERR_error_string_n(ssl_err, err_buf, sizeof(err_buf));
-                            error_details += std::string(err_buf) + "; ";
-                        }
-
-                        throw std::runtime_error("SSL handshake failed: " + ec.message() +
-                                               " - OpenSSL: " + error_details);
-                    }
-
-                    // Log connection info
-                    LOG_INFO("CLIENT", Color::GREEN, "SSL connected!", Color::RESET);
-                    LOG_INFO("CLIENT", "  Protocol: ", SSL_get_version(ssl));
-                    LOG_INFO("CLIENT", "  Cipher: ", SSL_get_cipher_name(ssl));
-
-                    // Check ALPN
-                    const unsigned char* alpn_proto = nullptr;
-                    unsigned int alpn_proto_len = 0;
-                    SSL_get0_alpn_selected(ssl, &alpn_proto, &alpn_proto_len);
-                    if (alpn_proto && alpn_proto_len > 0) {
-                        std::string alpn(reinterpret_cast<const char*>(alpn_proto), alpn_proto_len);
-                        LOG_INFO("CLIENT", "  ALPN: ", alpn);
-                    }
-
-                    // Configure WebSocket options BEFORE decorator
-                    wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-
-                    // Set WebSocket decorator with proper headers to fix "bad version"
-                    wss_->set_option(websocket::stream_base::decorator(
-                        [parsed](websocket::request_type &req) {
-                            req.set(http::field::host, parsed.host);
-                            req.set(http::field::upgrade, "websocket");
-                            req.set(http::field::connection, "Upgrade");
-
-                            // Chrome User-Agent
-                            req.set(http::field::user_agent,
-                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36");
-
-                            // Standard Chrome headers
-                            req.set(http::field::accept_language, "en-US,en;q=0.9");
-                            req.set(http::field::cache_control, "no-cache");
-                            req.set(http::field::pragma, "no-cache");
-                            req.set(http::field::origin, "https://" + parsed.host);
-
-                            // WebSocket version (required)
-                            req.set("Sec-WebSocket-Version", "13");
-
-
-                            // Chrome Sec-Fetch headers
-                            req.set("Sec-Fetch-Dest", "websocket");
-                            req.set("Sec-Fetch-Mode", "websocket");
-                            req.set("Sec-Fetch-Site", "same-origin");
-                        }));
-
-                    // WebSocket handshake
-                    LOG_DEBUG("CLIENT", "Starting WebSocket handshake...");
-                    LOG_DEBUG("CLIENT", "  Host: ", parsed.host);
-                    LOG_DEBUG("CLIENT", "  Path: ", parsed.path);
-
-                    wss_->handshake(parsed.host, parsed.path, ec);
-
-                    if (ec) {
-                        // Enhanced error handling for WebSocket (FIXED - removed response() call)
-                        if (ec == websocket::error::upgrade_declined) {
-                            LOG_ERROR("CLIENT", "WebSocket upgrade declined by server");
-                            LOG_ERROR("CLIENT", "Check if the path '", parsed.path, "' supports WebSocket");
-                            LOG_ERROR("CLIENT", "The server might expect a different path or protocol");
-                        } else if (ec == websocket::error::bad_http_version) {
-                            LOG_ERROR("CLIENT", "Bad HTTP version - server might not support WebSocket");
-                        } else if (ec.message().find("bad version") != std::string::npos) {
-                            LOG_ERROR("CLIENT", "WebSocket version mismatch");
-                            LOG_ERROR("CLIENT", "Try removing the permessage-deflate extension");
-                        }
-
-                        throw std::runtime_error("WebSocket handshake failed: " + ec.message() +
-                                               " (category: " + ec.category().name() +
-                                               ", value: " + std::to_string(ec.value()) + ")");
-                    }
-
-                } else {
-                    // Plain WebSocket (non-TLS)
-                    ws_ = std::make_unique<websocket::stream<tcp::socket>>(ioc_);
-
-                    auto& socket = beast::get_lowest_layer(*ws_);
-
-                    // Open socket first
-                    socket.open(tcp::v4(), ec);
-                    if (ec) {
-                        socket.open(tcp::v6(), ec);
-                        if (ec) {
-                            throw std::runtime_error("Failed to open socket: " + ec.message());
-                        }
-                    }
-
-                    // Set options after socket is open
-                    socket.set_option(tcp::no_delay(true), ec);
-                    socket.set_option(boost::asio::socket_base::keep_alive(true), ec);
-
-                    // Connect
-                    socket.connect(results.begin()->endpoint(), ec);
-                    if (ec) {
-                        throw std::runtime_error("TCP connect failed: " + ec.message());
-                    }
-
-                    ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-                    ws_->set_option(websocket::stream_base::decorator(
-                        [parsed](websocket::request_type &req) {
-                            req.set(http::field::host, parsed.host + ":" + parsed.port);
-                            req.set(http::field::upgrade, "websocket");
-                            req.set(http::field::connection, "Upgrade");
-                            req.set(http::field::user_agent, "SHA1-Miner/1.0 Boost.Beast");
-                            req.set("Sec-WebSocket-Version", "13");
-                        }));
-
-                    ws_->handshake(parsed.host + ":" + parsed.port, parsed.path, ec);
-                    if (ec) {
-                        throw std::runtime_error("WebSocket handshake failed: " + ec.message());
-                    }
-                }
-
-                connected_ = true;
-                worker_stats_.connected_since = std::chrono::steady_clock::now();
-
-                LOG_INFO("CLIENT", Color::GREEN, "WebSocket connected successfully!", Color::RESET);
-
-                // Start reading
-                do_read();
-                connection_promise.set_value(true);
-
-            } catch (const std::exception &e) {
-                LOG_ERROR("CLIENT", "Connection failed: ", e.what());
-                connection_promise.set_value(false);
+            // Ensure we're using port 443 for wss://
+            if (parsed.is_secure && parsed.port == "80") {
+                parsed.port = "443";
             }
-        });
 
-        // Wait for connection result
-        if (!connection_future.get()) {
+            // Start IO thread first
+            io_thread_ = std::make_unique<std::thread>(&PoolClient::io_loop, this);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+            // Start auxiliary threads
+            message_processor_thread_ = std::thread(&PoolClient::message_processor_loop, this);
+            keepalive_thread_ = std::thread(&PoolClient::keepalive_loop, this);
+
+            LOG_INFO("CLIENT", "Connecting to ", parsed.host, ":", parsed.port,
+                     " (", parsed.is_secure ? "secure" : "plain", ")");
+            LOG_DEBUG("CLIENT", "WebSocket path: ", parsed.path);
+
+            std::promise<bool> connection_promise;
+            auto connection_future = connection_promise.get_future();
+
+            net::post(ioc_, [this, parsed, &connection_promise]() {
+                try {
+                    // DNS resolution
+                    tcp::resolver resolver{ioc_};
+                    boost::system::error_code ec;
+
+                    LOG_DEBUG("CLIENT", "Resolving ", parsed.host, ":", parsed.port);
+                    auto const results = resolver.resolve(parsed.host, parsed.port, ec);
+
+                    if (ec) {
+                        throw std::runtime_error("DNS resolution failed: " + ec.message());
+                    }
+
+                    // Log resolved addresses
+                    for (auto const &endpoint: results) {
+                        LOG_DEBUG("CLIENT", "Resolved to: ",
+                                  endpoint.endpoint().address().to_string(), ":",
+                                  endpoint.endpoint().port());
+                    }
+
+                    if (config_.use_tls) {
+                        // Create SSL context with Chrome fingerprint
+                        ssl_ctx_ = ssl::context(ssl::context::tls_client);
+
+                        // Apply Chrome configuration
+                        ChromeTLSConfig::configureContext(ssl_ctx_);
+
+                        // Certificate verification
+                        if (config_.verify_server_cert) {
+                            ssl_ctx_.set_verify_mode(ssl::verify_peer);
+                            ssl_ctx_.set_default_verify_paths();
+
+                            // More permissive Chrome-like verification
+                            ssl_ctx_.set_verify_callback(
+                                [](bool preverified, ssl::verify_context &ctx) {
+                                    if (!preverified) {
+                                        X509_STORE_CTX *cts = ctx.native_handle();
+                                        int error = X509_STORE_CTX_get_error(cts);
+                                        int depth = X509_STORE_CTX_get_error_depth(cts);
+
+                                        // Get certificate info
+                                        X509 *cert = X509_STORE_CTX_get_current_cert(cts);
+                                        if (cert) {
+                                            char subject[256];
+                                            X509_NAME_oneline(X509_get_subject_name(cert), subject, sizeof(subject));
+                                            LOG_WARN("CLIENT", "Certificate verification issue at depth ", depth,
+                                                     ": ", X509_verify_cert_error_string(error),
+                                                     " - Subject: ", subject);
+                                        }
+
+                                        // Chrome allows many certificate issues
+                                        switch (error) {
+                                            case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY:
+                                            case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN:
+                                            case X509_V_ERR_CERT_UNTRUSTED:
+                                            case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE:
+                                            case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT:
+                                            case X509_V_ERR_CERT_HAS_EXPIRED:
+                                            case X509_V_ERR_CERT_NOT_YET_VALID:
+                                                LOG_WARN("CLIENT", "Allowing certificate despite verification issue");
+                                                return true; // Accept anyway
+                                            default:
+                                                return false; // Reject
+                                        }
+                                    }
+                                    return preverified;
+                                });
+                        } else {
+                            ssl_ctx_.set_verify_mode(ssl::verify_none);
+                        }
+
+                        // Load client certificates if specified
+                        if (!config_.tls_cert_file.empty() && !config_.tls_key_file.empty()) {
+                            ssl_ctx_.use_certificate_file(config_.tls_cert_file, ssl::context::pem);
+                            ssl_ctx_.use_private_key_file(config_.tls_key_file, ssl::context::pem);
+                        }
+
+                        // Create WebSocket SSL stream
+                        wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket> > >(ioc_, ssl_ctx_);
+
+                        // Get the lowest layer (TCP socket)
+                        auto &socket = beast::get_lowest_layer(*wss_);
+
+                        // Open the socket first before setting options
+                        socket.open(tcp::v4(), ec);
+                        if (ec) {
+                            // Try IPv6 if IPv4 fails
+                            socket.open(tcp::v6(), ec);
+                            if (ec) {
+                                throw std::runtime_error("Failed to open socket: " + ec.message());
+                            }
+                        }
+
+                        // NOW we can set socket options after the socket is open
+                        socket.set_option(tcp::no_delay(true), ec);
+                        if (ec) {
+                            LOG_WARN("CLIENT", "Failed to set TCP_NODELAY: ", ec.message());
+                            ec.clear();
+                        }
+
+                        socket.set_option(boost::asio::socket_base::keep_alive(true), ec);
+                        if (ec) {
+                            LOG_WARN("CLIENT", "Failed to set SO_KEEPALIVE: ", ec.message());
+                            ec.clear();
+                        }
+
+                        socket.set_option(boost::asio::socket_base::reuse_address(true), ec);
+                        if (ec) {
+                            LOG_WARN("CLIENT", "Failed to set SO_REUSEADDR: ", ec.message());
+                            ec.clear();
+                        }
+
+                        // Set buffer sizes
+                        socket.set_option(boost::asio::socket_base::receive_buffer_size(65536), ec);
+                        if (ec) {
+                            LOG_WARN("CLIENT", "Failed to set receive buffer size: ", ec.message());
+                            ec.clear();
+                        }
+
+                        socket.set_option(boost::asio::socket_base::send_buffer_size(65536), ec);
+                        if (ec) {
+                            LOG_WARN("CLIENT", "Failed to set send buffer size: ", ec.message());
+                            ec.clear();
+                        }
+
+                        // Connect TCP
+                        LOG_DEBUG("CLIENT", "Connecting TCP socket...");
+                        socket.connect(results.begin()->endpoint(), ec);
+                        if (ec) {
+                            throw std::runtime_error("TCP connect failed: " + ec.message());
+                        }
+
+                        // Configure SSL before handshake
+                        auto &ssl_stream = wss_->next_layer();
+                        SSL *ssl = ssl_stream.native_handle();
+                        ChromeTLSConfig::configureSSLStream(ssl, parsed.host);
+
+                        // Perform SSL handshake
+                        LOG_DEBUG("CLIENT", "Starting SSL handshake with ", parsed.host, "...");
+                        ssl_stream.handshake(ssl::stream_base::client, ec);
+
+                        if (ec) {
+                            // Detailed error reporting
+                            std::string error_details;
+                            char err_buf[256];
+                            unsigned long ssl_err;
+
+                            while ((ssl_err = ERR_get_error()) != 0) {
+                                ERR_error_string_n(ssl_err, err_buf, sizeof(err_buf));
+                                error_details += std::string(err_buf) + "; ";
+                            }
+
+                            throw std::runtime_error("SSL handshake failed: " + ec.message() +
+                                                     " - OpenSSL: " + error_details);
+                        }
+
+                        // Log connection info
+                        LOG_INFO("CLIENT", Color::GREEN, "SSL connected!", Color::RESET);
+                        LOG_INFO("CLIENT", "  Protocol: ", SSL_get_version(ssl));
+                        LOG_INFO("CLIENT", "  Cipher: ", SSL_get_cipher_name(ssl));
+
+                        // Check ALPN
+                        const unsigned char *alpn_proto = nullptr;
+                        unsigned int alpn_proto_len = 0;
+                        SSL_get0_alpn_selected(ssl, &alpn_proto, &alpn_proto_len);
+                        if (alpn_proto && alpn_proto_len > 0) {
+                            std::string alpn(reinterpret_cast<const char *>(alpn_proto), alpn_proto_len);
+                            LOG_INFO("CLIENT", "  ALPN: ", alpn);
+                        }
+
+                        // Configure WebSocket options BEFORE decorator
+                        wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+
+                        // Set WebSocket decorator with proper headers to fix "bad version"
+                        wss_->set_option(websocket::stream_base::decorator(
+                            [parsed](websocket::request_type &req) {
+                                req.set(http::field::host, parsed.host);
+                                req.set(http::field::upgrade, "websocket");
+                                req.set(http::field::connection, "Upgrade");
+
+                                // Chrome User-Agent
+                                req.set(http::field::user_agent,
+                                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                        "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36");
+
+                                // Standard Chrome headers
+                                req.set(http::field::accept_language, "en-US,en;q=0.9");
+                                req.set(http::field::cache_control, "no-cache");
+                                req.set(http::field::pragma, "no-cache");
+                                req.set(http::field::origin, "https://" + parsed.host);
+
+                                // WebSocket version (required)
+                                req.set("Sec-WebSocket-Version", "13");
+
+
+                                // Chrome Sec-Fetch headers
+                                req.set("Sec-Fetch-Dest", "websocket");
+                                req.set("Sec-Fetch-Mode", "websocket");
+                                req.set("Sec-Fetch-Site", "same-origin");
+                            }));
+
+                        // WebSocket handshake
+                        LOG_DEBUG("CLIENT", "Starting WebSocket handshake...");
+                        LOG_DEBUG("CLIENT", "  Host: ", parsed.host);
+                        LOG_DEBUG("CLIENT", "  Path: ", parsed.path);
+
+                        wss_->handshake(parsed.host, parsed.path, ec);
+
+                        if (ec) {
+                            // Enhanced error handling for WebSocket (FIXED - removed response() call)
+                            if (ec == websocket::error::upgrade_declined) {
+                                LOG_ERROR("CLIENT", "WebSocket upgrade declined by server");
+                                LOG_ERROR("CLIENT", "Check if the path '", parsed.path, "' supports WebSocket");
+                                LOG_ERROR("CLIENT", "The server might expect a different path or protocol");
+                            } else if (ec == websocket::error::bad_http_version) {
+                                LOG_ERROR("CLIENT", "Bad HTTP version - server might not support WebSocket");
+                            } else if (ec.message().find("bad version") != std::string::npos) {
+                                LOG_ERROR("CLIENT", "WebSocket version mismatch");
+                                LOG_ERROR("CLIENT", "Try removing the permessage-deflate extension");
+                            }
+
+                            throw std::runtime_error("WebSocket handshake failed: " + ec.message() +
+                                                     " (category: " + ec.category().name() +
+                                                     ", value: " + std::to_string(ec.value()) + ")");
+                        }
+                    } else {
+                        // Plain WebSocket (non-TLS)
+                        ws_ = std::make_unique<websocket::stream<tcp::socket> >(ioc_);
+
+                        auto &socket = beast::get_lowest_layer(*ws_);
+
+                        // Open socket first
+                        socket.open(tcp::v4(), ec);
+                        if (ec) {
+                            socket.open(tcp::v6(), ec);
+                            if (ec) {
+                                throw std::runtime_error("Failed to open socket: " + ec.message());
+                            }
+                        }
+
+                        // Set options after socket is open
+                        socket.set_option(tcp::no_delay(true), ec);
+                        socket.set_option(boost::asio::socket_base::keep_alive(true), ec);
+
+                        // Connect
+                        socket.connect(results.begin()->endpoint(), ec);
+                        if (ec) {
+                            throw std::runtime_error("TCP connect failed: " + ec.message());
+                        }
+
+                        ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+                        ws_->set_option(websocket::stream_base::decorator(
+                            [parsed](websocket::request_type &req) {
+                                req.set(http::field::host, parsed.host + ":" + parsed.port);
+                                req.set(http::field::upgrade, "websocket");
+                                req.set(http::field::connection, "Upgrade");
+                                req.set(http::field::user_agent, "SHA1-Miner/1.0 Boost.Beast");
+                                req.set("Sec-WebSocket-Version", "13");
+                            }));
+
+                        ws_->handshake(parsed.host + ":" + parsed.port, parsed.path, ec);
+                        if (ec) {
+                            throw std::runtime_error("WebSocket handshake failed: " + ec.message());
+                        }
+                    }
+
+                    connected_ = true;
+                    worker_stats_.connected_since = std::chrono::steady_clock::now();
+
+                    LOG_INFO("CLIENT", Color::GREEN, "WebSocket connected successfully!", Color::RESET);
+
+                    // Start reading
+                    do_read();
+                    connection_promise.set_value(true);
+                } catch (const std::exception &e) {
+                    LOG_ERROR("CLIENT", "Connection failed: ", e.what());
+                    connection_promise.set_value(false);
+                }
+            });
+
+            // Wait for connection result
+            if (!connection_future.get()) {
+                running_ = false;
+                connected_ = false;
+                return false;
+            }
+
+            // Notify handler
+            event_handler_->on_connected();
+
+            // Send initial HELLO message
+            HelloMessage hello;
+            hello.protocol_version = PROTOCOL_VERSION;
+            hello.client_version = "SHA1-Miner/1.0";
+            hello.capabilities = {"gpu", "multi-gpu", "vardiff"};
+            hello.user_agent = "SHA1-Miner";
+
+            Message msg;
+            msg.type = MessageType::HELLO;
+            msg.id = Utils::generate_message_id();
+            msg.timestamp = Utils::current_timestamp_ms();
+            msg.payload = hello.to_json();
+
+            LOG_INFO("CLIENT", "Sending HELLO message");
+            send_message(msg);
+
+            return true;
+        } catch (const std::exception &e) {
+            LOG_ERROR("CLIENT", "Connection error: ", e.what());
             running_ = false;
             connected_ = false;
             return false;
         }
-
-        // Notify handler
-        event_handler_->on_connected();
-
-        // Send initial HELLO message
-        HelloMessage hello;
-        hello.protocol_version = PROTOCOL_VERSION;
-        hello.client_version = "SHA1-Miner/1.0";
-        hello.capabilities = {"gpu", "multi-gpu", "vardiff"};
-        hello.user_agent = "SHA1-Miner";
-
-        Message msg;
-        msg.type = MessageType::HELLO;
-        msg.id = Utils::generate_message_id();
-        msg.timestamp = Utils::current_timestamp_ms();
-        msg.payload = hello.to_json();
-
-        LOG_INFO("CLIENT", "Sending HELLO message");
-        send_message(msg);
-
-        return true;
-
-    } catch (const std::exception &e) {
-        LOG_ERROR("CLIENT", "Connection error: ", e.what());
-        running_ = false;
-        connected_ = false;
-        return false;
     }
-}
 
     void PoolClient::disconnect() {
         if (!running_.load()) {
@@ -479,7 +476,7 @@ namespace MiningPool {
                 pending_requests_[msg.id] = req;
                 LOG_DEBUG("CLIENT", "Added message ID ", msg.id, " (type ", static_cast<int>(msg.type),
                           ") to pending requests");
-                }
+            }
 
             // Queue message for sending
             {
@@ -572,7 +569,7 @@ namespace MiningPool {
                 if (error_msg.find('\xd9') != std::string::npos || error_msg.find('\xda') != std::string::npos ||
                     error_msg.find('\xc6') != std::string::npos) {
                     error_msg = "Connection closed by remote host (error code: " + std::to_string(ec.value()) + ")";
-                    }
+                }
 #endif
                 LOG_ERROR("CLIENT", "Read error: ", error_msg);
             }
@@ -589,7 +586,7 @@ namespace MiningPool {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     reconnect();
                 }).detach();
-                                    }
+            }
             return;
         }
 
@@ -824,9 +821,7 @@ namespace MiningPool {
         if (response.success) {
             authenticated_ = true;
             session_id_ = response.session_id;
-            worker_id_ = response.worker_id;
-
-            {
+            worker_id_ = response.worker_id; {
                 std::lock_guard<std::mutex> lock(stats_mutex_);
                 worker_stats_.worker_id = worker_id_;
 
@@ -863,14 +858,12 @@ namespace MiningPool {
         pool_job.received_time = std::chrono::steady_clock::now();
         pool_job.expiry_time = pool_job.received_time +
                                std::chrono::seconds(job.expires_in_seconds);
-        pool_job.is_active = true;
-
-        {
+        pool_job.is_active = true; {
             std::lock_guard<std::mutex> lock(jobs_mutex_);
 
             // Clean jobs if requested
             if (job.clean_jobs) {
-                for (auto &[id, existing_job] : active_jobs_) {
+                for (auto &[id, existing_job]: active_jobs_) {
                     existing_job.is_active = false;
                     event_handler_->on_job_cancelled(id);
                 }
@@ -1001,8 +994,7 @@ namespace MiningPool {
         worker_stats_.last_share_time = std::chrono::steady_clock::now();
     }
 
-    void PoolClient::handle_difficulty_adjust(const DifficultyAdjustMessage &adjust) {
-        {
+    void PoolClient::handle_difficulty_adjust(const DifficultyAdjustMessage &adjust) { {
             std::lock_guard<std::mutex> lock(stats_mutex_);
             worker_stats_.current_difficulty = adjust.new_difficulty; // NOW IN BITS
         }
@@ -1171,160 +1163,157 @@ namespace MiningPool {
     }
 
     void PoolClient::reconnect() {
-    // Simple guard against concurrent reconnects
-    bool expected = false;
-    if (!reconnecting_.compare_exchange_strong(expected, true)) {
-        return;
-    }
-
-    // Don't reconnect if shutting down
-    if (!running_.load()) {
-        reconnecting_ = false;
-        return;
-    }
-
-    LOG_INFO("CLIENT", "Scheduling reconnection...");
-
-    // We need to do the reconnection from a separate thread to avoid deadlocks
-    std::thread reconnect_thread([this]() {
-        try {
-            // Check max attempts
-            if (config_.reconnect_attempts > 0 &&
-                reconnect_attempt_count_ >= config_.reconnect_attempts) {
-                LOG_ERROR("CLIENT", "Maximum reconnection attempts (",
-                         config_.reconnect_attempts, ") exceeded");
-                running_ = false;
-                reconnecting_ = false;
-                return;
-            }
-
-            reconnect_attempt_count_++;
-
-            // Calculate delay with exponential backoff
-            int delay = config_.reconnect_delay_ms;
-            for (int i = 1; i < reconnect_attempt_count_; i++) {
-                delay = std::min(delay * 2, 30000); // Cap at 30 seconds
-            }
-
-            LOG_INFO("CLIENT", "Reconnection attempt #", reconnect_attempt_count_.load(),
-                     " in ", delay, "ms...");
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-
-            // Check again if we should proceed
-            if (!running_.load()) {
-                reconnecting_ = false;
-                return;
-            }
-
-            // First, properly disconnect everything
-            LOG_INFO("CLIENT", "Disconnecting current connection...");
-
-            // Set flags
-            connected_ = false;
-            authenticated_ = false;
-            write_in_progress_ = false;
-
-            // Clear session data
-            session_id_.clear();
-
-            // Stop accepting new work
-            if (work_guard_) {
-                work_guard_.reset();
-            }
-
-            // Close websocket if open
-            try {
-                if (config_.use_tls && wss_ && wss_->is_open()) {
-                    beast::error_code ec;
-                    wss_->close(websocket::close_code::normal, ec);
-                }
-                if (!config_.use_tls && ws_ && ws_->is_open()) {
-                    beast::error_code ec;
-                    ws_->close(websocket::close_code::normal, ec);
-                }
-            } catch (...) {
-                // Ignore close errors
-            }
-
-            // Stop io_context
-            ioc_.stop();
-
-            // Wait for io_thread to finish
-            if (io_thread_ && io_thread_->joinable()) {
-                io_thread_->join();
-            }
-            io_thread_.reset();
-
-            // Wait for other threads
-            if (message_processor_thread_.joinable()) {
-                // Notify to wake up
-                incoming_cv_.notify_all();
-                message_processor_thread_.join();
-            }
-
-            if (keepalive_thread_.joinable()) {
-                keepalive_thread_.join();
-            }
-
-            // Clear websocket objects
-            wss_.reset();
-            ws_.reset();
-
-            // Clear all queues
-            {
-                std::lock_guard<std::mutex> lock(outgoing_mutex_);
-                std::queue<Message> empty;
-                std::swap(outgoing_queue_, empty);
-            }
-            {
-                std::lock_guard<std::mutex> lock(incoming_mutex_);
-                std::queue<Message> empty;
-                std::swap(incoming_queue_, empty);
-            }
-            {
-                std::lock_guard<std::mutex> lock(pending_mutex_);
-                pending_requests_.clear();
-            }
-
-            // Reset io_context for fresh start
-            ioc_.restart();
-
-            LOG_INFO("CLIENT", "Attempting to reconnect to ", config_.url, "...");
-
-            // Call connect() to establish new connection
-            if (connect()) {
-                LOG_INFO("CLIENT", Color::GREEN, "Reconnection successful!", Color::RESET);
-                reconnect_attempt_count_ = 0;
-                reconnecting_ = false;
-            } else {
-                LOG_ERROR("CLIENT", "Reconnection failed");
-                reconnecting_ = false;
-
-                // Try again if we should
-                if (running_.load() &&
-                    (config_.reconnect_attempts == 0 ||
-                     reconnect_attempt_count_ < config_.reconnect_attempts)) {
-
-                    // Schedule another reconnect attempt
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                    reconnect();
-                } else {
-                    // Give up
-                    running_ = false;
-                    event_handler_->on_error(ErrorCode::CONNECTION_LOST,
-                                           "Failed to reconnect");
-                }
-            }
-        } catch (const std::exception& e) {
-            LOG_ERROR("CLIENT", "Exception in reconnect thread: ", e.what());
-            reconnecting_ = false;
-            running_ = false;
+        // Simple guard against concurrent reconnects
+        bool expected = false;
+        if (!reconnecting_.compare_exchange_strong(expected, true)) {
+            return;
         }
-    });
 
-    reconnect_thread.detach();
-}
+        // Don't reconnect if shutting down
+        if (!running_.load()) {
+            reconnecting_ = false;
+            return;
+        }
+
+        LOG_INFO("CLIENT", "Scheduling reconnection...");
+
+        // We need to do the reconnection from a separate thread to avoid deadlocks
+        std::thread reconnect_thread([this]() {
+            try {
+                // Check max attempts
+                if (config_.reconnect_attempts > 0 &&
+                    reconnect_attempt_count_ >= config_.reconnect_attempts) {
+                    LOG_ERROR("CLIENT", "Maximum reconnection attempts (",
+                              config_.reconnect_attempts, ") exceeded");
+                    running_ = false;
+                    reconnecting_ = false;
+                    return;
+                }
+
+                reconnect_attempt_count_++;
+
+                // Calculate delay with exponential backoff
+                int delay = config_.reconnect_delay_ms;
+                for (int i = 1; i < reconnect_attempt_count_; i++) {
+                    delay = std::min(delay * 2, 30000); // Cap at 30 seconds
+                }
+
+                LOG_INFO("CLIENT", "Reconnection attempt #", reconnect_attempt_count_.load(),
+                         " in ", delay, "ms...");
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+
+                // Check again if we should proceed
+                if (!running_.load()) {
+                    reconnecting_ = false;
+                    return;
+                }
+
+                // First, properly disconnect everything
+                LOG_INFO("CLIENT", "Disconnecting current connection...");
+
+                // Set flags
+                connected_ = false;
+                authenticated_ = false;
+                write_in_progress_ = false;
+
+                // Clear session data
+                session_id_.clear();
+
+                // Stop accepting new work
+                if (work_guard_) {
+                    work_guard_.reset();
+                }
+
+                // Close websocket if open
+                try {
+                    if (config_.use_tls && wss_ && wss_->is_open()) {
+                        beast::error_code ec;
+                        wss_->close(websocket::close_code::normal, ec);
+                    }
+                    if (!config_.use_tls && ws_ && ws_->is_open()) {
+                        beast::error_code ec;
+                        ws_->close(websocket::close_code::normal, ec);
+                    }
+                } catch (...) {
+                    // Ignore close errors
+                }
+
+                // Stop io_context
+                ioc_.stop();
+
+                // Wait for io_thread to finish
+                if (io_thread_ && io_thread_->joinable()) {
+                    io_thread_->join();
+                }
+                io_thread_.reset();
+
+                // Wait for other threads
+                if (message_processor_thread_.joinable()) {
+                    // Notify to wake up
+                    incoming_cv_.notify_all();
+                    message_processor_thread_.join();
+                }
+
+                if (keepalive_thread_.joinable()) {
+                    keepalive_thread_.join();
+                }
+
+                // Clear websocket objects
+                wss_.reset();
+                ws_.reset();
+
+                // Clear all queues
+                {
+                    std::lock_guard<std::mutex> lock(outgoing_mutex_);
+                    std::queue<Message> empty;
+                    std::swap(outgoing_queue_, empty);
+                } {
+                    std::lock_guard<std::mutex> lock(incoming_mutex_);
+                    std::queue<Message> empty;
+                    std::swap(incoming_queue_, empty);
+                } {
+                    std::lock_guard<std::mutex> lock(pending_mutex_);
+                    pending_requests_.clear();
+                }
+
+                // Reset io_context for fresh start
+                ioc_.restart();
+
+                LOG_INFO("CLIENT", "Attempting to reconnect to ", config_.url, "...");
+
+                // Call connect() to establish new connection
+                if (connect()) {
+                    LOG_INFO("CLIENT", Color::GREEN, "Reconnection successful!", Color::RESET);
+                    reconnect_attempt_count_ = 0;
+                    reconnecting_ = false;
+                } else {
+                    LOG_ERROR("CLIENT", "Reconnection failed");
+                    reconnecting_ = false;
+
+                    // Try again if we should
+                    if (running_.load() &&
+                        (config_.reconnect_attempts == 0 ||
+                         reconnect_attempt_count_ < config_.reconnect_attempts)) {
+                        // Schedule another reconnect attempt
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                        reconnect();
+                    } else {
+                        // Give up
+                        running_ = false;
+                        event_handler_->on_error(ErrorCode::CONNECTION_LOST,
+                                                 "Failed to reconnect");
+                    }
+                }
+            } catch (const std::exception &e) {
+                LOG_ERROR("CLIENT", "Exception in reconnect thread: ", e.what());
+                reconnecting_ = false;
+                running_ = false;
+            }
+        });
+
+        reconnect_thread.detach();
+    }
 
     // PoolClientManager implementation
     PoolClientManager::PoolClientManager() = default;

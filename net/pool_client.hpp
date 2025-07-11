@@ -132,6 +132,7 @@ namespace MiningPool {
             std::chrono::steady_clock::time_point timestamp;
             MessageType type;
         };
+
         std::map<uint64_t, PendingRequest> pending_requests_;
 
         // Internal methods
