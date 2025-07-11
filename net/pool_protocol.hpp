@@ -141,9 +141,9 @@ namespace MiningPool {
         std::string pool_name;
         std::string pool_version;
         uint32_t protocol_version;
-        uint32_t min_difficulty; // NOW IN BITS, not linear difficulty
-        std::vector<std::string> features; // e.g., ["vardiff", "unique-targets", "opnet-integration", "bit-difficulty"]
-        std::string motd; // Message of the day
+        uint32_t min_difficulty;
+        std::vector<std::string> features;
+        std::string motd;
 
         nlohmann::json to_json() const;
 
@@ -154,7 +154,7 @@ namespace MiningPool {
         bool success;
         std::string session_id;
         std::string worker_id;
-        uint32_t initial_difficulty = 0; // Initial difficulty in bits
+        uint32_t initial_difficulty = 0;
         ErrorCode error_code;
         std::string error_message;
 
@@ -165,14 +165,14 @@ namespace MiningPool {
 
     struct JobMessage {
         std::string job_id;
-        uint32_t target_difficulty; // NOW IN BITS - number of leading zero bits required
+        uint32_t target_difficulty;
         std::string target_pattern;
-        std::string prefix_data; // Unique salted preimage for this worker
+        std::string prefix_data;
         std::string suffix_data;
-        uint64_t nonce_start; // Full nonce space available
-        uint64_t nonce_end; // 0xFFFFFFFFFFFFFFFF
-        std::string algorithm; // "sha1"
-        nlohmann::json extra_data; // Contains epoch info, salt, etc.
+        uint64_t nonce_start;
+        uint64_t nonce_end;
+        std::string algorithm;
+        nlohmann::json extra_data;
         bool clean_jobs;
         uint32_t expires_in_seconds;
 
@@ -184,12 +184,12 @@ namespace MiningPool {
     struct ShareResultMessage {
         std::string job_id;
         ShareStatus status;
-        uint32_t difficulty_credited;    // Scaled difficulty (2^bits) for reward calculation
-        uint32_t bits_matched = 0;       // Actual bits matched in the share
+        uint32_t difficulty_credited;
+        uint32_t bits_matched = 0;
         std::string message;
         double share_value = 0;
         uint64_t total_shares = 0;
-        nlohmann::json difficulty_info;  // Optional detailed difficulty information
+        nlohmann::json difficulty_info;
 
         nlohmann::json to_json() const;
 
@@ -197,7 +197,7 @@ namespace MiningPool {
     };
 
     struct DifficultyAdjustMessage {
-        uint32_t new_difficulty; // NOW IN BITS
+        uint32_t new_difficulty;
         std::string reason;
         uint32_t effective_in_seconds;
 
@@ -210,12 +210,12 @@ namespace MiningPool {
         uint32_t connected_workers;
         double total_hashrate;
         double shares_per_minute;
-        uint64_t epochs_completed; // Changed from blocks_found
+        uint64_t epochs_completed;
         uint32_t current_epoch_number;
         uint64_t current_epoch_shares;
         double pool_fee_percent;
         double minimum_payout;
-        nlohmann::json extra_info; // Contains detailed epoch and server info
+        nlohmann::json extra_info;
 
         nlohmann::json to_json() const;
 
@@ -224,16 +224,16 @@ namespace MiningPool {
 
     // Connection configuration
     struct PoolConfig {
-        std::string url; // ws://pool.example.com:3333 or wss://...
+        std::string url;
         bool use_tls = false;
-        std::string tls_cert_file; // Optional client certificate
-        std::string tls_key_file; // Optional client key
+        std::string tls_cert_file;
+        std::string tls_key_file;
         bool verify_server_cert = true;
 
         // Reconnection settings
         uint32_t reconnect_delay_ms = 5000;
         uint32_t max_reconnect_delay_ms = 60000;
-        int reconnect_attempts = -1; // -1 = infinite
+        int reconnect_attempts = -1;
 
         // Performance settings
         uint32_t keepalive_interval_s = 30;
@@ -248,16 +248,15 @@ namespace MiningPool {
         bool debug_mode = false;
     };
 
-    // Worker statistics - updated for bit-based difficulty
     struct WorkerStats {
         std::string worker_id;
         std::chrono::steady_clock::time_point connected_since;
         uint64_t shares_accepted = 0;
         uint64_t shares_rejected = 0;
-        double total_difficulty_accepted = 0;  // Total scaled difficulty (sum of 2^bits)
+        double total_difficulty_accepted = 0;
         double average_hashrate = 0;
         double current_hashrate = 0;
-        uint32_t current_difficulty = 0;       // Current difficulty in BITS
+        uint32_t current_difficulty = 0;
         std::chrono::steady_clock::time_point last_share_time;
         std::chrono::steady_clock::time_point last_job_time;
     };

@@ -11,6 +11,9 @@
 #include <condition_variable>
 
 namespace MiningPool {
+    static constexpr size_t MAX_SHARE_QUEUE_SIZE = 10000;
+    static constexpr size_t MAX_PENDING_RESULTS = 50000;
+
     // Pool-aware mining system that integrates with the existing miner
     class PoolMiningSystem : public IPoolEventHandler {
     public:
@@ -101,6 +104,18 @@ namespace MiningPool {
         MiningJob convert_to_mining_job(const JobMessage &job_msg);
 
     private:
+        std::vector<MiningResult> pending_results_;
+        std::mutex pending_results_mutex_;
+
+        // ADD: Better job synchronization
+        struct JobUpdate {
+            PoolJob pool_job;
+            MiningJob mining_job;
+            uint64_t version;
+            std::string job_id;
+        };
+        std::atomic<JobUpdate*> pending_job_update_{nullptr};
+
         std::atomic<uint64_t> job_version_{0};
         std::atomic<bool> job_update_pending_{false};
 

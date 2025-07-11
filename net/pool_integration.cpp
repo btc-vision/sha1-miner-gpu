@@ -34,7 +34,28 @@ namespace MiningPool {
     }
 
     PoolMiningSystem::~PoolMiningSystem() {
+        // Ensure proper cleanup order
+        running_ = false;
+        mining_active_ = false;
+
+        // Wake up all waiting threads
+        job_cv_.notify_all();
+        share_cv_.notify_all();
+        results_cv_.notify_all();
+
+        // Stop pool client first
+        if (pool_client_) {
+            pool_client_->disconnect();
+        }
+
+        // Then stop mining
         stop();
+
+        // Clean up any pending job updates
+        JobUpdate* update = pending_job_update_.exchange(nullptr);
+        if (update) {
+            delete update;
+        }
     }
 
     bool PoolMiningSystem::start() {
@@ -339,29 +360,29 @@ namespace MiningPool {
     }
 
     void PoolMiningSystem::scan_for_shares() {
-        std::vector<MiningResult> current_results;
+        std::vector<MiningResult> results_to_process;
         std::string current_job_id;
         uint32_t job_difficulty_bits;
         uint64_t expected_job_version;
 
+        // Swap pending results to process them
         {
-            std::lock_guard<std::mutex> lock(results_mutex_);
-            if (current_mining_results_.empty()) {
+            std::lock_guard<std::mutex> lock(pending_results_mutex_);
+            if (pending_results_.empty()) {
                 return;
             }
-            current_results = std::move(current_mining_results_);
-            current_mining_results_.clear();
+            results_to_process.swap(pending_results_);
         }
 
+        // Get current job info
         {
             std::lock_guard<std::mutex> lock(job_mutex_);
-            current_job_id = current_job_id_for_mining_;
-            if (current_job_.has_value()) {
-                job_difficulty_bits = current_job_->job_data.target_difficulty;
-                expected_job_version = job_version_.load();
-            } else {
+            if (!current_job_.has_value()) {
                 return;
             }
+            current_job_id = current_job_->job_id;
+            job_difficulty_bits = current_job_->job_data.target_difficulty;
+            expected_job_version = job_version_.load();
         }
 
         if (current_job_id.empty()) {
@@ -369,10 +390,10 @@ namespace MiningPool {
         }
 
         // Submit shares that meet difficulty AND are from current job
-        for (const auto &result : current_results) {
-            // Check job version to avoid stale shares
+        for (const auto &result : results_to_process) {
+            // Double-check job version
             if (result.job_version != expected_job_version) {
-                LOG_DEBUG("SHARE", "Discarding result from old job version ",
+                LOG_DEBUG("SHARE", "Discarding stale result from job version ",
                           result.job_version, " (current: ", expected_job_version, ")");
                 continue;
             }
@@ -430,22 +451,33 @@ namespace MiningPool {
     void PoolMiningSystem::process_mining_results(const std::vector<MiningResult> &results) {
         LOG_DEBUG("SHARE", "Processing ", results.size(), " mining results");
 
-        // Get current job difficulty
-        uint32_t current_job_difficulty; {
+        // Get current job difficulty and version
+        uint32_t current_job_difficulty;
+        uint64_t expected_job_version;
+        {
             std::lock_guard<std::mutex> lock(job_mutex_);
             if (current_job_.has_value()) {
                 current_job_difficulty = current_job_->job_data.target_difficulty;
+                expected_job_version = job_version_.load();
             } else {
                 LOG_ERROR("SHARE", "No current job, discarding results");
                 return;
             }
         }
 
-        LOG_DEBUG("SHARE", "Current job requires difficulty: ", current_job_difficulty);
+        LOG_DEBUG("SHARE", "Current job requires difficulty: ", current_job_difficulty,
+                  ", version: ", expected_job_version);
 
-        // Filter results based on current job difficulty
+        // Filter results based on current job difficulty and version
         std::vector<MiningResult> filtered_results;
-        for (const auto &result: results) {
+        for (const auto &result : results) {
+            // Check job version to avoid stale shares
+            if (result.job_version != expected_job_version) {
+                LOG_DEBUG("SHARE", "Discarding result from old job version ",
+                          result.job_version, " (current: ", expected_job_version, ")");
+                continue;
+            }
+
             if (result.matching_bits >= current_job_difficulty) {
                 filtered_results.push_back(result);
             }
@@ -455,12 +487,20 @@ namespace MiningPool {
             LOG_DEBUG("SHARE", "Found ", filtered_results.size(), " results meeting difficulty ",
                       current_job_difficulty, " (out of ", results.size(), " total)");
 
-            // Store only filtered results for share scanning
+            // Use double buffer to avoid race conditions
             {
-                std::lock_guard<std::mutex> lock(results_mutex_);
-                current_mining_results_.insert(current_mining_results_.end(),
-                                               filtered_results.begin(),
-                                               filtered_results.end());
+                std::lock_guard<std::mutex> lock(pending_results_mutex_);
+
+                // Limit pending results to prevent memory issues
+                if (pending_results_.size() + filtered_results.size() > MAX_PENDING_RESULTS) {
+                    LOG_WARN("SHARE", "Pending results buffer full, dropping oldest results");
+                    size_t to_remove = (pending_results_.size() + filtered_results.size()) - MAX_PENDING_RESULTS;
+                    pending_results_.erase(pending_results_.begin(), pending_results_.begin() + to_remove);
+                }
+
+                pending_results_.insert(pending_results_.end(),
+                                      filtered_results.begin(),
+                                      filtered_results.end());
             }
             results_cv_.notify_one();
         }
@@ -476,26 +516,21 @@ namespace MiningPool {
         Share share;
         share.job_id = current_job_->job_id;
         share.nonce = result.nonce;
-        share.hash = hash_to_hex(result.hash); // Use the safe version
+        share.hash = hash_to_hex(result.hash);
         share.matching_bits = result.matching_bits;
         share.found_time = std::chrono::steady_clock::now();
 
-        // Submit directly via pool client
-        if (pool_client_ && pool_client_->is_connected() && pool_client_->is_authenticated()) {
-            try {
-                pool_client_->submit_share(share);
-
-                // Update stats
-                std::lock_guard<std::mutex> stats_lock(stats_mutex_);
-                stats_.shares_submitted++;
-            } catch (const std::exception &e) {
-                LOG_ERROR("SHARE", "Exception during share submission: ", e.what());
+        // Check share queue size
+        {
+            std::lock_guard<std::mutex> queue_lock(share_mutex_);
+            if (share_queue_.size() >= MAX_SHARE_QUEUE_SIZE) {
+                LOG_WARN("SHARE", "Share queue full (", share_queue_.size(),
+                         " shares), dropping oldest share");
+                share_queue_.pop();
             }
-        } else {
-            LOG_ERROR("SHARE", "Cannot submit share - pool client not connected or not authenticated");
-            LOG_ERROR("SHARE", "  Connected: ", (pool_client_ ? pool_client_->is_connected() : false));
-            LOG_ERROR("SHARE", "  Authenticated: ", (pool_client_ ? pool_client_->is_authenticated() : false));
+            share_queue_.push(share);
         }
+        share_cv_.notify_one();
     }
 
     MiningJob PoolMiningSystem::convert_to_mining_job(const JobMessage &job_msg) {
@@ -749,27 +784,44 @@ namespace MiningPool {
     }
 
     void PoolMiningSystem::update_mining_job_live(const PoolJob &pool_job) {
-        // Increment job version
-        uint64_t new_version = job_version_.fetch_add(1) + 1;
+        // Create new job update
+        auto new_update = std::make_unique<JobUpdate>();
+        new_update->pool_job = pool_job;
+        new_update->mining_job = convert_to_mining_job(pool_job.job_data);
+        new_update->version = job_version_.fetch_add(1) + 1;
+        new_update->job_id = pool_job.job_id;
 
-        LOG_INFO("POOL", "Updating job live to version ", new_version);
+        LOG_INFO("POOL", "Updating job live to version ", new_update->version);
 
-        // Convert to mining job
-        MiningJob new_mining_job = convert_to_mining_job(pool_job.job_data);
+        // Atomically swap the pending update
+        JobUpdate* old_update = pending_job_update_.exchange(new_update.release());
+        if (old_update) {
+            delete old_update;
+        }
 
-        // Update job data atomically
+        // Update job data with proper synchronization
         {
             std::lock_guard<std::mutex> lock(job_mutex_);
+
+            // Get the pending update
+            JobUpdate* update = pending_job_update_.exchange(nullptr);
+            if (!update) {
+                return;
+            }
 
             // Store old job ID for logging
             std::string old_job_id = current_job_id_for_mining_;
 
             // Update current job
-            current_job_ = pool_job;
-            current_mining_job_ = new_mining_job;  // CRITICAL: Set this!
-            current_job_id_for_mining_ = pool_job.job_id;
+            current_job_ = update->pool_job;
+            current_mining_job_ = update->mining_job;
+            current_job_id_for_mining_ = update->job_id;
 
             // Clear old results
+            {
+                std::lock_guard<std::mutex> results_lock(pending_results_mutex_);
+                pending_results_.clear();
+            }
             {
                 std::lock_guard<std::mutex> results_lock(results_mutex_);
                 current_mining_results_.clear();
@@ -779,18 +831,21 @@ namespace MiningPool {
             if (!mining_active_.load()) {
                 LOG_INFO("POOL", "Mining not active yet, notifying mining thread");
                 job_cv_.notify_all();
+                delete update;
                 return;
             }
 
             // Update GPU job data WITHOUT stopping
             if (multi_gpu_manager_) {
-                multi_gpu_manager_->updateJobLive(new_mining_job, new_version);
+                multi_gpu_manager_->updateJobLive(update->mining_job, update->version);
             } else if (mining_system_) {
-                mining_system_->updateJobLive(new_mining_job, new_version);
+                mining_system_->updateJobLive(update->mining_job, update->version);
             }
 
-            LOG_INFO("POOL", "Switched from job ", old_job_id, " to ", pool_job.job_id,
-                     " without stopping mining");
+            LOG_INFO("POOL", "Switched from job ", old_job_id, " to ", update->job_id,
+                     " without stopping mining (version ", update->version, ")");
+
+            delete update;
         }
     }
 

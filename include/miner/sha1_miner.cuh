@@ -1,6 +1,5 @@
 #pragma once
 #include "gpu_platform.hpp"
-#include <cstdint>
 #include <sstream>
 #include <iomanip>
 #include <vector>
@@ -23,41 +22,36 @@
 #define MAX_CANDIDATES_PER_BATCH 1024
 
 #ifdef USE_HIP
-    #define NONCES_PER_THREAD 402653184 //201326592
+    #define NONCES_PER_THREAD 402653184
     #define DEFAULT_THREADS_PER_BLOCK 512
 #else
     #define NONCES_PER_THREAD 8192
     #define DEFAULT_THREADS_PER_BLOCK 512
 #endif
 
-
-// Debug mode flag
-#define SHA1_MINER_DEBUG 0
-#define DEBUG_SHA1 true
-
 struct MiningJob {
-    uint8_t base_message[32]; // Base message to modify
-    uint32_t target_hash[5]; // Target hash we're trying to match
-    uint32_t difficulty; // Number of bits that must match
-    uint64_t nonce_offset; // Starting nonce for this job
+    uint8_t base_message[32];   // Base message to modify
+    uint32_t target_hash[5];     // Target hash we're trying to match
+    uint32_t difficulty;         // Number of bits that must match
+    uint64_t nonce_offset;       // Starting nonce for this job
 };
 
 // Result structure for found candidates
 struct MiningResult {
-    uint64_t nonce; // The nonce that produced this result
-    uint32_t hash[5]; // The resulting hash
-    uint32_t matching_bits; // Number of bits matching the target
-    uint32_t difficulty_score; // Additional difficulty metric
-    int64_t job_version;
+    uint64_t nonce;              // The nonce that produced this result
+    uint32_t hash[5];            // The resulting hash
+    uint32_t matching_bits;      // Number of bits matching the target
+    uint32_t difficulty_score;   // Additional difficulty metric
+    uint64_t job_version;        // Job version for this result
 };
 
 // GPU memory pool for results
 struct ResultPool {
-    MiningResult *results;
-    uint32_t *count;
-    uint32_t capacity;
-    uint64_t *nonces_processed;
-    uint64_t *job_version;
+    MiningResult *results;       // Array of results
+    uint32_t *count;            // Count of results found
+    uint32_t capacity;          // Maximum results
+    uint64_t *nonces_processed; // Total nonces processed
+    uint64_t *job_version;      // Current job version (device memory)
 };
 
 // Mining statistics
@@ -70,25 +64,16 @@ struct MiningStats {
 
 // Kernel launch parameters
 struct KernelConfig {
-    mutable int blocks;
-    mutable int threads_per_block;
+    int blocks;
+    int threads_per_block;
     int shared_memory_size;
     gpuStream_t stream;
-};
-
-struct JobUpdateRequest {
-    uint32_t target_hash[5];
-    uint8_t base_message[32];
-    uint32_t difficulty;
-    uint64_t job_version;
-    bool job_updated;
 };
 
 // Device memory holder for mining job
 struct DeviceMiningJob {
     uint8_t *base_message;
     uint32_t *target_hash;
-    JobUpdateRequest *job_update;  // For live updates
 
     void allocate() {
         gpuError_t err = gpuMalloc(&base_message, 32);
@@ -103,91 +88,30 @@ struct DeviceMiningJob {
         if (err != gpuSuccess) {
             fprintf(stderr, "Failed to allocate device memory for target_hash: %s\n",
                     gpuGetErrorString(err));
-            (void)gpuFree(base_message);
+            gpuFree(base_message);
             base_message = nullptr;
             target_hash = nullptr;
-            return;
-        }
-
-        // Allocate job update structure if using live updates
-        err = gpuMalloc(&job_update, sizeof(JobUpdateRequest));
-        if (err != gpuSuccess) {
-            fprintf(stderr, "Failed to allocate device memory for job_update: %s\n",
-                    gpuGetErrorString(err));
-            (void)gpuFree(base_message);
-            (void)gpuFree(target_hash);
-            base_message = nullptr;
-            target_hash = nullptr;
-            job_update = nullptr;
         }
     }
 
     void free() {
         if (base_message) {
-            gpuError_t err = gpuFree(base_message);
-            if (err != gpuSuccess) {
-                fprintf(stderr, "Warning: Failed to free base_message: %s\n", gpuGetErrorString(err));
-            }
+            gpuFree(base_message);
             base_message = nullptr;
         }
         if (target_hash) {
-            gpuError_t err = gpuFree(target_hash);
-            if (err != gpuSuccess) {
-                fprintf(stderr, "Warning: Failed to free target_hash: %s\n", gpuGetErrorString(err));
-            }
+            gpuFree(target_hash);
             target_hash = nullptr;
-        }
-        if (job_update) {
-            gpuError_t err = gpuFree(job_update);
-            if (err != gpuSuccess) {
-                fprintf(stderr, "Warning: Failed to free job_update: %s\n", gpuGetErrorString(err));
-            }
-            job_update = nullptr;
         }
     }
 
     void copyFromHost(const MiningJob &job) const {
-        gpuError_t err = gpuMemcpy(base_message, job.base_message, 32, gpuMemcpyHostToDevice);
-        if (err != gpuSuccess) {
-            fprintf(stderr, "Failed to copy base_message to device: %s\n", gpuGetErrorString(err));
-        }
-        err = gpuMemcpy(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice);
-        if (err != gpuSuccess) {
-            fprintf(stderr, "Failed to copy target_hash to device: %s\n", gpuGetErrorString(err));
-        }
+        gpuMemcpy(base_message, job.base_message, 32, gpuMemcpyHostToDevice);
+        gpuMemcpy(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice);
     }
 
-    void updateJob(const MiningJob &job, uint64_t job_version) const {
-        if (!job_update) {
-            fprintf(stderr, "Warning: job_update is null, cannot update job\n");
-            return;
-        }
-
-        // Prepare update on host
-        JobUpdateRequest update;
-        memcpy(update.base_message, job.base_message, 32);
-        memcpy(update.target_hash, job.target_hash, 5 * sizeof(uint32_t));
-        update.difficulty = job.difficulty;
-        update.job_version = job_version;
-        update.job_updated = true;  // Set the flag
-
-        // Copy entire structure to device
-        gpuError_t err = gpuMemcpy(job_update, &update, sizeof(JobUpdateRequest), gpuMemcpyHostToDevice);
-        if (err != gpuSuccess) {
-            fprintf(stderr, "Failed to update job on device: %s\n", gpuGetErrorString(err));
-            return;
-        }
-
-        // Also update the main job data for consistency
-        err = gpuMemcpy(base_message, job.base_message, 32, gpuMemcpyHostToDevice);
-        if (err != gpuSuccess) {
-            fprintf(stderr, "Failed to update base_message: %s\n", gpuGetErrorString(err));
-        }
-
-        err = gpuMemcpy(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice);
-        if (err != gpuSuccess) {
-            fprintf(stderr, "Failed to update target_hash: %s\n", gpuGetErrorString(err));
-        }
+    void updateFromHost(const MiningJob &job) const {
+        copyFromHost(job); // Same as copy, but clearer intent
     }
 };
 
@@ -196,16 +120,9 @@ struct DeviceMiningJob {
 extern "C" {
 #endif
 
-// Initialize mining system
 bool init_mining_system(int device_id);
-
-// Create a new mining job
 MiningJob create_mining_job(const uint8_t *message, const uint8_t *target_hash, uint32_t difficulty);
-
-// Cleanup
 void cleanup_mining_system();
-
-// Mining loop function
 void run_mining_loop(MiningJob job);
 
 #ifdef __cplusplus
@@ -215,66 +132,75 @@ void run_mining_loop(MiningJob job);
 // C++ only functions (not extern "C")
 #ifdef __cplusplus
 
-// Launch mining kernel - uses C++ references
-void launch_mining_kernel(
+// Forward declare the platform-specific launch functions
+#ifdef USE_HIP
+void launch_mining_kernel_hip(
     const DeviceMiningJob &device_job,
     uint32_t difficulty,
     uint64_t nonce_offset,
     const ResultPool &pool,
-    const KernelConfig &config
+    const KernelConfig &config,
+    uint64_t job_version
 );
-
+#else
+void launch_mining_kernel_nvidia(
+    const DeviceMiningJob &device_job,
+    uint32_t difficulty,
+    uint64_t nonce_offset,
+    const ResultPool &pool,
+    const KernelConfig &config,
+    uint64_t job_version
+);
 #endif
+
+// Generic launch function that delegates to platform-specific implementation
+inline void launch_mining_kernel(
+    const DeviceMiningJob &device_job,
+    uint32_t difficulty,
+    uint64_t nonce_offset,
+    const ResultPool &pool,
+    const KernelConfig &config,
+    uint64_t job_version
+) {
+#ifdef USE_HIP
+    launch_mining_kernel_hip(device_job, difficulty, nonce_offset, pool, config, job_version);
+#else
+    launch_mining_kernel_nvidia(device_job, difficulty, nonce_offset, pool, config, job_version);
+#endif
+}
+
+#endif // __cplusplus
 
 // Device functions for SHA-1 computation
 #if defined(__CUDACC__) || defined(__HIPCC__)
 
-// Debug macros for device code
-#if SHA1_MINER_DEBUG && (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__))
-#define DEVICE_DEBUG_PRINT(...) \
-    if (threadIdx.x == 0 && blockIdx.x == 0) { \
-        printf("[DEVICE] " __VA_ARGS__); \
-    }
-#else
-#define DEVICE_DEBUG_PRINT(...)
-#endif
-
 // Platform-optimized rotation function
 __gpu_device__ __gpu_forceinline__ uint32_t rotl32(uint32_t x, uint32_t n) {
 #ifdef USE_HIP
-    // AMD GPUs - use rotate intrinsic if available
     return __builtin_rotateleft32(x, n);
 #else
-// NVIDIA GPUs - use funnel shift on newer architectures
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 350
+    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 350
         return __funnelshift_l(x, x, n);
-#else
+    #else
         return (x << n) | (x >> (32 - n));
-#endif
+    #endif
 #endif
 }
 
 // Platform-optimized endian swap
 __gpu_device__ __gpu_forceinline__ uint32_t swap_endian(uint32_t x) {
 #ifdef USE_HIP
-    // AMD GPUs - use bswap intrinsic
     return __builtin_bswap32(x);
 #else
-// NVIDIA GPUs - use byte_perm on newer architectures
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 200
+    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 200
         return __byte_perm(x, 0, 0x0123);
-#else
+    #else
         return ((x & 0xFF000000) >> 24) |
                ((x & 0x00FF0000) >> 8)  |
                ((x & 0x0000FF00) << 8)  |
                ((x & 0x000000FF) << 24);
+    #endif
 #endif
-#endif
-}
-
-// Optimized bit counting for near-collision detection
-__gpu_device__ __gpu_forceinline__ uint32_t count_matching_bits(uint32_t a, uint32_t b) {
-    return 32 - __gpu_popc(a ^ b);
 }
 
 // Count leading zeros - platform optimized
@@ -282,40 +208,21 @@ __gpu_device__ __gpu_forceinline__ uint32_t count_leading_zeros(uint32_t x) {
     return __gpu_clz(x);
 }
 
-// Platform-specific memory prefetch
-__gpu_device__ __gpu_forceinline__ void prefetch_data(const void* ptr) {
-#ifdef USE_HIP
-// AMD doesn't have explicit prefetch in the same way
-// The compiler handles this automatically
-#else
-// CUDA doesn't have a direct prefetch instruction in device code
-// The L1/L2 cache hierarchy handles this automatically
-// We can use volatile loads to hint at cache usage
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 350
-// Prefetch is handled by the cache hierarchy
-// No explicit prefetch needed in CUDA device code
-#endif
-#endif
-}
-
 #endif // __CUDACC__ || __HIPCC__
 
 // Helper functions for SHA-1 computation (host side) using OpenSSL
 #if !defined(__CUDACC__) && !defined(__HIPCC__)
 
-// Helper function to compute SHA-1 of binary data and return binary result
 inline std::vector<uint8_t> sha1_binary(const uint8_t *data, size_t len) {
     std::vector<uint8_t> result(SHA_DIGEST_LENGTH);
     SHA1(data, len, result.data());
     return result;
 }
 
-// Helper function to compute SHA-1 of a vector
 inline std::vector<uint8_t> sha1_binary(const std::vector<uint8_t> &data) {
     return sha1_binary(data.data(), data.size());
 }
 
-// Helper to convert binary hash to hex string
 inline std::string sha1_hex(const uint8_t *hash) {
     std::ostringstream oss;
     for (int i = 0; i < SHA_DIGEST_LENGTH; i++) {
@@ -325,7 +232,6 @@ inline std::string sha1_hex(const uint8_t *hash) {
     return oss.str();
 }
 
-// Helper to convert hex string to binary
 inline std::vector<uint8_t> hex_to_binary(const std::string &hex) {
     std::vector<uint8_t> result;
     for (size_t i = 0; i < hex.length(); i += 2) {
@@ -334,12 +240,10 @@ inline std::vector<uint8_t> hex_to_binary(const std::string &hex) {
     return result;
 }
 
-// Calculate SHA-1 (wrapper for consistency)
 inline std::vector<uint8_t> calculate_sha1(const std::vector<uint8_t> &data) {
     return sha1_binary(data);
 }
 
-// Convert bytes to hex string
 inline std::string bytes_to_hex(const std::vector<uint8_t> &bytes) {
     std::ostringstream oss;
     for (uint8_t b: bytes) {
@@ -348,7 +252,6 @@ inline std::string bytes_to_hex(const std::vector<uint8_t> &bytes) {
     return oss.str();
 }
 
-// Convert hex string to bytes
 inline std::vector<uint8_t> hex_to_bytes(const std::string &hex) {
     return hex_to_binary(hex);
 }

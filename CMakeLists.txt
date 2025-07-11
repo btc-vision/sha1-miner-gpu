@@ -265,7 +265,6 @@ add_executable(sha1_miner
         ${NET_DIR}/pool_client.cpp
         ${NET_DIR}/pool_integration.cpp
         ${POOL_SOURCES}
-        ${MINER_DIR}/kernel_launcher.cpp
 )
 
 # Set properties

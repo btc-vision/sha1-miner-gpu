@@ -93,10 +93,10 @@ public:
         }
     };
 
-    // Add stop mining flag
-    static void stopMining() {
-        g_shutdown = true; // Use existing global shutdown
-    }
+    /**
+     * Stop all mining operations
+     */
+    void stopMining();
 
     /**
      * Set a callback to be called whenever new results are found
@@ -112,43 +112,12 @@ public:
      * Used by MultiGPUManager for proper hash tracking
      * @return Number of hashes computed in this batch
      */
-    uint64_t runSingleBatch(const MiningJob &job) {
-        // Copy job to device
-        for (int i = 0; i < config_.num_streams; i++) {
-            device_jobs_[i].copyFromHost(job);
-        }
-        // Configure kernel
-        KernelConfig kernel_config;
-        kernel_config.blocks = config_.blocks_per_stream;
-        kernel_config.threads_per_block = config_.threads_per_block;
-        kernel_config.stream = streams_[0]; // Use first stream
-        kernel_config.shared_memory_size = 0;
-        // Reset nonce counter
-        (void)gpuMemsetAsync(gpu_pools_[0].nonces_processed, 0, sizeof(uint64_t), streams_[0]);
-        // Launch kernel
-        launch_mining_kernel(
-            device_jobs_[0],
-            job.difficulty,
-            job.nonce_offset,
-            gpu_pools_[0],
-            kernel_config
-        );
-        // Wait for completion
-        (void)gpuStreamSynchronize(streams_[0]);
-        // Get actual nonces processed
-        uint64_t actual_nonces = 0;
-        (void)gpuMemcpy(&actual_nonces, gpu_pools_[0].nonces_processed, sizeof(uint64_t), gpuMemcpyDeviceToHost);
-        // Process results
-        processResultsOptimized(0);
-        // Update total hashes
-        total_hashes_ += actual_nonces;
-        return actual_nonces;
-    }
+    uint64_t runSingleBatch(const MiningJob &job);
 
     /**
-        * Get results from the last batch
-        * @return Vector of mining results
-        */
+     * Get results from the last batch
+     * @return Vector of mining results
+     */
     std::vector<MiningResult> getLastResults() {
         std::vector<MiningResult> results;
         // Get result count from first pool
@@ -162,8 +131,8 @@ public:
     }
 
     /**
-        * Get current configuration
-        */
+     * Get current configuration
+     */
     const Config &getConfig() const {
         return config_;
     }
@@ -171,12 +140,7 @@ public:
     /**
      * Reset internal state for new mining session
      */
-    void resetState() {
-        best_tracker_.reset();
-        total_hashes_ = 0;
-        total_candidates_ = 0;
-        start_time_ = std::chrono::steady_clock::now();
-    }
+    void resetState();
 
     /**
      * Get all results found since last clear
@@ -192,10 +156,7 @@ public:
     /**
      * Clear all accumulated results
      */
-    void clearResults() {
-        std::lock_guard<std::mutex> lock(all_results_mutex_);
-        all_results_.clear();
-    }
+    void clearResults();
 
     // Timing statistics structure
     struct TimingStats {
@@ -206,7 +167,6 @@ public:
         int kernel_count = 0;
 
         void reset();
-
         void print() const;
     };
 
@@ -215,14 +175,35 @@ public:
 
     virtual ~MiningSystem();
 
+    /**
+     * Initialize the mining system
+     * @return true if successful, false otherwise
+     */
     bool initialize();
 
+    /**
+     * Run infinite mining loop
+     * @param job Mining job configuration
+     */
     void runMiningLoop(const MiningJob &job);
 
+    /**
+     * Run interruptible mining loop
+     * @param job Mining job configuration
+     * @param should_continue Function that returns false when mining should stop
+     */
     void runMiningLoopInterruptible(const MiningJob &job, std::function<bool()> should_continue);
 
+    /**
+     * Get current mining statistics
+     */
     MiningStats getStats() const;
 
+    /**
+     * Update mining job without stopping (live update)
+     * @param job New mining job
+     * @param job_version Version identifier for the new job
+     */
     void updateJobLive(const MiningJob &job, uint64_t job_version);
 
 private:
@@ -250,6 +231,7 @@ private:
     // Helper methods
     void launchKernelOnStream(int stream_idx, uint64_t nonce_offset, const MiningJob &job);
     void processStreamResults(int stream_idx, StreamData &stream_data);
+    void performanceMonitorInterruptible(const std::function<bool()> &should_continue) const;
 
 protected:
     // Configuration and device properties
@@ -293,24 +275,16 @@ protected:
 
     // Private methods
     bool initializeGPUResources();
-
     void cleanup();
-
     virtual void processResultsOptimized(int stream_idx);
-
     void performanceMonitor();
-
     void printFinalStats();
-
     uint64_t getTotalThreads() const;
-
     uint64_t getHashesPerKernel() const;
 
     // Platform detection and optimization
     GPUVendor detectGPUVendor() const;
-
     void optimizeForGPU();
-
     void autoTuneParameters();
 };
 

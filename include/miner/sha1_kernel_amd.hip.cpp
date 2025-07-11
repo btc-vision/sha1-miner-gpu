@@ -106,104 +106,42 @@ __global__ void sha1_mining_kernel_amd(
     uint64_t nonce_base,
     uint32_t nonces_per_thread,
     uint64_t * __restrict__ actual_nonces_processed,
-    volatile JobUpdateRequest * __restrict__ job_update,  // ADD THIS
-    uint64_t * __restrict__ current_job_version          // ADD THIS
+    uint64_t job_version
 ) {
     // Thread indices
     const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     const uint32_t lane_id = threadIdx.x & 63; // 64-thread wavefront
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
 
-    // Check if live updates are enabled
-    const bool live_updates_enabled = (job_update != nullptr && current_job_version != nullptr);
+    // Load base message using vectorized access
+    uint8_t base_msg[32];
+    uint4* base_msg_vec = (uint4*)base_msg;
+    const uint4* base_message_vec = (const uint4*)base_message;
+    base_msg_vec[0] = base_message_vec[0];
+    base_msg_vec[1] = base_message_vec[1];
 
-    // Shared memory for job data (same as NVIDIA)
-    __shared__ uint8_t shared_base_msg[32];
-    __shared__ uint32_t shared_target[5];
-    __shared__ uint32_t shared_difficulty;
-    __shared__ uint64_t shared_job_version;
-    __shared__ volatile bool job_needs_update;
-
-    // Initialize shared memory
-    if (threadIdx.x == 0) {
-        shared_job_version = live_updates_enabled ? *current_job_version : 0;
-        job_needs_update = false;
+    // Load target
+    uint32_t target[5];
+    #pragma unroll
+    for (int i = 0; i < 5; i++) {
+        target[i] = target_hash[i];
     }
-    __syncthreads();
-
-    // Load initial job data
-    if (threadIdx.x < 8) {
-        ((uint4*)shared_base_msg)[threadIdx.x] = ((const uint4*)base_message)[threadIdx.x];
-    }
-    if (threadIdx.x < 5) {
-        shared_target[threadIdx.x] = target_hash[threadIdx.x];
-    }
-    if (threadIdx.x == 0) {
-        shared_difficulty = difficulty;
-    }
-    __syncthreads();
 
     // Track processed nonces
     uint32_t nonces_processed = 0;
 
     // Main mining loop
     for (uint32_t i = 0; i < nonces_per_thread; i++) {
-        // Only check for job updates if enabled (same as NVIDIA)
-        if (live_updates_enabled && (i & 0xFFF) == 0) {
-            if (threadIdx.x == 0) {
-                if (job_update->job_updated) {
-                    uint64_t new_version = job_update->job_version;
-                    if (new_version > shared_job_version) {
-                        job_needs_update = true;
-                        shared_job_version = new_version;
-                    }
-                }
-            }
-            __syncthreads();
-
-            // If job needs update, load new data
-            if (job_needs_update) {
-                // Load new job data from the update structure
-                if (threadIdx.x < 8) {
-                    ((uint4*)shared_base_msg)[threadIdx.x] = ((uint4*)job_update->base_message)[threadIdx.x];
-                }
-                if (threadIdx.x < 5) {
-                    shared_target[threadIdx.x] = job_update->target_hash[threadIdx.x];
-                }
-                if (threadIdx.x == 0) {
-                    shared_difficulty = job_update->difficulty;
-
-                    // Update the global job version
-                    *current_job_version = shared_job_version;
-
-                    // Clear the update flag after we've consumed it
-                    job_update->job_updated = false;
-
-                    // Reset result count for new job
-                    *result_count = 0;
-
-                    job_needs_update = false;
-
-#ifdef DEBUG_SHA1
-                    printf("[GPU %d Block %d] Job updated to version %llu\n",
-                           blockIdx.x / 256, blockIdx.x % 256, shared_job_version);
-#endif
-                }
-                __syncthreads();
-            }
-        }
-
         uint64_t nonce = thread_nonce_base + i;
         if (nonce == 0) continue;
 
         nonces_processed++;
 
-        // Create message copy from shared memory (instead of global)
+        // Create message copy
         uint8_t msg_bytes[32];
-        #pragma unroll
-        for (int j = 0; j < 32; j++) {
-            msg_bytes[j] = shared_base_msg[j];
-        }
+        uint4* msg_bytes_vec = (uint4*)msg_bytes;
+        msg_bytes_vec[0] = base_msg_vec[0];
+        msg_bytes_vec[1] = base_msg_vec[1];
 
         // Apply nonce
         uint32_t* msg_words = (uint32_t*)msg_bytes;
@@ -285,13 +223,13 @@ __global__ void sha1_mining_kernel_amd(
         hash[3] = d + H0[3];
         hash[4] = e + H0[4];
 
-        // Count matching bits (use shared target)
-        uint32_t matching_bits = count_leading_zeros_160bit_amd(hash, shared_target);
+        // Count matching bits
+        uint32_t matching_bits = count_leading_zeros_160bit_amd(hash, target);
 
-        // Check if we found a match (use shared difficulty)
-        if (matching_bits >= shared_difficulty) {
+        // Check if we found a match
+        if (matching_bits >= difficulty) {
             // Use AMD's wavefront vote operations
-            uint64_t mask = __ballot(matching_bits >= shared_difficulty);
+            uint64_t mask = __ballot(matching_bits >= difficulty);
 
             if (mask != 0) {
                 // Count set bits in mask up to our lane
@@ -314,7 +252,7 @@ __global__ void sha1_mining_kernel_amd(
                         results[idx].nonce = nonce;
                         results[idx].matching_bits = matching_bits;
                         results[idx].difficulty_score = matching_bits;
-                        results[idx].job_version = shared_job_version; // ADD THIS
+                        results[idx].job_version = job_version;
 #pragma unroll
                         for (int j = 0; j < 5; j++) {
                             results[idx].hash[j] = hash[j];
@@ -329,35 +267,6 @@ __global__ void sha1_mining_kernel_amd(
 }
 
 /**
- * AMD-specific kernel configuration
- */
-struct AMDKernelConfig {
-    int compute_units;
-    int waves_per_cu;
-    int threads_per_block;
-    int blocks;
-
-    static AMDKernelConfig get_optimal_config(hipDeviceProp_t &props) {
-        AMDKernelConfig config;
-
-        // Get compute unit count
-        config.compute_units = props.multiProcessorCount;
-
-        // Optimal threads per block for AMD (multiple of wavefront size)
-        config.threads_per_block = 256; // 4 wavefronts
-
-        // Target 4-8 waves per CU for good occupancy
-        config.waves_per_cu = 6;
-
-        // Calculate blocks
-        int total_waves = config.compute_units * config.waves_per_cu;
-        config.blocks = (total_waves * 64) / config.threads_per_block;
-
-        return config;
-    }
-};
-
-/**
  * Launch the optimized AMD HIP SHA-1 mining kernel
  * Properly configured for RDNA4 and other AMD architectures
  */
@@ -366,7 +275,8 @@ extern "C" void launch_mining_kernel_amd(
     uint32_t difficulty,
     uint64_t nonce_offset,
     const ResultPool &pool,
-    const KernelConfig &config
+    const KernelConfig &config,
+    uint64_t job_version  // Added to match NVIDIA signature
 ) {
     // Get device properties once and cache
     thread_local hipDeviceProp_t props_cached;
@@ -402,69 +312,11 @@ extern "C" void launch_mining_kernel_amd(
         blocks = (total_waves * props.warpSize) / threads;
     }
 
-    // Dynamic nonces_per_thread calculation for proper hash counting
-    uint32_t nonces_per_thread;
-    //uint32_t target_nonces_per_kernel;
-
-    // Detect architecture from device properties
-    //std::string arch_name = props.gcnArchName ? props.gcnArchName : "";
-    //std::string device_name = props.name ? props.name : "";
-
-    /*bool is_rdna4 = (arch_name.find("gfx12") != std::string::npos) ||
-                    (props.major == 12) ||
-                    (device_name.find("9070") != std::string::npos) ||
-                    (device_name.find("9080") != std::string::npos);
-    bool is_rdna3 = (arch_name.find("gfx11") != std::string::npos) ||
-                    (props.major == 11) ||
-                    (device_name.find("7900") != std::string::npos) ||
-                    (device_name.find("7800") != std::string::npos) ||
-                    (device_name.find("7700") != std::string::npos);
-    bool is_rdna2 = (arch_name.find("gfx103") != std::string::npos) ||
-                    (device_name.find("6900") != std::string::npos) ||
-                    (device_name.find("6800") != std::string::npos) ||
-                    (device_name.find("6700") != std::string::npos);
-    bool is_rdna1 = (arch_name.find("gfx101") != std::string::npos) ||
-                (arch_name.find("gfx1010") != std::string::npos) ||
-                (device_name.find("5700") != std::string::npos) ||
-                (device_name.find("5600") != std::string::npos) ||
-                (device_name.find("5500") != std::string::npos);
-
-    if (is_rdna4) {
-        target_nonces_per_kernel = NONCES_PER_THREAD_RDNA4;
-    } else if (is_rdna3) {
-        target_nonces_per_kernel = NONCES_PER_THREAD_RDNA3;
-    } else if (is_rdna2) {
-        target_nonces_per_kernel = NONCES_PER_THREAD_RDNA2;
-    } else if (is_rdna1) {
-        target_nonces_per_kernel = NONCES_PER_THREAD_RDNA1;
-    } else {
-        target_nonces_per_kernel = NONCES_PER_THREAD; // Default
-    }*/
-
     // Calculate nonces per thread
     uint64_t total_threads = static_cast<uint64_t>(blocks) * static_cast<uint64_t>(threads);
-    nonces_per_thread = NONCES_PER_THREAD / total_threads;
+    uint32_t nonces_per_thread = NONCES_PER_THREAD / total_threads;
 
-    // Ensure minimum work per thread based on architecture
-    /*uint32_t min_nonces;
-    if (is_rdna4) {
-        min_nonces = 64;  // RDNA4 minimum
-    } else if (is_rdna3) {
-        min_nonces = 64;  // RDNA3 minimum
-    } else if (is_rdna2) {
-        min_nonces = 56;  // RDNA2 minimum
-    } else if (is_rdna1) {
-        min_nonces = 56;  // RDNA1 needs more work per thread
-    } else {
-        min_nonces = 48;  // Older GPUs
-    }
-
-    // Ensure we have at least minimum work per thread
-    if (nonces_per_thread < min_nonces) {
-        nonces_per_thread = min_nonces;
-    }*/
-
-    // For very high thread counts, ensure we don't overflow
+    // Ensure we have at least 1 nonce per thread
     if (nonces_per_thread == 0) {
         nonces_per_thread = 1;
     }
@@ -497,13 +349,12 @@ extern "C" void launch_mining_kernel_amd(
         nonce_offset,
         nonces_per_thread,
         pool.nonces_processed,
-        device_job.job_update,
-        pool.job_version
+        job_version
     );
 
     // Check for launch errors
-    //err = hipGetLastError();
-    //if (err != hipSuccess) {
-    //    fprintf(stderr, "Kernel launch failed: %s\n", hipGetErrorString(err));
-    //}
+    err = hipGetLastError();
+    if (err != hipSuccess) {
+        fprintf(stderr, "Kernel launch failed: %s\n", hipGetErrorString(err));
+    }
 }

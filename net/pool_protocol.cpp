@@ -465,4 +465,44 @@ namespace MiningPool {
 
         return msg;
     }
+
+    bool ValidateJobMessage(const JobMessage& msg) {
+        // Validate difficulty is reasonable
+        if (msg.target_difficulty == 0 || msg.target_difficulty > 256) {
+            LOG_ERROR("PROTOCOL", "Invalid target difficulty: ", msg.target_difficulty);
+            return false;
+        }
+
+        // Validate target pattern
+        if (msg.target_pattern.length() != 40) { // SHA-1 is 40 hex chars
+            LOG_ERROR("PROTOCOL", "Invalid target pattern length: ", msg.target_pattern.length());
+            return false;
+        }
+
+        // Validate hex string
+        for (char c : msg.target_pattern) {
+            if (!std::isxdigit(c)) {
+                LOG_ERROR("PROTOCOL", "Invalid hex character in target pattern");
+                return false;
+            }
+        }
+
+        // Validate nonce range
+        if (msg.nonce_start >= msg.nonce_end) {
+            LOG_ERROR("PROTOCOL", "Invalid nonce range: ", msg.nonce_start, " >= ", msg.nonce_end);
+            return false;
+        }
+
+        return true;
+    }
+
+    bool ValidateShareResultMessage(const ShareResultMessage& msg) {
+        // Validate status is valid
+        if (static_cast<int>(msg.status) < 0 || static_cast<int>(msg.status) > 4) {
+            LOG_ERROR("PROTOCOL", "Invalid share status");
+            return false;
+        }
+
+        return true;
+    }
 } // namespace MiningPool

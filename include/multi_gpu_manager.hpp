@@ -10,10 +10,9 @@
 #include <functional>
 #include "sha1_miner.cuh"
 #include "../src/mining_system.hpp"
-#include "../logging/logger.hpp"
 
 // Callback type for multi-GPU results
-using MiningResultCallback = std::function<void(const std::vector<MiningResult> &)>;
+using MiningResultCallback = std::function<void(const std::vector<MiningResult>&)>;
 
 // Global batch size for nonce distribution across GPUs
 constexpr uint64_t NONCE_BATCH_SIZE = 1ULL << 32; // 4B nonces per batch
@@ -25,6 +24,7 @@ struct GPUWorker {
     std::atomic<uint64_t> hashes_computed{0};
     std::atomic<uint64_t> candidates_found{0};
     std::atomic<uint32_t> best_match_bits{0};
+    std::atomic<bool> active{false};
 };
 
 /**
@@ -34,7 +34,6 @@ struct GPUWorker {
 class MultiGPUManager {
 public:
     MultiGPUManager();
-
     virtual ~MultiGPUManager();
 
     /**
@@ -42,78 +41,97 @@ public:
      * @param gpu_ids List of GPU device IDs to use
      * @return true if at least one GPU was initialized successfully
      */
-    bool initialize(const std::vector<int> &gpu_ids);
+    bool initialize(const std::vector<int>& gpu_ids);
 
     /**
      * Set a callback to be called whenever any GPU finds results
      * @param callback Function to call with new results
      */
-    void setResultCallback(const MiningResultCallback &callback) {
+    void setResultCallback(const MiningResultCallback& callback) {
         std::lock_guard<std::mutex> lock(callback_mutex_);
         result_callback_ = callback;
     }
 
     /**
-     * Run mining on all initialized GPUs
+     * Run mining on all initialized GPUs (infinite mode)
      * @param job Mining job configuration
      */
-    void runMining(const MiningJob &job);
+    void runMining(const MiningJob& job);
+
+    /**
+     * Run mining with interruption capability
+     * @param job Mining job configuration
+     * @param should_continue Function that returns false when mining should stop
+     */
+    void runMiningInterruptible(const MiningJob& job, std::function<bool()> should_continue);
+
+    /**
+     * Stop all mining operations
+     */
+    void stopMining();
+
+    /**
+     * Update job on all GPUs without stopping mining
+     * @param job New mining job
+     * @param job_version Version identifier for the new job
+     */
+    void updateJobLive(const MiningJob& job, uint64_t job_version) const;
 
     /**
      * Get combined statistics from all GPUs
      */
-    void printCombinedStats();
+    void printCombinedStats() const;
 
-    void stopMining() {
-        shutdown_ = true;
+    /**
+     * Get total hash rate across all GPUs
+     */
+    double getTotalHashRate() const;
 
-        // Signal all workers to stop
-        for (auto &worker: workers_) {
-            if (worker->mining_system) {
-                worker->mining_system->stopMining();
-            }
-        }
-    }
-
-    void updateJobLive(const MiningJob &job, uint64_t job_version) const {
-        // Update job on all GPUs
-        for (auto &worker : workers_) {
-            if (worker->mining_system) {
-                worker->mining_system->updateJobLive(job, job_version);
-            }
-        }
-
-        LOG_INFO("MULTI_GPU", "Updated job on all GPUs to version ", job_version);
-    }
-
-    // Add interruptible mining method
-    void runMiningInterruptible(const MiningJob &job, std::function<bool()> should_continue);
+    /**
+     * Get number of active workers
+     */
+    size_t getActiveWorkerCount() const;
 
 private:
-    void workerThreadInterruptible(GPUWorker *worker, const MiningJob &job, std::function<bool()> should_continue);
-
-protected:
-    std::vector<std::unique_ptr<GPUWorker> > workers_;
+    // Worker management
+    std::vector<std::unique_ptr<GPUWorker>> workers_;
     std::atomic<bool> shutdown_{false};
-
+    
     // Global nonce distribution
     std::atomic<uint64_t> global_nonce_counter_{1};
-
+    
     // Performance tracking
-    std::chrono::steady_clock::time_point start_time_;
-    BestResultTracker global_best_tracker_;
-    std::mutex stats_mutex_;
-    uint32_t current_difficulty_;
-
+    mutable std::chrono::steady_clock::time_point start_time_;
+    mutable BestResultTracker global_best_tracker_;
+    mutable std::mutex stats_mutex_;
+    uint32_t current_difficulty_{0};
+    
     // Callback management
     mutable std::mutex callback_mutex_;
     MiningResultCallback result_callback_;
-
-    // Worker thread function
-    virtual void workerThread(GPUWorker *worker, const MiningJob &job);
-
+    
+    // Monitor thread
+    std::unique_ptr<std::thread> monitor_thread_;
+    
+    // Worker thread functions
+    void workerThread(GPUWorker* worker, const MiningJob& job);
+    void workerThreadInterruptible(GPUWorker* worker, const MiningJob& job, 
+                                  std::function<bool()> should_continue);
+    
+    // Monitor thread function
+    void monitorThread(std::function<bool()> should_continue);
+    
     // Get next batch of nonces for a worker
     uint64_t getNextNonceBatch();
+    
+    // Process results from a worker
+    void processWorkerResults(GPUWorker* worker, const std::vector<MiningResult>& results);
+    
+    // Check if all workers are ready
+    bool allWorkersReady() const;
+    
+    // Wait for workers to finish
+    void waitForWorkers();
 };
 
 #endif // MULTI_GPU_MANAGER_HPP
