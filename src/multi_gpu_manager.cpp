@@ -67,10 +67,10 @@ bool MultiGPUManager::initialize(const std::vector<int>& gpu_ids) {
         // Create mining system configuration
         MiningSystem::Config config;
         config.device_id = gpu_id;
-        config.num_streams = 4;
+        config.num_streams = 8;
         config.threads_per_block = DEFAULT_THREADS_PER_BLOCK;
         config.use_pinned_memory = true;
-        config.result_buffer_size = 256;
+        config.result_buffer_size = 1024;
         
 #ifdef USE_HIP
         // Apply architecture-specific configuration

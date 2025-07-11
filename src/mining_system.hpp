@@ -84,7 +84,7 @@ public:
         // Constructor with default values
         Config()
             : device_id(0)
-              , num_streams(4)
+              , num_streams(8)
               , blocks_per_stream(0) // Auto-calculate
               , threads_per_block(DEFAULT_THREADS_PER_BLOCK)
               , use_pinned_memory(true)
