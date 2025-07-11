@@ -662,14 +662,23 @@ namespace MiningPool {
             authenticated_ = false;
             event_handler_->on_disconnected(ec.message());
 
-            // Always attempt to reconnect if running and reconnects are enabled
-            if (running_.load() && (config_.reconnect_attempts == 0 ||
-                                    reconnect_attempt_count_.load() < config_.reconnect_attempts)) {
+            bool should_reconnect = running_.load() && (config_.reconnect_attempts < 0 || // -1 means infinite
+                                                        reconnect_attempt_count_.load() < static_cast<unsigned>(config_.
+                                                            reconnect_attempts));
+
+            if (should_reconnect) {
+                LOG_INFO("CLIENT", "Scheduling reconnect (attempt ", reconnect_attempt_count_.load() + 1,
+                         config_.reconnect_attempts < 0 ? "/∞" : "/" + std::to_string(config_.reconnect_attempts),
+                         ")");
                 // Schedule reconnect
                 std::thread([this]() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     reconnect();
                 }).detach();
+            } else {
+                LOG_ERROR("CLIENT", "Not reconnecting - running=", running_.load(),
+                          ", attempts=", reconnect_attempt_count_.load(),
+                          "/", config_.reconnect_attempts);
             }
             return;
         }
@@ -1240,6 +1249,21 @@ namespace MiningPool {
                           ", type=", msg_type_str,
                           ", elapsed=", elapsed, "ms");
                 it = pending_requests_.erase(it);
+                // If we're getting timeouts, we might be disconnected
+                if (!connected_.load() && running_.load()) {
+                    bool should_reconnect = config_.reconnect_attempts < 0 ||
+                                            reconnect_attempt_count_.load() < static_cast<unsigned>(config_.
+                                                reconnect_attempts);
+
+                    if (should_reconnect) {
+                        LOG_INFO("CLIENT", "Connection seems lost (timeout), scheduling reconnect");
+                        // Use the schedule_reconnect method if you implemented it, or:
+                        std::thread([this]() {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                            reconnect();
+                        }).detach();
+                    }
+                }
             } else {
                 ++it;
             }
@@ -1247,7 +1271,8 @@ namespace MiningPool {
     }
 
     void PoolClient::reconnect() {
-        // Simple guard against concurrent reconnects
+        LOG_INFO("ATTEMPTING RECONNECT");
+
         bool expected = false;
         if (!reconnecting_.compare_exchange_strong(expected, true)) {
             return;
@@ -1259,14 +1284,14 @@ namespace MiningPool {
             return;
         }
 
-        LOG_INFO("CLIENT", "Scheduling reconnection...");
+        LOG_INFO("CLIENT", "Starting reconnection process...");
 
         // We need to do the reconnection from a separate thread to avoid deadlocks
         std::thread reconnect_thread([this]() {
             try {
-                // Check max attempts
-                if (config_.reconnect_attempts > 0 &&
-                    reconnect_attempt_count_ >= config_.reconnect_attempts) {
+                // Fix: Check max attempts properly
+                if (config_.reconnect_attempts >= 0 && // Only check if not infinite (-1)
+                    reconnect_attempt_count_ >= static_cast<unsigned>(config_.reconnect_attempts)) {
                     LOG_ERROR("CLIENT", "Maximum reconnection attempts (",
                               config_.reconnect_attempts, ") exceeded");
                     running_ = false;
@@ -1274,7 +1299,7 @@ namespace MiningPool {
                     return;
                 }
 
-                reconnect_attempt_count_++;
+                ++reconnect_attempt_count_;
 
                 // Calculate delay with exponential backoff
                 int delay = config_.reconnect_delay_ms;
@@ -1393,6 +1418,18 @@ namespace MiningPool {
                 LOG_ERROR("CLIENT", "Exception in reconnect thread: ", e.what());
                 reconnecting_ = false;
                 running_ = false;
+
+                bool should_retry = running_.load() &&
+                                    (config_.reconnect_attempts < 0 ||
+                                     reconnect_attempt_count_ < static_cast<unsigned>(config_.reconnect_attempts));
+
+                if (should_retry) {
+                    // Schedule another attempt
+                    std::thread([this]() {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+                        reconnect();
+                    }).detach();
+                }
             }
         });
 
