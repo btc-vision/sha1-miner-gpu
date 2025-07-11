@@ -271,18 +271,31 @@ namespace MiningPool {
                            pool_client_->is_authenticated();
                 };
 
-                LOG_INFO("MINING", "Starting mining with job version ", mining_job_version);
+                uint64_t starting_nonce = global_nonce_offset_.load();
+                LOG_INFO("MINING", "Starting mining with job version ", mining_job_version,
+                         " from nonce offset ", starting_nonce);
 
                 // CRITICAL: Update the job with the correct version BEFORE starting mining
+                uint64_t final_nonce = starting_nonce;
+
                 if (multi_gpu_manager_) {
                     multi_gpu_manager_->updateJobLive(job_copy, mining_job_version);
-                    multi_gpu_manager_->runMiningInterruptible(job_copy, should_continue);
+                    // Pass the global nonce offset atomic reference
+                    multi_gpu_manager_->runMiningInterruptibleWithOffset(job_copy, should_continue, global_nonce_offset_);
+                    // For multi-GPU, the global_nonce_offset_ is updated by the workers directly
+                    final_nonce = global_nonce_offset_.load();
                 } else if (mining_system_) {
                     mining_system_->updateJobLive(job_copy, mining_job_version);
-                    mining_system_->runMiningLoopInterruptible(job_copy, should_continue);
+                    // Use the method that returns final nonce
+                    final_nonce = mining_system_->runMiningLoopInterruptibleWithOffset(
+                        job_copy, should_continue, starting_nonce);
+
+                    // CRITICAL: Update global offset with where we stopped
+                    global_nonce_offset_.store(final_nonce);
                 }
 
-                LOG_INFO("MINING", "Mining stopped for job version ", mining_job_version);
+                LOG_INFO("MINING", "Mining stopped for job version ", mining_job_version,
+                         " at nonce offset ", final_nonce);
 
             } catch (const std::exception &e) {
                 LOG_ERROR("MINING", "Mining loop exception: ", e.what());
@@ -296,7 +309,12 @@ namespace MiningPool {
         }
 
         mining_active_ = false;
-        LOG_INFO("MINING", "Mining loop exited");
+        LOG_INFO("MINING", "Mining loop exited, final nonce position: ", global_nonce_offset_.load());
+    }
+
+    void PoolMiningSystem::reset_nonce_counter() {
+        LOG_INFO("POOL", "Resetting nonce counter to 1");
+        global_nonce_offset_.store(1);
     }
 
     void PoolMiningSystem::share_scanner_loop() {
@@ -783,7 +801,12 @@ namespace MiningPool {
             auto mining_stats = mining_system_->getStats();
             stats_.hashrate = mining_stats.hash_rate;
             stats_.total_hashes = mining_stats.hashes_computed;
+        } else if (multi_gpu_manager_) {
+            stats_.hashrate = multi_gpu_manager_->getTotalHashRate();
+            // For multi-GPU, estimate total hashes from nonce progress
+            stats_.total_hashes = global_nonce_offset_.load() - 1;
         }
+
         // Update current difficulty from the actual job
         stats_.current_difficulty = current_difficulty_.load();
 
@@ -796,6 +819,15 @@ namespace MiningPool {
             stats_.share_success_rate = static_cast<double>(stats_.shares_accepted) / stats_.shares_submitted;
         } else {
             stats_.share_success_rate = 0.0;
+        }
+
+        // Log nonce progress periodically
+        static uint64_t last_logged_nonce = 0;
+        uint64_t current_nonce = global_nonce_offset_.load();
+        if (current_nonce - last_logged_nonce > 1000000000) { // Log every billion nonces
+            LOG_DEBUG("POOL", "Nonce progress: ", current_nonce,
+                      " (", (current_nonce / 1000000000.0), " billion)");
+            last_logged_nonce = current_nonce;
         }
     }
 
@@ -910,7 +942,8 @@ namespace MiningPool {
 
     void PoolMiningSystem::on_new_job(const PoolJob &job) {
         LOG_INFO("POOL", "New job received: ", job.job_id,
-                 " (difficulty: ", job.job_data.target_difficulty, " bits)");
+                 " (difficulty: ", job.job_data.target_difficulty, " bits)",
+                 " - Continuing from nonce: ", global_nonce_offset_.load());
 
         // Update current difficulty immediately
         current_difficulty_.store(job.job_data.target_difficulty);
@@ -925,9 +958,10 @@ namespace MiningPool {
         }
 
         // Always treat pool jobs as clean jobs that require full restart
-        // This ensures the GPU properly loads the new salted preimage
+        // BUT we keep the nonce position!
         if (mining_active_.load()) {
-            LOG_DEBUG("POOL", "Stopping mining for new job");
+            LOG_DEBUG("POOL", "Stopping mining for new job (nonce will continue from ",
+                      global_nonce_offset_.load(), ")");
 
             // Stop mining
             mining_active_ = false;
@@ -938,7 +972,7 @@ namespace MiningPool {
                 multi_gpu_manager_->sync();
             } else if (mining_system_) {
                 mining_system_->stopMining();
-                multi_gpu_manager_->sync();
+                mining_system_->sync();
             }
 
             // Wait for mining to fully stop
@@ -1019,6 +1053,7 @@ namespace MiningPool {
                  "Difficulty adjusted to: ", new_difficulty, " bits",
                  " (", DifficultyConverter::formatDifficulty(
                      DifficultyConverter::bitsToScaledDifficulty(new_difficulty)), ")",
+                 " - Nonce continues from: ", global_nonce_offset_.load(),
                  Color::RESET);
 
         // Update the atomic difficulty
@@ -1042,7 +1077,8 @@ namespace MiningPool {
                 if (current_mining_job_.has_value()) {
                     current_mining_job_->difficulty = new_difficulty;
 
-                    LOG_DEBUG("POOL", "Updated mining job difficulty to ", new_difficulty, " bits");
+                    LOG_DEBUG("POOL", "Updated mining job difficulty to ", new_difficulty,
+                              " bits (nonce continues from ", global_nonce_offset_.load(), ")");
                 }
             }
         }

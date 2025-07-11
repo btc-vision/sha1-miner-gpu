@@ -374,7 +374,9 @@ bool MiningSystem::initialize() {
     return true;
 }
 
-void MiningSystem::runMiningLoopInterruptible(const MiningJob &job, std::function<bool()> should_continue) {
+uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job,
+                                                           std::function<bool()> should_continue,
+                                                           uint64_t start_nonce) {
     // Copy job to device
     for (int i = 0; i < config_.num_streams; i++) {
         device_jobs_[i].copyFromHost(job);
@@ -382,15 +384,10 @@ void MiningSystem::runMiningLoopInterruptible(const MiningJob &job, std::functio
 
     // Reset flags and counters
     stop_mining_ = false;
-    g_shutdown = false;
+    //g_shutdown = false;
     best_tracker_.reset();
     total_hashes_ = 0;
     clearResults();
-
-    // Start performance monitor with connection check
-    //monitor_thread_ = std::make_unique<std::thread>([this, should_continue]() {
-    //    performanceMonitorInterruptible(should_continue);
-    //});
 
     // Initialize per-stream data
     std::vector<StreamData> stream_data(config_.num_streams);
@@ -402,9 +399,11 @@ void MiningSystem::runMiningLoopInterruptible(const MiningJob &job, std::functio
         gpuMemsetAsync(gpu_pools_[i].nonces_processed, 0, sizeof(uint64_t), streams_[i]);
     }
 
-    // Nonce distribution
+    // Nonce distribution - START FROM PROVIDED OFFSET
     uint64_t nonce_stride = getHashesPerKernel();
-    uint64_t global_nonce_offset = 1; // Start from 1
+    uint64_t global_nonce_offset = start_nonce;
+
+    LOG_INFO("MINING", "Starting mining from nonce offset: ", global_nonce_offset);
 
     // Mining loop - runs until shutdown OR connection lost
     int current_stream = 0;
@@ -448,7 +447,7 @@ void MiningSystem::runMiningLoopInterruptible(const MiningJob &job, std::functio
 
         // Check if we should stop before launching new work
         if (!should_continue()) {
-            std::cout << "\n[MINING] Connection lost, stopping work generation...\n";
+            LOG_INFO("MINING", "Stopping work generation at nonce offset: ", global_nonce_offset);
             break;
         }
 
@@ -502,10 +501,11 @@ void MiningSystem::runMiningLoopInterruptible(const MiningJob &job, std::functio
     }
 
     // Stop monitor thread
-    g_shutdown = true;
-    //if (monitor_thread_ && monitor_thread_->joinable()) {
-    //    monitor_thread_->join();
-    //}
+    //g_shutdown = true;
+
+    // Return the final nonce offset so caller knows where we stopped
+    LOG_INFO("MINING", "Mining stopped at nonce offset: ", global_nonce_offset);
+    return global_nonce_offset;
 }
 
 void MiningSystem::runMiningLoop(const MiningJob &job) {
@@ -527,7 +527,7 @@ void MiningSystem::runMiningLoop(const MiningJob &job) {
     }
 
     // Reset shutdown flag and best tracker
-    g_shutdown = false;
+    //g_shutdown = false;
     best_tracker_.reset();
     // Reset actual hash counter
     total_hashes_ = 0;
@@ -625,10 +625,7 @@ void MiningSystem::runMiningLoop(const MiningJob &job) {
     }
 
     // Stop monitor thread
-    g_shutdown = true;
-    //if (monitor_thread_ && monitor_thread_->joinable()) {
-    //    monitor_thread_->join();
-    //}
+    //g_shutdown = true;
 }
 
 void MiningSystem::launchKernelOnStream(int stream_idx, uint64_t nonce_offset, const MiningJob &job) {
@@ -999,7 +996,7 @@ bool MiningSystem::initializeGPUResources() {
 void MiningSystem::cleanup() {
     std::lock_guard<std::mutex> lock(system_mutex_);
 
-    g_shutdown = true;
+    //g_shutdown = true;
 
     //if (monitor_thread_ && monitor_thread_->joinable()) {
     //    monitor_thread_->join();
@@ -1223,7 +1220,7 @@ uint64_t MiningSystem::runSingleBatch(const MiningJob& job) {
 
 void MiningSystem::stopMining() {
     stop_mining_ = true;
-    g_shutdown = true;
+    //g_shutdown = true;
 }
 
 void MiningSystem::clearResults() {

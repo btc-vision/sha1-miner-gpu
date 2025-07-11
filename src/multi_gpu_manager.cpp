@@ -264,83 +264,106 @@ void MultiGPUManager::workerThread(GPUWorker* worker, const MiningJob& job) {
     LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Worker thread finished");
 }
 
-void MultiGPUManager::workerThreadInterruptible(GPUWorker* worker, const MiningJob& job,
-                                               std::function<bool()> should_continue) {
+void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker* worker,
+                                                         const MiningJob& job,
+                                                         std::function<bool()> should_continue,
+                                                         std::atomic<uint64_t>& shared_nonce_counter) {
     // Set GPU context for this thread
     gpuError_t err = gpuSetDevice(worker->device_id);
     if (err != gpuSuccess) {
-        LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, 
+        LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id,
                   " - Failed to set device context: ", gpuGetErrorString(err));
         return;
     }
-    
-    LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Worker thread started (interruptible)");
+
+    LOG_INFO("MULTI_GPU", "GPU ", worker->device_id,
+             " - Worker thread started (continuous nonce mode)");
     worker->active = true;
-    
+
     // Set result callback
     auto worker_callback = [this, worker](const std::vector<MiningResult>& results) {
         processWorkerResults(worker, results);
     };
     worker->mining_system->setResultCallback(worker_callback);
-    
+
     // Error handling
     int consecutive_errors = 0;
     const int max_consecutive_errors = 5;
-    
-    // Get initial nonce batch
-    uint64_t current_nonce_base = getNextNonceBatch();
-    uint64_t nonces_used_in_batch = 0;
-    
+
+    // Each GPU will grab nonce batches from the shared counter
+    const uint64_t gpu_batch_size = NONCE_BATCH_SIZE;
+
     // Run until shutdown OR should_continue returns false
     while (!shutdown_ && consecutive_errors < max_consecutive_errors && should_continue()) {
         try {
-            // Create job with current nonce offset
+            // Atomically get next nonce batch from shared counter
+            uint64_t batch_start = shared_nonce_counter.fetch_add(gpu_batch_size);
+
+            LOG_TRACE("MULTI_GPU", "GPU ", worker->device_id,
+                      " - Got nonce batch starting at: ", batch_start);
+
+            // Create job with this GPU's nonce batch
             MiningJob worker_job = job;
-            worker_job.nonce_offset = current_nonce_base + nonces_used_in_batch;
-            
-            // Run a single kernel batch
-            uint64_t hashes_this_round = worker->mining_system->runSingleBatch(worker_job);
-            
-            if (hashes_this_round == 0) {
-                // Fallback estimation
-                auto config = worker->mining_system->getConfig();
-                hashes_this_round = static_cast<uint64_t>(config.blocks_per_stream) * 
-                                   config.threads_per_block * NONCES_PER_THREAD;
+            worker_job.nonce_offset = batch_start;
+
+            // Instead of runSingleBatch, use the continuous nonce method
+            // We'll run a limited batch to allow checking should_continue frequently
+            uint64_t nonces_to_process = gpu_batch_size;
+            uint64_t nonces_processed = 0;
+
+            // Process the batch in smaller chunks to allow responsive stopping
+            const uint64_t chunk_size = gpu_batch_size / 10; // Process in 10 chunks
+
+            while (nonces_processed < nonces_to_process && should_continue() && !shutdown_) {
+                // Update job offset for this chunk
+                worker_job.nonce_offset = batch_start + nonces_processed;
+
+                // Run a single kernel batch
+                uint64_t hashes_this_round = worker->mining_system->runSingleBatch(worker_job);
+
+                if (hashes_this_round == 0) {
+                    // Fallback estimation
+                    auto config = worker->mining_system->getConfig();
+                    hashes_this_round = static_cast<uint64_t>(config.blocks_per_stream) *
+                                       config.threads_per_block * NONCES_PER_THREAD;
+                }
+
+                // Update stats
+                worker->hashes_computed += hashes_this_round;
+                nonces_processed += hashes_this_round;
+
+                // Don't process more than our allocated batch
+                if (nonces_processed >= nonces_to_process) {
+                    break;
+                }
             }
-            
-            // Update stats
-            worker->hashes_computed += hashes_this_round;
-            nonces_used_in_batch += hashes_this_round;
-            
-            // Check if we need a new nonce batch
-            if (nonces_used_in_batch >= NONCE_BATCH_SIZE * 0.9) {
-                current_nonce_base = getNextNonceBatch();
-                nonces_used_in_batch = 0;
-            }
-            
+
             // Reset error counter on success
             consecutive_errors = 0;
-            
+
         } catch (const std::exception& e) {
             LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Error: ", e.what());
             consecutive_errors++;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        
+
         // Small delay to prevent CPU spinning
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    
+
     worker->active = false;
-    
+
     if (!should_continue()) {
-        LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Worker stopped (external signal)");
+        LOG_INFO("MULTI_GPU", "GPU ", worker->device_id,
+                 " - Worker stopped (external signal) at global nonce: ",
+                 shared_nonce_counter.load());
     } else if (consecutive_errors >= max_consecutive_errors) {
         LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Worker stopped (too many errors)");
     } else {
         LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Worker finished (shutdown)");
     }
 }
+
 
 /*void MultiGPUManager::monitorThread(std::function<bool()> should_continue) {
     auto last_update = std::chrono::steady_clock::now();
@@ -445,45 +468,39 @@ void MultiGPUManager::runMining(const MiningJob& job) {
     //printCombinedStats();
 }
 
-void MultiGPUManager::runMiningInterruptible(const MiningJob& job, 
-                                            std::function<bool()> should_continue) {
+void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob& job,
+                                                      std::function<bool()> should_continue,
+                                                      std::atomic<uint64_t>& global_nonce_offset) {
     current_difficulty_ = job.difficulty;
     shutdown_ = false;
     start_time_ = std::chrono::steady_clock::now();
     global_best_tracker_.reset();
-    
+
     // Reset all worker stats
     for (auto& worker : workers_) {
         worker->hashes_computed = 0;
         worker->candidates_found = 0;
         worker->best_match_bits = 0;
     }
-    
-    // Start worker threads with interruption capability
+
+    LOG_INFO("MULTI_GPU", "Starting multi-GPU mining from nonce offset: ",
+             global_nonce_offset.load());
+
+    // Start worker threads with shared nonce counter
     for (auto& worker : workers_) {
         worker->worker_thread = std::make_unique<std::thread>(
-            &MultiGPUManager::workerThreadInterruptible, this, worker.get(), job, should_continue
+            &MultiGPUManager::workerThreadInterruptibleWithOffset,
+            this, worker.get(), job, should_continue, std::ref(global_nonce_offset)
         );
     }
-    
-    // Start monitor thread with interruption capability
-    //monitor_thread_ = std::make_unique<std::thread>(
-    //    &MultiGPUManager::monitorThread, this, should_continue
-    //);
-    
+
     // Wait for workers to finish
     waitForWorkers();
-    
-    // Wait for monitor thread
-    //if (monitor_thread_ && monitor_thread_->joinable()) {
-    //    monitor_thread_->join();
-    //}
-    
+
     if (!should_continue()) {
-        std::cout << "\n\n[MULTI-GPU] External stop signal received - all workers stopped\n";
+        LOG_INFO("MULTI_GPU", "External stop signal received - all workers stopped at nonce: ",
+                 global_nonce_offset.load());
     }
-    
-    //printCombinedStats();
 }
 
 void MultiGPUManager::sync() const {

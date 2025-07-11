@@ -65,7 +65,9 @@ public:
      * @param job Mining job configuration
      * @param should_continue Function that returns false when mining should stop
      */
-    void runMiningInterruptible(const MiningJob& job, std::function<bool()> should_continue);
+    void runMiningInterruptibleWithOffset(const MiningJob& job,
+                                         std::function<bool()> should_continue,
+                                         std::atomic<uint64_t>& global_nonce_offset);
 
     /**
      * Stop all mining operations
@@ -117,12 +119,11 @@ private:
     
     // Worker thread functions
     void workerThread(GPUWorker* worker, const MiningJob& job);
-    void workerThreadInterruptible(GPUWorker* worker, const MiningJob& job, 
-                                  std::function<bool()> should_continue);
-    
-    // Monitor thread function
-    void monitorThread(std::function<bool()> should_continue);
-    
+    void workerThreadInterruptibleWithOffset(GPUWorker* worker,
+                                            const MiningJob& job,
+                                            std::function<bool()> should_continue,
+                                            std::atomic<uint64_t>& shared_nonce_counter);
+
     // Get next batch of nonces for a worker
     uint64_t getNextNonceBatch();
     

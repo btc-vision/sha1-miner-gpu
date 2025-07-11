@@ -104,6 +104,9 @@ namespace MiningPool {
         MiningJob convert_to_mining_job(const JobMessage &job_msg);
 
     private:
+        std::atomic<uint64_t> global_nonce_offset_{1};
+        std::atomic<uint64_t> last_job_nonce_offset_{0};
+
         std::vector<MiningResult> pending_results_;
         std::mutex pending_results_mutex_;
 
@@ -165,6 +168,8 @@ namespace MiningPool {
 
         // Internal methods
         void mining_loop();
+
+        void reset_nonce_counter();
 
         void share_scanner_loop();
 

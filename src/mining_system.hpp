@@ -194,7 +194,7 @@ public:
      * @param job Mining job configuration
      * @param should_continue Function that returns false when mining should stop
      */
-    void runMiningLoopInterruptible(const MiningJob &job, std::function<bool()> should_continue);
+    uint64_t runMiningLoopInterruptibleWithOffset(const MiningJob &job, std::function<bool()> should_continue, uint64_t start_nonce);
 
     /**
      * Get current mining statistics

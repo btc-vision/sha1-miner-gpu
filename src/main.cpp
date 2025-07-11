@@ -611,6 +611,12 @@ int run_pool_mining(const MiningConfig &config) {
         // Monitor and display stats
         auto last_stats_time = std::chrono::steady_clock::now();
         while (!g_shutdown) {
+            if (g_shutdown) {
+                LOG_ERROR("MAIN", "g_shutdown was set! Breaking main loop");
+                // Add stack trace or more info here
+                break;
+            }
+
             auto now = std::chrono::steady_clock::now();
             if (now - last_stats_time >= std::chrono::seconds(1)) {
                 auto stats = pool_mining->get_stats();
@@ -620,6 +626,8 @@ int run_pool_mining(const MiningConfig &config) {
 
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
+
+        LOG_INFO("MAIN", "Exited main loop, g_shutdown=", g_shutdown.load());
 
         pool_mining->stop();
     }
