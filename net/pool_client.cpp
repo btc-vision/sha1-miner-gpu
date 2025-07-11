@@ -105,7 +105,7 @@ namespace MiningPool {
                         }
 
                         // Create SSL stream
-                        wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket> > >(ioc_, ssl_ctx_);
+                        wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket>>>(ioc_, ssl_ctx_);
 
                         // Connect TCP socket
                         beast::get_lowest_layer(*wss_).connect(results.begin()->endpoint());
@@ -124,7 +124,7 @@ namespace MiningPool {
                         wss_->handshake(parsed.host, parsed.path);
                     } else {
                         // Create plain WebSocket stream
-                        ws_ = std::make_unique<websocket::stream<tcp::socket> >(ioc_);
+                        ws_ = std::make_unique<websocket::stream<tcp::socket>>(ioc_);
 
                         // Connect TCP socket
                         beast::get_lowest_layer(*ws_).connect(results.begin()->endpoint());
@@ -159,12 +159,6 @@ namespace MiningPool {
                 return false;
             }
 
-            // Connection successful, notify handler
-            event_handler_->on_connected();
-
-            // Send hello message after connection is established
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
             HelloMessage hello;
             hello.protocol_version = PROTOCOL_VERSION;
             hello.client_version = "SHA1-Miner/1.0";
@@ -179,6 +173,9 @@ namespace MiningPool {
 
             LOG_INFO("CLIENT", "Sending HELLO message");
             send_message(msg);
+
+            // Connection successful, notify handler
+            event_handler_->on_connected();
 
             return true;
         } catch (const std::exception &e) {
@@ -618,9 +615,6 @@ namespace MiningPool {
             }
 
             event_handler_->on_authenticated(worker_id_);
-
-            // Request initial job
-            request_job();
         } else {
             authenticated_ = false;
             event_handler_->on_auth_failed(response.error_code, response.error_message);
