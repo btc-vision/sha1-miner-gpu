@@ -262,7 +262,7 @@ protected:
     BestResultTracker best_tracker_;
 
     // Thread management
-    std::unique_ptr<std::thread> monitor_thread_;
+    //std::unique_ptr<std::thread> monitor_thread_;
     mutable std::mutex system_mutex_;
 
     // Callback management

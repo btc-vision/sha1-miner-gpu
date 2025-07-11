@@ -80,7 +80,7 @@ public:
     /**
      * Get combined statistics from all GPUs
      */
-    void printCombinedStats() const;
+    //void printCombinedStats() const;
 
     /**
      * Get total hash rate across all GPUs
@@ -111,7 +111,7 @@ private:
     MiningResultCallback result_callback_;
     
     // Monitor thread
-    std::unique_ptr<std::thread> monitor_thread_;
+    //std::unique_ptr<std::thread> monitor_thread_;
     
     // Worker thread functions
     void workerThread(GPUWorker* worker, const MiningJob& job);

@@ -131,9 +131,9 @@ void MultiGPUManager::stopMining() {
     }
     
     // Wait for monitor thread
-    if (monitor_thread_ && monitor_thread_->joinable()) {
-        monitor_thread_->join();
-    }
+    //if (monitor_thread_ && monitor_thread_->joinable()) {
+    //    monitor_thread_->join();
+    //}
     
     // Wait for all worker threads
     waitForWorkers();
@@ -342,7 +342,7 @@ void MultiGPUManager::workerThreadInterruptible(GPUWorker* worker, const MiningJ
     }
 }
 
-void MultiGPUManager::monitorThread(std::function<bool()> should_continue) {
+/*void MultiGPUManager::monitorThread(std::function<bool()> should_continue) {
     auto last_update = std::chrono::steady_clock::now();
     uint64_t last_total_hashes = 0;
     
@@ -407,14 +407,9 @@ void MultiGPUManager::monitorThread(std::function<bool()> should_continue) {
         last_update = now;
         last_total_hashes = total_hashes;
     }
-}
+}*/
 
 void MultiGPUManager::runMining(const MiningJob& job) {
-    std::cout << "\nStarting infinite multi-GPU mining on " << workers_.size() << " device(s)\n";
-    std::cout << "Target difficulty: " << job.difficulty << " bits\n";
-    std::cout << "Press Ctrl+C to stop mining\n";
-    std::cout << "=====================================\n\n";
-    
     current_difficulty_ = job.difficulty;
     shutdown_ = false;
     start_time_ = std::chrono::steady_clock::now();
@@ -435,28 +430,23 @@ void MultiGPUManager::runMining(const MiningJob& job) {
     }
     
     // Start monitor thread
-    monitor_thread_ = std::make_unique<std::thread>(
-        &MultiGPUManager::monitorThread, this, []() { return true; }
-    );
+    //monitor_thread_ = std::make_unique<std::thread>(
+    //    &MultiGPUManager::monitorThread, this, []() { return true; }
+    //);
     
     // Wait for workers to finish (only on shutdown)
     waitForWorkers();
     
     // Wait for monitor thread
-    if (monitor_thread_ && monitor_thread_->joinable()) {
-        monitor_thread_->join();
-    }
+    //if (monitor_thread_ && monitor_thread_->joinable()) {
+    //    monitor_thread_->join();
+    //}
     
-    printCombinedStats();
+    //printCombinedStats();
 }
 
 void MultiGPUManager::runMiningInterruptible(const MiningJob& job, 
                                             std::function<bool()> should_continue) {
-    std::cout << "\nStarting interruptible multi-GPU mining on " << workers_.size() << " device(s)\n";
-    std::cout << "Target difficulty: " << job.difficulty << " bits\n";
-    std::cout << "Mining will stop when connection is lost\n";
-    std::cout << "=====================================\n\n";
-    
     current_difficulty_ = job.difficulty;
     shutdown_ = false;
     start_time_ = std::chrono::steady_clock::now();
@@ -477,23 +467,23 @@ void MultiGPUManager::runMiningInterruptible(const MiningJob& job,
     }
     
     // Start monitor thread with interruption capability
-    monitor_thread_ = std::make_unique<std::thread>(
-        &MultiGPUManager::monitorThread, this, should_continue
-    );
+    //monitor_thread_ = std::make_unique<std::thread>(
+    //    &MultiGPUManager::monitorThread, this, should_continue
+    //);
     
     // Wait for workers to finish
     waitForWorkers();
     
     // Wait for monitor thread
-    if (monitor_thread_ && monitor_thread_->joinable()) {
-        monitor_thread_->join();
-    }
+    //if (monitor_thread_ && monitor_thread_->joinable()) {
+    //    monitor_thread_->join();
+    //}
     
     if (!should_continue()) {
         std::cout << "\n\n[MULTI-GPU] External stop signal received - all workers stopped\n";
     }
     
-    printCombinedStats();
+    //printCombinedStats();
 }
 
 void MultiGPUManager::updateJobLive(const MiningJob& job, uint64_t job_version) const {
@@ -541,7 +531,7 @@ bool MultiGPUManager::allWorkersReady() const {
     return true;
 }
 
-void MultiGPUManager::printCombinedStats() const {
+/*void MultiGPUManager::printCombinedStats() const {
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::steady_clock::now() - start_time_
     );
@@ -549,10 +539,10 @@ void MultiGPUManager::printCombinedStats() const {
     uint64_t total_hashes = 0;
     uint64_t total_candidates = 0;
     uint32_t best_bits = global_best_tracker_.getBestBits();
-    
+
     std::cout << "\n=== Multi-GPU Mining Results ===\n";
     std::cout << "=====================================\n";
-    
+
     // Per-GPU stats
     for (size_t i = 0; i < workers_.size(); i++) {
         const auto& worker = workers_[i];
@@ -573,7 +563,7 @@ void MultiGPUManager::printCombinedStats() const {
                      << ": " << gpuGetErrorString(err) << std::endl;
             continue;
         }
-        
+
         std::cout << "GPU " << worker->device_id << " (" << props.name << "):\n";
         std::cout << "  Total Hashes: " << std::fixed << std::setprecision(3)
                   << static_cast<double>(gpu_hashes) / 1e9 << " GH\n";
@@ -581,7 +571,7 @@ void MultiGPUManager::printCombinedStats() const {
                   << gpu_rate << " GH/s\n";
         std::cout << "  Best Match: " << gpu_best << " bits\n";
         std::cout << "  Candidates: " << gpu_candidates << "\n";
-        
+
         if (gpu_hashes > 0 && gpu_candidates > 0) {
             double efficiency = 100.0 * gpu_candidates * std::pow(2.0, current_difficulty_) / gpu_hashes;
             std::cout << "  Efficiency: " << std::fixed << std::setprecision(4)
@@ -616,4 +606,4 @@ void MultiGPUManager::printCombinedStats() const {
                   << global_efficiency << "%\n";
     }
     std::cout << "=====================================\n";
-}
+}*/

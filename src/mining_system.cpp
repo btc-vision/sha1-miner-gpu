@@ -399,9 +399,9 @@ void MiningSystem::runMiningLoopInterruptible(const MiningJob &job, std::functio
     clearResults();
 
     // Start performance monitor with connection check
-    monitor_thread_ = std::make_unique<std::thread>([this, should_continue]() {
-        performanceMonitorInterruptible(should_continue);
-    });
+    //monitor_thread_ = std::make_unique<std::thread>([this, should_continue]() {
+    //    performanceMonitorInterruptible(should_continue);
+    //});
 
     // Initialize per-stream data
     std::vector<StreamData> stream_data(config_.num_streams);
@@ -515,9 +515,9 @@ void MiningSystem::runMiningLoopInterruptible(const MiningJob &job, std::functio
 
     // Stop monitor thread
     g_shutdown = true;
-    if (monitor_thread_ && monitor_thread_->joinable()) {
-        monitor_thread_->join();
-    }
+    //if (monitor_thread_ && monitor_thread_->joinable()) {
+    //    monitor_thread_->join();
+    //}
 
     std::cout << "\n\nMining stopped. Kernels launched: " << kernels_launched << "\n";
     std::cout << "Actual hashes computed: " << static_cast<double>(total_hashes_) / 1e9 << " GH\n";
@@ -557,9 +557,9 @@ void MiningSystem::runMiningLoop(const MiningJob &job) {
     current_job_version_ = 0;
 
     // Start performance monitor
-    monitor_thread_ = std::make_unique<std::thread>(
-        &MiningSystem::performanceMonitor, this
-    );
+    //monitor_thread_ = std::make_unique<std::thread>(
+    //    &MiningSystem::performanceMonitor, this
+    //);
 
     // Initialize per-stream data
     std::vector<StreamData> stream_data(config_.num_streams);
@@ -646,9 +646,9 @@ void MiningSystem::runMiningLoop(const MiningJob &job) {
 
     // Stop monitor thread
     g_shutdown = true;
-    if (monitor_thread_ && monitor_thread_->joinable()) {
-        monitor_thread_->join();
-    }
+    //if (monitor_thread_ && monitor_thread_->joinable()) {
+    //    monitor_thread_->join();
+    //}
 
     std::cout << "\n\nMining stopped. Kernels launched: " << kernels_launched << "\n";
     std::cout << "Actual hashes computed: " << static_cast<double>(total_hashes_) / 1e9 << " GH\n";
@@ -972,9 +972,9 @@ void MiningSystem::cleanup() {
 
     g_shutdown = true;
 
-    if (monitor_thread_ && monitor_thread_->joinable()) {
-        monitor_thread_->join();
-    }
+    //if (monitor_thread_ && monitor_thread_->joinable()) {
+    //    monitor_thread_->join();
+    //}
 
     // Synchronize and destroy streams
     for (size_t i = 0; i < streams_.size(); i++) {
