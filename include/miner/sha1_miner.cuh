@@ -26,7 +26,7 @@
     #define DEFAULT_THREADS_PER_BLOCK 256
 #else
 #define NONCES_PER_THREAD 8192
-#define DEFAULT_THREADS_PER_BLOCK 512
+#define DEFAULT_THREADS_PER_BLOCK 256
 #endif
 
 struct MiningJob {

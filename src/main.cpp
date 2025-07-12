@@ -335,20 +335,7 @@ void auto_tune_parameters(MiningSystem::Config &config, int device_id) {
         config.num_streams = max_streams_by_memory;
     }
 
-    config.result_buffer_size = 128;
-
-    // Special optimizations for specific GPUs
-    std::string gpu_name = props.name;
-    if (gpu_name.find("4090") != std::string::npos || gpu_name.find("4080") != std::string::npos) {
-        config.threads_per_block = 512;
-        blocks_per_sm = 16;
-        config.blocks_per_stream = props.multiProcessorCount * blocks_per_sm;
-    } else if (gpu_name.find("A100") != std::string::npos || gpu_name.find("H100") != std::string::npos) {
-        config.threads_per_block = 512;
-        blocks_per_sm = 32;
-        config.blocks_per_stream = props.multiProcessorCount * blocks_per_sm;
-        config.num_streams = 32;
-    }
+    config.result_buffer_size = 512;
 
     // Ensure we don't exceed device limits
     if (config.threads_per_block > props.maxThreadsPerBlock) {
