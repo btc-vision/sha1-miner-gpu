@@ -7,10 +7,7 @@ extern "C" void launch_mining_kernel_amd(
     uint64_t nonce_offset,
     const ResultPool& pool,
     const KernelConfig& config,
-    uint64_t job_version,
-    uint32_t stream_id,
-    uint64_t *assigned_nonces,
-    uint32_t *conflict_counter
+    uint64_t job_version
 );
 #else
 extern void launch_mining_kernel_nvidia(
@@ -19,10 +16,7 @@ extern void launch_mining_kernel_nvidia(
     uint64_t nonce_offset,
     const ResultPool &pool,
     const KernelConfig &config,
-    uint64_t job_version,
-    uint32_t stream_id,
-    uint64_t *assigned_nonces,
-    uint32_t *conflict_counter
+    uint64_t job_version
 );
 #endif
 
@@ -33,20 +27,11 @@ void launch_mining_kernel(
     uint64_t nonce_offset,
     const ResultPool &pool,
     const KernelConfig &config,
-    uint64_t job_version,
-    uint32_t stream_id,
-    uint64_t *assigned_nonces,
-    uint32_t *conflict_counter
+    uint64_t job_version
 ) {
-#ifdef DEBUG_SHA1
-    printf("[DEBUG] Launching mining kernel with difficulty=%u, nonce_offset=%llu\n",
-           difficulty, nonce_offset);
-#endif
-
 #ifdef USE_HIP
-    launch_mining_kernel_amd(device_job, difficulty, nonce_offset, pool, config, job_version, stream_id, assigned_nonces, conflict_counter);
+    launch_mining_kernel_amd(device_job, difficulty, nonce_offset, pool, config, job_version);
 #else
-    launch_mining_kernel_nvidia(device_job, difficulty, nonce_offset, pool, config, job_version, stream_id,
-                                assigned_nonces, conflict_counter);
+    launch_mining_kernel_nvidia(device_job, difficulty, nonce_offset, pool, config, job_version);
 #endif
 }

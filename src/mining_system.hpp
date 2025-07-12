@@ -212,14 +212,6 @@ public:
     void updateJobLive(const MiningJob &job, uint64_t job_version);
 
 private:
-    uint64_t *gpu_assigned_nonces_;
-    uint32_t *gpu_conflict_counter_;
-    size_t assigned_nonces_size_;
-
-    // Host-side tracking
-    uint32_t total_conflicts_;
-    std::mutex nonce_tracking_mutex_;
-
     std::atomic<bool> stop_mining_{false};
 
     // Event-based synchronization
