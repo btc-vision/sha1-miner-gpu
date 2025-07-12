@@ -1025,7 +1025,7 @@ namespace MiningPool {
             if (!result.message.empty()) {
                 // Check for special messages
                 if (result.message.find("High-value contribution") != std::string::npos) {
-                    LOG_INFO("POOL", Color::BRIGHT_CYAN,
+                    LOG_INFO("POOL", Color::BRIGHT_YELLOW,
                              "*** HIGH-VALUE EPOCH CONTRIBUTION FOUND! ***", Color::RESET);
                 }
             }
