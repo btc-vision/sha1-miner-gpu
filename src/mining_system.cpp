@@ -314,11 +314,11 @@ void MiningSystem::autoTuneParameters() {
     int max_streams_by_memory = (free_mem * 0.8) / mem_per_stream;
     if (max_streams_by_memory < 1) max_streams_by_memory = 1;
 
-    /*if (config_.num_streams > max_streams_by_memory) {
+    if (config_.num_streams > max_streams_by_memory) {
         std::cout << "Reducing streams from " << config_.num_streams
                 << " to " << max_streams_by_memory << " due to memory constraints\n";
         config_.num_streams = max_streams_by_memory;
-    }*/
+    }
 
     // 6. Ensure minimum configuration
     if (config_.num_streams < 1) config_.num_streams = 1;
