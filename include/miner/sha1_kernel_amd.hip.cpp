@@ -112,27 +112,36 @@ __global__ void sha1_mining_kernel_amd(
     uint64_t *assigned_nonces,
     uint32_t *conflict_counter
 ) {
-    // Thread indices
-    const uint32_t local_tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const uint32_t threads_per_stream = total_blocks_per_stream * blockDim.x;
-    const uint32_t tid = (stream_id * threads_per_stream) + local_tid;
+    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     const uint32_t lane_id = threadIdx.x & 31;
 
+    // Direct nonce calculation
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
 
-    // Check if this range was already assigned (simplified check)
-    uint64_t range_id = thread_nonce_base / nonces_per_thread;
-    uint64_t word_idx = range_id / 64;
-    uint64_t bit_idx = range_id % 64;
+    // Check if this range was already assigned
+    if (assigned_nonces && conflict_counter) {
+        uint64_t range_id = thread_nonce_base / nonces_per_thread;
+        uint64_t word_idx = range_id / 64;
+        uint64_t bit_idx = range_id % 64;
 
-    // Atomic check and set
-    uint64_t old_val = atomicOr(&assigned_nonces[word_idx], 1ULL << bit_idx);
-    if (old_val & (1ULL << bit_idx)) {
-        // This range was already assigned!
-        atomicAdd(conflict_counter, 1);
-        printf("CONFLICT: Range %llu already assigned! tid=%u, stream=%u\n",
-               range_id, tid, stream_id);
-        return; // Skip this thread
+        // IMPORTANT: Bounds check to prevent memory corruption
+        uint64_t max_words = 134217728; // Adjust based on your allocation (1GB / 8)
+        if (word_idx >= max_words) {
+            // Out of bounds - skip this thread
+            return;
+        }
+
+        // Atomic check and set
+        uint64_t old_val = atomicOr(&assigned_nonces[word_idx], 1ULL << bit_idx);
+        if (old_val & (1ULL << bit_idx)) {
+            // This range was already assigned
+            atomicAdd(conflict_counter, 1);
+            // Don't print from every thread - too much output
+            if (tid == 0) {
+                printf("CONFLICT detected at range %llu\n", range_id);
+            }
+            return;
+        }
     }
 
     // Load base message using vectorized access

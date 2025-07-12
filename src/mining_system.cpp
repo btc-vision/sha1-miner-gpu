@@ -915,6 +915,30 @@ bool MiningSystem::initializeGPUResources() {
         gpuStreamSynchronize(streams_[i]);
     }
 
+    // ========== ADD NONCE TRACKING ALLOCATION ==========
+    std::cout << "[DEBUG] Allocating nonce tracking memory\n";
+
+    // Calculate maximum possible nonce value we might use
+    // This needs to cover ALL possible nonces across ALL streams
+    uint64_t max_nonce_value = UINT64_MAX; // Or set a reasonable upper bound
+    uint64_t bits_needed = max_nonce_value / NONCES_PER_THREAD; // One bit per range
+    assigned_nonces_size_ = (bits_needed + 63) / 64; // Round up to 64-bit words
+
+    // Limit to reasonable size (e.g., 1GB max)
+    size_t max_size_words = (1ULL << 30) / sizeof(uint64_t); // 1GB / 8 bytes
+    if (assigned_nonces_size_ > max_size_words) {
+        assigned_nonces_size_ = max_size_words;
+        LOG_WARN("MINING", "Limiting nonce tracking to ", max_size_words * 64 * NONCES_PER_THREAD, " nonces");
+    }
+
+    // Allocate GPU memory for nonce tracking
+    gpuError_t err = gpuMalloc(&gpu_assigned_nonces_, assigned_nonces_size_ * sizeof(uint64_t));
+    if (err != gpuSuccess) {
+        std::cerr << "Failed to allocate nonce tracking memory: " << gpuGetErrorString(err) << "\n";
+        return false;
+    }
+    // ================================================
+
     // Allocate device memory for jobs
     device_jobs_.resize(config_.num_streams);
     for (int i = 0; i < config_.num_streams; i++) {
@@ -930,6 +954,16 @@ bool MiningSystem::initializeGPUResources() {
 
 void MiningSystem::cleanup() {
     std::lock_guard<std::mutex> lock(system_mutex_);
+
+    if (gpu_assigned_nonces_) {
+        gpuFree(gpu_assigned_nonces_);
+        gpu_assigned_nonces_ = nullptr;
+    }
+
+    if (gpu_conflict_counter_) {
+        gpuFree(gpu_conflict_counter_);
+        gpu_conflict_counter_ = nullptr;
+    }
 
     // Synchronize and destroy streams
     for (size_t i = 0; i < streams_.size(); i++) {
