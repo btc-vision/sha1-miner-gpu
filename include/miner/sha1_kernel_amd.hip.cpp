@@ -161,8 +161,8 @@ __global__ void sha1_mining_kernel_amd(
     // Track processed nonces
     uint32_t nonces_processed = 0;
 
-    printf("nonce_base: %llu, thread_nonce_base: %llu, job_version: %llu, tid: %u, stream_id: %u\n",
-           nonce_base, thread_nonce_base, job_version, tid, stream_id);
+    //printf("nonce_base: %llu, thread_nonce_base: %llu, job_version: %llu, tid: %u, stream_id: %u\n",
+    //       nonce_base, thread_nonce_base, job_version, tid, stream_id);
 
     // Main mining loop
     for (uint32_t i = 0; i < nonces_per_thread; i++) {
