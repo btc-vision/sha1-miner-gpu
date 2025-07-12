@@ -254,6 +254,8 @@ __global__ void sha1_mining_kernel_amd(
                 for (int j = 0; j < 5; j++) {
                     results[idx].hash[j] = hash[j];
                 }
+            } else {
+                printf("Result capacity exceeded: %u >= %u\n", idx, result_capacity);
             }
         }
 
