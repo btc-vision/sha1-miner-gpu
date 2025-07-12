@@ -74,7 +74,7 @@ bool MultiGPUManager::initialize(const std::vector<int> &gpu_ids) {
         // Apply architecture-specific configuration
         if (arch == AMDArchitecture::RDNA3) {
             std::cout << "Applying RDNA3-specific optimizations...\n";
-            config.num_streams = 2;
+            config.num_streams = 4;
             config.blocks_per_stream = 256;
             config.threads_per_block = 128;
         }

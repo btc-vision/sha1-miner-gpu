@@ -106,11 +106,16 @@ __global__ void sha1_mining_kernel_amd(
     uint64_t nonce_base,
     uint32_t nonces_per_thread,
     uint64_t * __restrict__ actual_nonces_processed,
-    uint64_t job_version
+    uint64_t job_version,
+    uint32_t stream_id,
+    uint32_t total_blocks_per_stream
 ) {
     // Thread indices
-    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const uint32_t lane_id = threadIdx.x & 31; // 32-thread wavefront for RDNA
+    const uint32_t local_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t threads_per_stream = total_blocks_per_stream * blockDim.x;
+    const uint32_t tid = (stream_id * threads_per_stream) + local_tid;
+    const uint32_t lane_id = threadIdx.x & 31;
+
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
 
     // Load base message using vectorized access
@@ -130,8 +135,8 @@ __global__ void sha1_mining_kernel_amd(
     // Track processed nonces
     uint32_t nonces_processed = 0;
 
-    printf("nonce_base: %llu, thread_nonce_base: %llu, job_version: %llu\n",
-           nonce_base, thread_nonce_base, job_version);
+    printf("nonce_base: %llu, thread_nonce_base: %llu, job_version: %llu, tid: %u, stream_id: %u\n",
+           nonce_base, thread_nonce_base, job_version, tid, stream_id);
 
     // Main mining loop
     for (uint32_t i = 0; i < nonces_per_thread; i++) {
@@ -289,7 +294,8 @@ extern "C" void launch_mining_kernel_amd(
     uint64_t nonce_offset,
     const ResultPool &pool,
     const KernelConfig &config,
-    uint64_t job_version
+    uint64_t job_version,
+    uint32_t stream_id
 ) {
     // Get device properties once and cache
     thread_local hipDeviceProp_t props_cached;
@@ -355,7 +361,9 @@ extern "C" void launch_mining_kernel_amd(
         nonce_offset,
         nonces_per_thread,
         pool.nonces_processed,
-        job_version
+        job_version,
+        stream_id,
+        config.blocks
     );
 
     // Check for launch errors

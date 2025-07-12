@@ -167,7 +167,7 @@ void MiningSystem::autoTuneParameters() {
             default:
                 blocks_per_sm = 2;  // Very conservative for unknown
                 optimal_threads = 128;
-                config_.num_streams = 2;
+                config_.num_streams = 4;
                 config_.result_buffer_size = 128;
                 break;
         }
@@ -207,7 +207,7 @@ void MiningSystem::autoTuneParameters() {
         blocks_per_sm = 4;
         config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
         config_.threads_per_block = optimal_threads;
-        config_.num_streams = 2;
+        config_.num_streams = 4;
 #endif
     } else if (gpu_vendor_ == GPUVendor::NVIDIA) {
         // NVIDIA-specific tuning
@@ -237,7 +237,7 @@ void MiningSystem::autoTuneParameters() {
             // Maxwell and older
             blocks_per_sm = 4;
             optimal_threads = 128;
-            config_.num_streams = 2;
+            config_.num_streams = 4;
         }
 
         config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
@@ -252,7 +252,7 @@ void MiningSystem::autoTuneParameters() {
         // Unknown vendor - use very conservative defaults
         blocks_per_sm = 2;
         optimal_threads = 128;
-        config_.num_streams = 2;
+        config_.num_streams = 4;
         config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
         config_.threads_per_block = optimal_threads;
     }
@@ -314,11 +314,11 @@ void MiningSystem::autoTuneParameters() {
     int max_streams_by_memory = (free_mem * 0.8) / mem_per_stream;
     if (max_streams_by_memory < 1) max_streams_by_memory = 1;
 
-    if (config_.num_streams > max_streams_by_memory) {
+    /*if (config_.num_streams > max_streams_by_memory) {
         std::cout << "Reducing streams from " << config_.num_streams
                 << " to " << max_streams_by_memory << " due to memory constraints\n";
         config_.num_streams = max_streams_by_memory;
-    }
+    }*/
 
     // 6. Ensure minimum configuration
     if (config_.num_streams < 1) config_.num_streams = 1;
@@ -530,7 +530,8 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
             global_nonce_offset,
             gpu_pools_[current_stream],
             config,
-            current_job_version_ // Pass current job version
+            current_job_version_,
+            current_stream
         );
 
         stream_data[current_stream].launch_time = launch_start;
@@ -557,9 +558,6 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
         // Process any remaining results
         processResultsOptimized(i);
     }
-
-    // Stop monitor thread
-    //g_shutdown = true;
 
     // Return the final nonce offset so caller knows where we stopped
     LOG_DEBUG("MINING", "Mining stopped at nonce offset: ", global_nonce_offset);
@@ -704,7 +702,8 @@ void MiningSystem::launchKernelOnStream(int stream_idx, uint64_t nonce_offset, c
         nonce_offset,
         gpu_pools_[stream_idx],
         config,
-        current_job_version_ // Pass current job version
+        current_job_version_,
+        stream_idx
     );
 
     // Record event when kernel completes
@@ -1264,7 +1263,8 @@ uint64_t MiningSystem::runSingleBatch(const MiningJob &job) {
         job.nonce_offset,
         gpu_pools_[0],
         kernel_config,
-        current_job_version_
+        current_job_version_,
+        0
     );
 
     // Wait for completion

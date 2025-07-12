@@ -1,6 +1,5 @@
 #include "sha1_miner.cuh"
 
-// Forward declarations of kernel launch functions
 #ifdef USE_HIP
 extern "C" void launch_mining_kernel_amd(
     const DeviceMiningJob& device_job,
@@ -8,7 +7,8 @@ extern "C" void launch_mining_kernel_amd(
     uint64_t nonce_offset,
     const ResultPool& pool,
     const KernelConfig& config,
-    uint64_t job_version
+    uint64_t job_version,
+    uint32_t stream_id
 );
 #else
 extern void launch_mining_kernel_nvidia(
@@ -17,7 +17,8 @@ extern void launch_mining_kernel_nvidia(
     uint64_t nonce_offset,
     const ResultPool &pool,
     const KernelConfig &config,
-    uint64_t job_version
+    uint64_t job_version,
+    uint32_t stream_id
 );
 #endif
 
@@ -28,7 +29,8 @@ void launch_mining_kernel(
     uint64_t nonce_offset,
     const ResultPool &pool,
     const KernelConfig &config,
-    uint64_t job_version
+    uint64_t job_version,
+    uint32_t stream_id
 ) {
 #ifdef DEBUG_SHA1
     printf("[DEBUG] Launching mining kernel with difficulty=%u, nonce_offset=%llu\n",
@@ -36,8 +38,8 @@ void launch_mining_kernel(
 #endif
 
 #ifdef USE_HIP
-    launch_mining_kernel_amd(device_job, difficulty, nonce_offset, pool, config, job_version);
+    launch_mining_kernel_amd(device_job, difficulty, nonce_offset, pool, config, job_version, stream_id);
 #else
-    launch_mining_kernel_nvidia(device_job, difficulty, nonce_offset, pool, config, job_version);
+    launch_mining_kernel_nvidia(device_job, difficulty, nonce_offset, pool, config, job_version, stream_id);
 #endif
 }

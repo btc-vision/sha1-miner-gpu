@@ -142,7 +142,8 @@ void launch_mining_kernel(
     uint64_t nonce_offset,
     const ResultPool &pool,
     const KernelConfig &config,
-    uint64_t job_version
+    uint64_t job_version,
+    uint32_t stream_id
 );
 
 #endif // __cplusplus

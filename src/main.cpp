@@ -322,7 +322,7 @@ void auto_tune_parameters(MiningSystem::Config &config, int device_id) {
     } else if (props.multiProcessorCount >= 20) {
         config.num_streams = 4;
     } else {
-        config.num_streams = 2;
+        config.num_streams = 4;
     }
 
     // Adjust streams based on available memory
