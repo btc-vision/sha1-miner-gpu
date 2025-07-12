@@ -217,7 +217,8 @@ namespace MiningPool {
                         // Connect TCP
                         LOG_DEBUG("CLIENT", "Connecting TCP socket to ", endpoint.address().to_string(),
                                   ":", endpoint.port(), "...");
-                        socket.connect(endpoint, ec);
+ socket.connect(endpoint, ec);
+
                         if (ec) {
                             // If first address fails, try others
                             bool connected = false;

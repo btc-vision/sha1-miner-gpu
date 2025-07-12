@@ -49,6 +49,7 @@ namespace MiningPool {
         BANNED = 1009,
         NO_WORK = 1010,
         CONNECTION_LOST = 1011,
+        INVALID_AUTH_METHOD = 1012,
     };
 
     // Share difficulty validation result
