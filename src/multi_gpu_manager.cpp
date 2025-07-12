@@ -70,16 +70,6 @@ bool MultiGPUManager::initialize(const std::vector<int> &gpu_ids) {
         config.use_pinned_memory = true;
         config.result_buffer_size = 1024;
 
-#ifdef USE_HIP
-        // Apply architecture-specific configuration
-        if (arch == AMDArchitecture::RDNA3) {
-            std::cout << "Applying RDNA3-specific optimizations...\n";
-            config.num_streams = 4;
-            config.blocks_per_stream = 256;
-            config.threads_per_block = 128;
-        }
-#endif
-
         // Create and initialize mining system
         worker->mining_system = std::make_unique<MiningSystem>(config);
 

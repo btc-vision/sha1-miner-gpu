@@ -167,7 +167,7 @@ void MiningSystem::autoTuneParameters() {
             default:
                 blocks_per_sm = 2;  // Very conservative for unknown
                 optimal_threads = 128;
-                config_.num_streams = 4;
+                config_.num_streams = 2;
                 config_.result_buffer_size = 128;
                 break;
         }
@@ -207,7 +207,7 @@ void MiningSystem::autoTuneParameters() {
         blocks_per_sm = 4;
         config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
         config_.threads_per_block = optimal_threads;
-        config_.num_streams = 4;
+        config_.num_streams = 2;
 #endif
     } else if (gpu_vendor_ == GPUVendor::NVIDIA) {
         // NVIDIA-specific tuning
@@ -252,7 +252,7 @@ void MiningSystem::autoTuneParameters() {
         // Unknown vendor - use very conservative defaults
         blocks_per_sm = 2;
         optimal_threads = 128;
-        config_.num_streams = 4;
+        config_.num_streams = 2;
         config_.blocks_per_stream = device_props_.multiProcessorCount * blocks_per_sm;
         config_.threads_per_block = optimal_threads;
     }
