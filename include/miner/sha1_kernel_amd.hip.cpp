@@ -240,8 +240,6 @@ __global__ void sha1_mining_kernel_amd(
         // Count matching bits
         uint32_t matching_bits = count_leading_zeros_160bit_amd(hash, target);
 
-        //__syncthreads();
-
         if (matching_bits >= difficulty) {
             // Simple atomic approach for AMD - no vote functions
             uint32_t idx = atomicAdd(result_count, 1);
