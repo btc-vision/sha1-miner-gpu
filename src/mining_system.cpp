@@ -52,7 +52,9 @@ void MiningSystem::TimingStats::print() const {
 
 // MiningSystem implementation
 MiningSystem::MiningSystem(const Config &config)
-    : config_(config), device_props_(), gpu_vendor_(GPUVendor::UNKNOWN), best_tracker_() {
+    : config_(config), device_props_(), gpu_vendor_(GPUVendor::UNKNOWN), best_tracker_(),
+      gpu_assigned_nonces_(nullptr), gpu_conflict_counter_(nullptr),
+      assigned_nonces_size_(0), total_conflicts_(0) {
 }
 
 MiningSystem::~MiningSystem() {
@@ -442,160 +444,9 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
 
     // Reset flags and counters
     stop_mining_ = false;
-    //g_shutdown = false;
     best_tracker_.reset();
     total_hashes_ = 0;
     clearResults();
-
-    // Initialize per-stream data
-    std::vector<StreamData> stream_data(config_.num_streams);
-
-    // Initialize stream tracking
-    for (int i = 0; i < config_.num_streams; i++) {
-        stream_data[i].last_nonces_processed = 0;
-        stream_data[i].busy = false;
-        gpuMemsetAsync(gpu_pools_[i].nonces_processed, 0, sizeof(uint64_t), streams_[i]);
-    }
-
-    // Nonce distribution - START FROM PROVIDED OFFSET
-    uint64_t nonce_stride = getHashesPerKernel();
-    uint64_t global_nonce_offset = start_nonce;
-
-    LOG_INFO("MINING", "Starting mining from nonce offset: ", global_nonce_offset);
-
-    // Mining loop - runs until shutdown OR connection lost
-    int current_stream = 0;
-    uint64_t kernels_launched = 0;
-
-    while (!g_shutdown && !stop_mining_ && should_continue()) {
-        // Find next available stream
-        int attempts = 0;
-        while (stream_data[current_stream].busy && attempts < config_.num_streams) {
-            gpuError_t status = gpuStreamQuery(streams_[current_stream]);
-            if (status == gpuSuccess) {
-                // Stream completed - get actual nonces processed
-                uint64_t actual_nonces = 0;
-                gpuMemcpyAsync(&actual_nonces, gpu_pools_[current_stream].nonces_processed, sizeof(uint64_t),
-                               gpuMemcpyDeviceToHost, streams_[current_stream]);
-                gpuStreamSynchronize(streams_[current_stream]);
-
-                // Update total with actual work done
-                uint64_t nonces_this_kernel = actual_nonces - stream_data[current_stream].last_nonces_processed;
-                total_hashes_ += nonces_this_kernel;
-                stream_data[current_stream].last_nonces_processed = actual_nonces;
-
-                // Process results
-                processResultsOptimized(current_stream);
-                stream_data[current_stream].busy = false;
-
-                // Update timing stats
-                auto kernel_time = std::chrono::duration_cast<std::chrono::microseconds>(
-                                       std::chrono::high_resolution_clock::now() -
-                                       stream_data[current_stream].launch_time
-                                   ).count() / 1000.0;
-
-                std::lock_guard<std::mutex> lock(timing_mutex_);
-                timing_stats_.kernel_execution_time_ms += kernel_time;
-                timing_stats_.kernel_count++;
-            }
-
-            current_stream = (current_stream + 1) % config_.num_streams;
-            attempts++;
-        }
-
-        // Check if we should stop before launching new work
-        if (!should_continue()) {
-            LOG_INFO("MINING", "Stopping work generation at nonce offset: ", global_nonce_offset);
-            break;
-        }
-
-        if (stream_data[current_stream].busy) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            continue;
-        }
-
-        // Configure kernel
-        KernelConfig config;
-        config.blocks = config_.blocks_per_stream;
-        config.threads_per_block = config_.threads_per_block;
-        config.stream = streams_[current_stream];
-        config.shared_memory_size = 0;
-
-        // Launch kernel with current job version
-        auto launch_start = std::chrono::high_resolution_clock::now();
-
-        launch_mining_kernel(
-            device_jobs_[current_stream],
-            job.difficulty,
-            global_nonce_offset,
-            gpu_pools_[current_stream],
-            config,
-            current_job_version_,
-            current_stream
-        );
-
-        stream_data[current_stream].launch_time = launch_start;
-        stream_data[current_stream].busy = true;
-        stream_data[current_stream].nonce_offset = global_nonce_offset;
-
-        kernels_launched++;
-        global_nonce_offset += nonce_stride;
-
-        // Move to next stream
-        current_stream = (current_stream + 1) % config_.num_streams;
-    }
-
-    // Stop flag was set - wait for all streams to complete
-    for (int i = 0; i < config_.num_streams; i++) {
-        gpuStreamSynchronize(streams_[i]);
-
-        // Get final nonce counts
-        uint64_t actual_nonces = 0;
-        gpuMemcpy(&actual_nonces, gpu_pools_[i].nonces_processed, sizeof(uint64_t), gpuMemcpyDeviceToHost);
-        uint64_t nonces_this_kernel = actual_nonces - stream_data[i].last_nonces_processed;
-        total_hashes_ += nonces_this_kernel;
-
-        // Process any remaining results
-        processResultsOptimized(i);
-    }
-
-    // Return the final nonce offset so caller knows where we stopped
-    LOG_DEBUG("MINING", "Mining stopped at nonce offset: ", global_nonce_offset);
-    return global_nonce_offset;
-}
-
-void MiningSystem::runMiningLoop(const MiningJob &job) {
-    std::cout << "Starting infinite mining...\n";
-    std::cout << "Target difficulty: " << job.difficulty << " bits\n";
-    std::cout << "Target hash: ";
-    for (int i = 0; i < 5; i++) {
-        std::cout << std::hex << std::setw(8) << std::setfill('0')
-                << job.target_hash[i] << " ";
-    }
-    std::cout << "\n" << std::dec;
-    std::cout << "Only new best matches will be reported.\n";
-    std::cout << "Press Ctrl+C to stop mining.\n";
-    std::cout << "=====================================\n\n";
-
-    // Copy job to device
-    for (int i = 0; i < config_.num_streams; i++) {
-        device_jobs_[i].copyFromHost(job);
-    }
-
-    // Reset shutdown flag and best tracker
-    //g_shutdown = false;
-    best_tracker_.reset();
-    // Reset actual hash counter
-    total_hashes_ = 0;
-    // Clear accumulated results
-    clearResults();
-    // Reset job version to 0 for non-pool mining
-    current_job_version_ = 0;
-
-    // Start performance monitor
-    //monitor_thread_ = std::make_unique<std::thread>(
-    //    &MiningSystem::performanceMonitor, this
-    //);
 
     // Initialize per-stream data
     std::vector<StreamData> stream_data(config_.num_streams);
@@ -611,29 +462,26 @@ void MiningSystem::runMiningLoop(const MiningJob &job) {
         gpuMemsetAsync(gpu_pools_[i].nonces_processed, 0, sizeof(uint64_t), streams_[i]);
     }
 
-    // Nonce distribution
+    // Nonce distribution - START FROM PROVIDED OFFSET
     uint64_t nonce_stride = getHashesPerKernel();
-    uint64_t global_nonce_offset = 1; // Start from 1
+    uint64_t global_nonce_offset = start_nonce;
 
-    // Mining loop - runs until g_shutdown is set
-    uint64_t kernels_launched = 0;
+    LOG_INFO("MINING", "Starting mining from nonce offset: ", global_nonce_offset);
 
-    // Launch initial kernels on all streams to maximize GPU utilization
+    // Launch initial kernels on all streams
     for (int i = 0; i < config_.num_streams; i++) {
         launchKernelOnStream(i, global_nonce_offset, job);
         stream_data[i].nonce_offset = global_nonce_offset;
         stream_data[i].busy = true;
         global_nonce_offset += nonce_stride;
-        kernels_launched++;
     }
 
     // Main mining loop
-    while (!g_shutdown) {
+    while (!g_shutdown && !stop_mining_ && should_continue()) {
         // Check for completed kernels using events
         bool found_completed = false;
         int completed_stream = -1;
 
-        // First, do a quick non-blocking check of all events
         for (int i = 0; i < config_.num_streams; i++) {
             if (!stream_data[i].busy) continue;
 
@@ -642,13 +490,10 @@ void MiningSystem::runMiningLoop(const MiningJob &job) {
                 completed_stream = i;
                 found_completed = true;
                 break;
-            } else if (status != gpuErrorNotReady) {
-                std::cerr << "Event query error: " << gpuGetErrorString(status) << "\n";
             }
         }
 
         if (!found_completed) {
-            // No kernels completed yet, sleep briefly to avoid burning CPU
             std::this_thread::sleep_for(std::chrono::microseconds(100));
             continue;
         }
@@ -657,14 +502,17 @@ void MiningSystem::runMiningLoop(const MiningJob &job) {
         processStreamResults(completed_stream, stream_data[completed_stream]);
         stream_data[completed_stream].busy = false;
 
-        // Launch new work on this stream
-        if (!g_shutdown) {
-            launchKernelOnStream(completed_stream, global_nonce_offset, job);
-            stream_data[completed_stream].nonce_offset = global_nonce_offset;
-            stream_data[completed_stream].busy = true;
-            global_nonce_offset += nonce_stride;
-            kernels_launched++;
+        // Check if we should stop before launching new work
+        if (!should_continue()) {
+            LOG_INFO("MINING", "Stopping work generation at nonce offset: ", global_nonce_offset);
+            break;
         }
+
+        // Launch new work on this stream
+        launchKernelOnStream(completed_stream, global_nonce_offset, job);
+        stream_data[completed_stream].nonce_offset = global_nonce_offset;
+        stream_data[completed_stream].busy = true;
+        global_nonce_offset += nonce_stride;
     }
 
     // Wait for all remaining kernels to complete
@@ -680,10 +528,32 @@ void MiningSystem::runMiningLoop(const MiningJob &job) {
         gpuEventDestroy(kernel_complete_events_[i]);
     }
 
-    // Stop monitor thread
-    //g_shutdown = true;
+    LOG_DEBUG("MINING", "Mining stopped at nonce offset: ", global_nonce_offset);
+    return global_nonce_offset;
 }
 
+// Simple wrapper for infinite mining
+void MiningSystem::runMiningLoop(const MiningJob &job) {
+    std::cout << "Starting infinite mining...\n";
+    std::cout << "Target difficulty: " << job.difficulty << " bits\n";
+    std::cout << "Target hash: ";
+    for (int i = 0; i < 5; i++) {
+        std::cout << std::hex << std::setw(8) << std::setfill('0')
+                << job.target_hash[i] << " ";
+    }
+    std::cout << "\n" << std::dec;
+    std::cout << "Only new best matches will be reported.\n";
+    std::cout << "Press Ctrl+C to stop mining.\n";
+    std::cout << "=====================================\n\n";
+
+    // Reset job version to 0 for non-pool mining
+    current_job_version_ = 0;
+
+    // Just call the unified implementation with "always continue" lambda
+    runMiningLoopInterruptibleWithOffset(job, []() { return !g_shutdown; }, 1);
+}
+
+// Update launchKernelOnStream to NOT modify global_nonce_offset
 void MiningSystem::launchKernelOnStream(int stream_idx, uint64_t nonce_offset, const MiningJob &job) {
     // Configure kernel
     KernelConfig config;
@@ -699,11 +569,13 @@ void MiningSystem::launchKernelOnStream(int stream_idx, uint64_t nonce_offset, c
     launch_mining_kernel(
         device_jobs_[stream_idx],
         job.difficulty,
-        nonce_offset,
+        nonce_offset, // Use the offset directly
         gpu_pools_[stream_idx],
         config,
         current_job_version_,
-        stream_idx
+        stream_idx,
+        gpu_assigned_nonces_,
+        gpu_conflict_counter_
     );
 
     // Record event when kernel completes
@@ -1059,12 +931,6 @@ bool MiningSystem::initializeGPUResources() {
 void MiningSystem::cleanup() {
     std::lock_guard<std::mutex> lock(system_mutex_);
 
-    //g_shutdown = true;
-
-    //if (monitor_thread_ && monitor_thread_->joinable()) {
-    //    monitor_thread_->join();
-    //}
-
     // Synchronize and destroy streams
     for (size_t i = 0; i < streams_.size(); i++) {
         if (streams_[i]) {
@@ -1264,7 +1130,9 @@ uint64_t MiningSystem::runSingleBatch(const MiningJob &job) {
         gpu_pools_[0],
         kernel_config,
         current_job_version_,
-        0
+        0,
+        gpu_assigned_nonces_,
+        gpu_conflict_counter_
     );
 
     // Wait for completion

@@ -50,15 +50,37 @@ __global__ void sha1_mining_kernel_nvidia(
     uint64_t * __restrict__ actual_nonces_processed,
     uint64_t job_version,
     uint32_t stream_id,
-    uint32_t total_blocks_per_stream
+    uint32_t total_blocks_per_stream,
+    uint64_t *assigned_nonces,
+    uint32_t *conflict_counter
 ) {
-    // Thread indices
-    const uint32_t local_tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const uint32_t threads_per_stream = total_blocks_per_stream * blockDim.x;
-    const uint32_t tid = (stream_id * threads_per_stream) + local_tid;
+    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     const uint32_t lane_id = threadIdx.x & 31;
 
+    // Direct calculation from the nonce_base passed by host
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
+
+    // Optional: Keep conflict detection for debugging
+    /*if (assigned_nonces && conflict_counter) {
+        uint64_t range_id = thread_nonce_base / nonces_per_thread;
+        uint64_t word_idx = range_id / 64;
+        uint64_t bit_idx = range_id % 64;
+
+        // Check bounds
+        uint64_t max_words = 1000000; // Adjust based on your allocation
+        if (word_idx < max_words) {
+            uint64_t old_val = atomicOr(&assigned_nonces[word_idx], 1ULL << bit_idx);
+            if (old_val & (1ULL << bit_idx)) {
+                atomicAdd(conflict_counter, 1);
+                // Debug print
+                if (blockIdx.x == 0 && threadIdx.x == 0) {
+                    printf("CONFLICT: nonce_base=%llu, tid=%u, range=%llu\n",
+                           nonce_base, tid, range_id);
+                }
+                return;
+            }
+        }
+    }*/
 
     // Load base message using vectorized access
     uint8_t base_msg[32];
@@ -242,7 +264,9 @@ void launch_mining_kernel_nvidia(
     const ResultPool &pool,
     const KernelConfig &config,
     uint64_t job_version,
-    uint32_t stream_id
+    uint32_t stream_id,
+    uint64_t *assigned_nonces,
+    uint32_t *conflict_counter
 ) {
     // Validate configuration
     if (config.blocks <= 0 || config.threads_per_block <= 0) {
@@ -289,7 +313,9 @@ void launch_mining_kernel_nvidia(
         pool.nonces_processed,
         job_version,
         stream_id,
-        config.blocks
+        config.blocks,
+        assigned_nonces,
+        conflict_counter
     );
 
     // Check for launch errors
