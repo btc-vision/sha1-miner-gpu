@@ -95,6 +95,8 @@ public:
 
     void sync() const;
 
+    bool validateStreams();
+
     /**
      * Stop all mining operations
      */
@@ -282,6 +284,8 @@ protected:
 
     // Private methods
     bool initializeGPUResources();
+
+    bool initializeMemoryPools();
 
     void cleanup();
 

@@ -367,17 +367,97 @@ void MiningSystem::autoTuneParameters() {
 bool MiningSystem::initialize() {
     std::lock_guard<std::mutex> lock(system_mutex_);
 
-    // Set device
-    gpuError_t err = gpuSetDevice(config_.device_id);
+    // First, check if any GPU is available
+    int device_count = 0;
+    gpuError_t err = gpuGetDeviceCount(&device_count);
     if (err != gpuSuccess) {
-        std::cerr << "Failed to set GPU device: " << gpuGetErrorString(err) << "\n";
+        std::cerr << "Failed to get GPU device count: " << gpuGetErrorString(err) << "\n";
+        std::cerr << "Is the GPU driver installed and running?\n";
         return false;
+    }
+
+    if (device_count == 0) {
+        std::cerr << "No GPU devices found!\n";
+        return false;
+    }
+
+    if (config_.device_id >= device_count) {
+        std::cerr << "Invalid device ID " << config_.device_id
+                << ". Available devices: 0-" << (device_count - 1) << "\n";
+        return false;
+    }
+
+    // Reset any previous errors
+    gpuGetLastError();
+
+    // Set device with error checking
+    err = gpuSetDevice(config_.device_id);
+    if (err != gpuSuccess) {
+        std::cerr << "Failed to set GPU device " << config_.device_id << ": "
+                << gpuGetErrorString(err) << "\n";
+        // Try to provide more specific error information
+#ifdef USE_HIP
+        if (err == hipErrorInvalidDevice) {
+            std::cerr << "Device " << config_.device_id << " is not a valid HIP device\n";
+        } else if (err == hipErrorNoDevice) {
+            std::cerr << "No HIP devices available\n";
+        }
+#else
+        if (err == cudaErrorInvalidDevice) {
+            std::cerr << "Device " << config_.device_id << " is not a valid CUDA device\n";
+        } else if (err == cudaErrorNoDevice) {
+            std::cerr << "No CUDA devices available\n";
+        }
+#endif
+        return false;
+    }
+
+    // Verify we can communicate with the device
+    err = gpuDeviceSynchronize();
+    if (err != gpuSuccess) {
+        std::cerr << "Failed to synchronize with device: " << gpuGetErrorString(err) << "\n";
+        std::cerr << "The GPU may be in a bad state or the driver may need to be restarted\n";
+        // Try to reset the device
+        std::cerr << "Attempting device reset...\n";
+#ifdef USE_HIP
+        err = hipDeviceReset();
+#else
+        err = cudaDeviceReset();
+#endif
+        if (err != gpuSuccess) {
+            std::cerr << "Device reset failed: " << gpuGetErrorString(err) << "\n";
+            return false;
+        }
+        // Try setting device again after reset
+        err = gpuSetDevice(config_.device_id);
+        if (err != gpuSuccess) {
+            std::cerr << "Failed to set device after reset: " << gpuGetErrorString(err) << "\n";
+            return false;
+        }
     }
 
     // Get device properties
     err = gpuGetDeviceProperties(&device_props_, config_.device_id);
     if (err != gpuSuccess) {
         std::cerr << "Failed to get device properties: " << gpuGetErrorString(err) << "\n";
+        return false;
+    }
+
+    // Check if device is in prohibited mode (Windows TCC/WDDM issues)
+#ifdef _WIN32
+    if (device_props_.tccDriver) {
+        std::cout << "Device is running in TCC mode\n";
+    } else {
+        std::cout << "Device is running in WDDM mode\n";
+        // On Windows, WDDM mode has a timeout that can cause issues
+        std::cout << "Note: WDDM mode has a 2-second timeout. Long-running kernels may fail.\n";
+    }
+#endif
+
+    // Check compute capability
+    if (device_props_.major < 3) {
+        std::cerr << "GPU compute capability " << device_props_.major << "." << device_props_.minor <<
+                " is too old. Minimum required: 3.0\n";
         return false;
     }
 
@@ -389,7 +469,19 @@ bool MiningSystem::initialize() {
     std::cout << "SMs/CUs: " << device_props_.multiProcessorCount << "\n";
     std::cout << "Warp/Wavefront Size: " << device_props_.warpSize << "\n";
     std::cout << "Max Threads per Block: " << device_props_.maxThreadsPerBlock << "\n";
-    std::cout << "Total Global Memory: " << (device_props_.totalGlobalMem / (1024.0 * 1024.0 * 1024.0)) << " GB\n\n";
+    std::cout << "Total Global Memory: " << (device_props_.totalGlobalMem / (1024.0 * 1024.0 * 1024.0)) << " GB\n";
+    // Check available memory
+    size_t free_mem, total_mem;
+    err = gpuMemGetInfo(&free_mem, &total_mem);
+    if (err == gpuSuccess) {
+        std::cout << "Available Memory: " << (free_mem / (1024.0 * 1024.0 * 1024.0)) << " GB\n";
+
+        if (free_mem < 100 * 1024 * 1024) {
+            // Less than 100MB free
+            std::cerr << "WARNING: Very low GPU memory available. Mining may fail.\n";
+        }
+    }
+    std::cout << "\n";
 
     // Auto-tune parameters if blocks not specified
     if (config_.blocks_per_stream == 0) {
@@ -400,11 +492,14 @@ bool MiningSystem::initialize() {
     if (config_.threads_per_block % device_props_.warpSize != 0 ||
         config_.threads_per_block > device_props_.maxThreadsPerBlock) {
         std::cerr << "Invalid thread configuration\n";
+        std::cerr << "Threads per block must be multiple of " << device_props_.warpSize
+                << " and <= " << device_props_.maxThreadsPerBlock << "\n";
         return false;
     }
 
     // Initialize GPU resources
     if (!initializeGPUResources()) {
+        std::cerr << "Failed to initialize GPU resources\n";
         return false;
     }
 
@@ -620,6 +715,33 @@ void MiningSystem::sync() const {
     }
 }
 
+bool MiningSystem::validateStreams() {
+    for (int i = 0; i < config_.num_streams; i++) {
+        if (!streams_[i]) {
+            LOG_ERROR("MINING", "Stream ", i, " is null");
+            return false;
+        }
+        // Test stream by trying to record an event
+        gpuEvent_t test_event;
+        gpuError_t err = gpuEventCreate(&test_event);
+        if (err != gpuSuccess) {
+            LOG_ERROR("MINING", "Failed to create test event: ", gpuGetErrorString(err));
+            return false;
+        }
+
+        err = gpuEventRecord(test_event, streams_[i]);
+        if (err != gpuSuccess) {
+            LOG_ERROR("MINING", "Stream ", i, " is invalid: ", gpuGetErrorString(err));
+            gpuEventDestroy(test_event);
+            return false;
+        }
+
+        // Clean up test event
+        gpuEventDestroy(test_event);
+    }
+    return true;
+}
+
 void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version) {
     // Store current job version first
     current_job_version_ = job_version;
@@ -818,22 +940,85 @@ bool MiningSystem::initializeGPUResources() {
     std::cout << "[DEBUG] Creating " << config_.num_streams << " streams\n";
 
     for (int i = 0; i < config_.num_streams; i++) {
+        // Initialize to nullptr first
+        streams_[i] = nullptr;
         int priority = (i == 0) ? priority_high : priority_low;
-        gpuError_t err = gpuStreamCreateWithPriority(
-            &streams_[i], gpuStreamNonBlocking, priority
-        );
+        gpuError_t err = gpuStreamCreateWithPriority(&streams_[i], gpuStreamNonBlocking, priority);
         if (err != gpuSuccess) {
-            std::cerr << "Failed to create stream " << i << ": "
+            std::cerr << "Failed to create stream " << i << ": " << gpuGetErrorString(err) << "\n";
+            // Clean up already created streams
+            for (int j = 0; j < i; j++) {
+                if (streams_[j]) {
+                    gpuStreamDestroy(streams_[j]);
+                    streams_[j] = nullptr;
+                }
+            }
+            return false;
+        }
+        // Verify stream was created
+        if (!streams_[i]) {
+            std::cerr << "Stream " << i << " is null after creation\n";
+            // Clean up
+            for (int j = 0; j < i; j++) {
+                if (streams_[j]) {
+                    gpuStreamDestroy(streams_[j]);
+                    streams_[j] = nullptr;
+                }
+            }
+            return false;
+        }
+        std::cout << "[DEBUG] Created stream " << i << " with handle: " << streams_[i] << "\n";
+
+        // Create events with error checking
+        err = gpuEventCreateWithFlags(&start_events_[i], gpuEventDisableTiming);
+        if (err != gpuSuccess) {
+            std::cerr << "Failed to create start event for stream " << i << ": " << gpuGetErrorString(err) << "\n";
+            return false;
+        }
+
+        err = gpuEventCreateWithFlags(&end_events_[i], gpuEventDisableTiming);
+        if (err != gpuSuccess) {
+            std::cerr << "Failed to create end event for stream " << i << ": "
                     << gpuGetErrorString(err) << "\n";
             return false;
         }
-        std::cout << "[DEBUG] Created stream " << i << "\n";
-
-        gpuEventCreateWithFlags(&start_events_[i], gpuEventDisableTiming);
-        gpuEventCreateWithFlags(&end_events_[i], gpuEventDisableTiming);
     }
 
-    // Continue with the rest...
+    // Validate all streams were created successfully
+    if (!validateStreams()) {
+        std::cerr << "Stream validation failed after creation\n";
+        return false;
+    }
+
+    // Initialize memory pools
+    if (!initializeMemoryPools()) {
+        std::cerr << "Failed to initialize memory pools\n";
+        return false;
+    }
+
+    // Allocate device memory for jobs
+    device_jobs_.resize(config_.num_streams);
+    for (int i = 0; i < config_.num_streams; i++) {
+        // FIXED: Check for allocation FAILURE (allocate returns true on success)
+        if (!device_jobs_[i].allocate()) {
+            std::cerr << "Failed to allocate device job " << i << "\n";
+            // Clean up previously allocated jobs
+            for (int j = 0; j < i; j++) {
+                device_jobs_[j].free();
+            }
+            return false;
+        }
+        std::cout << "[DEBUG] Successfully allocated device job " << i << "\n";
+    }
+
+    // Initialize job version
+    current_job_version_ = 0;
+
+    std::cout << "Successfully initialized GPU resources for " << config_.num_streams << " streams\n";
+    return true;
+}
+
+bool MiningSystem::initializeMemoryPools() {
     std::cout << "[DEBUG] Allocating GPU memory pools\n";
 
     // Allocate GPU memory pools
@@ -853,13 +1038,27 @@ bool MiningSystem::initializeGPUResources() {
         pool.nonces_processed = nullptr;
         pool.job_version = nullptr;
 
+        // Check if stream is valid before using it
+        if (!streams_[i]) {
+            std::cerr << "Stream " << i << " is invalid before memory allocation\n";
+            return false;
+        }
+
         // Allocate device memory with proper alignment
         size_t result_size = sizeof(MiningResult) * pool.capacity;
         size_t aligned_size = ((result_size + alignment - 1) / alignment) * alignment;
 
         gpuError_t err = gpuMalloc(&pool.results, aligned_size);
         if (err != gpuSuccess) {
-            std::cerr << "Failed to allocate GPU results buffer: " << gpuGetErrorString(err) << "\n";
+            std::cerr << "Failed to allocate GPU results buffer for stream " << i << ": " << gpuGetErrorString(err) <<
+                    "\n";
+            return false;
+        }
+
+        // Clear memory immediately
+        err = gpuMemsetAsync(pool.results, 0, aligned_size, streams_[i]);
+        if (err != gpuSuccess) {
+            std::cerr << "Failed to clear results buffer: " << gpuGetErrorString(err) << "\n";
             return false;
         }
 
@@ -876,22 +1075,36 @@ bool MiningSystem::initializeGPUResources() {
             return false;
         }
 
-        gpuMemsetAsync(pool.count, 0, sizeof(uint32_t), streams_[i]);
+        err = gpuMemsetAsync(pool.count, 0, sizeof(uint32_t), streams_[i]);
+        if (err != gpuSuccess) {
+            std::cerr << "Failed to clear count buffer: " << gpuGetErrorString(err) << "\n";
+            return false;
+        }
 
+        // Allocate nonces_processed
         err = gpuMalloc(&pool.nonces_processed, sizeof(uint64_t));
         if (err != gpuSuccess) {
             std::cerr << "Failed to allocate nonce counter: " << gpuGetErrorString(err) << "\n";
             return false;
         }
-        gpuMemsetAsync(pool.nonces_processed, 0, sizeof(uint64_t), streams_[i]);
+        err = gpuMemsetAsync(pool.nonces_processed, 0, sizeof(uint64_t), streams_[i]);
+        if (err != gpuSuccess) {
+            std::cerr << "Failed to clear nonce counter: " << gpuGetErrorString(err) << "\n";
+            return false;
+        }
 
-        // Note: job_version is allocated but not used directly in kernels anymore
+        // Allocate job_version
         err = gpuMalloc(&pool.job_version, sizeof(uint64_t));
         if (err != gpuSuccess) {
             std::cerr << "Failed to allocate job version: " << gpuGetErrorString(err) << "\n";
             return false;
         }
-        gpuMemsetAsync(pool.job_version, 0, sizeof(uint64_t), streams_[i]);
+
+        err = gpuMemsetAsync(pool.job_version, 0, sizeof(uint64_t), streams_[i]);
+        if (err != gpuSuccess) {
+            std::cerr << "Failed to clear job version: " << gpuGetErrorString(err) << "\n";
+            return false;
+        }
 
         // Allocate pinned host memory
         if (config_.use_pinned_memory) {
@@ -907,17 +1120,34 @@ bool MiningSystem::initializeGPUResources() {
         }
 
         // Synchronize to ensure all allocations are complete
-        gpuStreamSynchronize(streams_[i]);
+        err = gpuStreamSynchronize(streams_[i]);
+        if (err != gpuSuccess) {
+            std::cerr << "Failed to synchronize stream " << i << " after allocation: "
+                    << gpuGetErrorString(err) << "\n";
+            return false;
+        }
     }
 
     // Allocate device memory for jobs
     device_jobs_.resize(config_.num_streams);
     for (int i = 0; i < config_.num_streams; i++) {
-        device_jobs_[i].allocate();
+        if (!device_jobs_[i].allocate()) {
+            std::cerr << "Failed to allocate device job " << i << "\n";
+            return false;
+        }
     }
 
     // Initialize job version
     current_job_version_ = 0;
+
+    // Final validation
+    for (int i = 0; i < config_.num_streams; i++) {
+        if (!gpu_pools_[i].count || !gpu_pools_[i].results ||
+            !gpu_pools_[i].nonces_processed || !gpu_pools_[i].job_version) {
+            std::cerr << "GPU pool " << i << " has null pointers after allocation\n";
+            return false;
+        }
+    }
 
     std::cout << "Successfully allocated GPU resources for " << config_.num_streams << " streams\n";
     return true;
@@ -939,9 +1169,9 @@ void MiningSystem::cleanup() {
     }
 
     // Cleanup kernel completion events if they exist
-    for (size_t i = 0; i < kernel_complete_events_.size(); i++) {
-        if (kernel_complete_events_[i]) {
-            gpuEventDestroy(kernel_complete_events_[i]);
+    for (auto &kernel_complete_event: kernel_complete_events_) {
+        if (kernel_complete_event) {
+            gpuEventDestroy(kernel_complete_event);
         }
     }
 
