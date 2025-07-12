@@ -184,8 +184,27 @@ __global__ void sha1_mining_kernel_nvidia(
         hash[3] = d + H0[3];
         hash[4] = e + H0[4];
 
-        // Count matching bits
         uint32_t matching_bits = count_leading_zeros_160bit(hash, target);
+
+        if (matching_bits >= difficulty) {
+            // Simple atomic approach for AMD - no vote functions
+            uint32_t idx = atomicAdd(result_count, 1);
+            if (idx < result_capacity) {
+                results[idx].nonce = nonce;
+                results[idx].matching_bits = matching_bits;
+                results[idx].difficulty_score = matching_bits;
+                results[idx].job_version = job_version;
+#pragma unroll
+                for (int j = 0; j < 5; j++) {
+                    results[idx].hash[j] = hash[j];
+                }
+            } else {
+                printf("Result capacity exceeded: %u >= %u\n", idx, result_capacity);
+            }
+        }
+
+        // Count matching bits
+        /*uint32_t matching_bits = count_leading_zeros_160bit(hash, target);
 
         // Check if we found a match
         if (matching_bits >= difficulty) {
@@ -221,7 +240,7 @@ __global__ void sha1_mining_kernel_nvidia(
                     }
                 }
             }
-        }
+        }*/
     }
 
     // Update total nonces processed

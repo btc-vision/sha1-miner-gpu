@@ -536,7 +536,7 @@ namespace MiningPool {
 
         LOG_DEBUG("SHARE", "Current job: ", current_job_id,
                   ", requires difficulty: ", current_job_difficulty,
-                  ", version: ", expected_job_version);
+                  ", version: ", expected_job_version, "results: ", results.size());
 
         // Filter results based on current job difficulty and version
         std::vector<MiningResult> filtered_results;
@@ -556,6 +556,9 @@ namespace MiningPool {
                 LOG_DEBUG("SHARE", "Result meets difficulty: ", result.matching_bits,
                           " bits, nonce: 0x", std::hex, result.nonce, std::dec,
                           ", version: ", result.job_version);
+            } else {
+                LOG_DEBUG("SHARE", "Result does not meet difficulty: ",
+                          result.matching_bits, " bits (required: ", current_job_difficulty, ")");
             }
         }
 
