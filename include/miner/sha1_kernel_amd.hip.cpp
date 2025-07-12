@@ -243,7 +243,7 @@ __global__ void sha1_mining_kernel_amd(
         // Check if we found a match using CORRECT wavefront size
         if (matching_bits >= difficulty) {
             // Use AMD's wavefront vote operations with 32-thread waves
-            unsigned mask = __ballot(matching_bits >= difficulty);
+            unsigned mask = __ballot_sync(matching_bits >= difficulty);
 
             if (mask != 0) {
                 // Count matches before this lane
@@ -257,7 +257,7 @@ __global__ void sha1_mining_kernel_amd(
                 }
 
                 // Broadcast base index to all lanes in the 32-thread wave
-                base_idx = __shfl(base_idx, __builtin_ffsl(mask) - 1);
+                base_idx = __shfl_sync(base_idx, __builtin_ffsl(mask) - 1);
 
                 // Write result if this lane has a match
                 if ((mask >> lane_id) & 1) {
