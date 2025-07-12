@@ -240,10 +240,27 @@ __global__ void sha1_mining_kernel_amd(
         // Count matching bits
         uint32_t matching_bits = count_leading_zeros_160bit_amd(hash, target);
 
-        // Check if we found a match using CORRECT wavefront size
+        //__syncthreads();
+
         if (matching_bits >= difficulty) {
+            // Simple atomic approach for AMD - no vote functions
+            uint32_t idx = atomicAdd(result_count, 1);
+            if (idx < result_capacity) {
+                results[idx].nonce = nonce;
+                results[idx].matching_bits = matching_bits;
+                results[idx].difficulty_score = matching_bits;
+                results[idx].job_version = job_version;
+#pragma unroll
+                for (int j = 0; j < 5; j++) {
+                    results[idx].hash[j] = hash[j];
+                }
+            }
+        }
+
+        // Check if we found a match using CORRECT wavefront size
+        /*if (matching_bits >= difficulty) {
             // Use AMD's wavefront vote operations with 32-thread waves
-            unsigned mask = __ballot_sync(matching_bits >= difficulty);
+            unsigned mask = __ballot(matching_bits >= difficulty);
 
             if (mask != 0) {
                 // Count matches before this lane
@@ -257,7 +274,7 @@ __global__ void sha1_mining_kernel_amd(
                 }
 
                 // Broadcast base index to all lanes in the 32-thread wave
-                base_idx = __shfl_sync(base_idx, __builtin_ffsl(mask) - 1);
+                base_idx = __shfl(base_idx, __builtin_ffsl(mask) - 1);
 
                 // Write result if this lane has a match
                 if ((mask >> lane_id) & 1) {
@@ -274,7 +291,7 @@ __global__ void sha1_mining_kernel_amd(
                     }
                 }
             }
-        }
+        }*/
     }
 
     atomicAdd(actual_nonces_processed, nonces_processed);
