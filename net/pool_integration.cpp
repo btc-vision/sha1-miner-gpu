@@ -1104,10 +1104,6 @@ namespace MiningPool {
         }
 
         std::lock_guard<std::mutex> lock(stats_mutex_);
-        // Pool name might be in extra_info JSON
-        if (status.extra_info.contains("pool_name")) {
-            stats_.pool_name = status.extra_info["pool_name"];
-        }
     }
 
     // MultiPoolManager implementation

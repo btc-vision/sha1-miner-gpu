@@ -217,7 +217,7 @@ namespace MiningPool {
                         // Connect TCP
                         LOG_DEBUG("CLIENT", "Connecting TCP socket to ", endpoint.address().to_string(),
                                   ":", endpoint.port(), "...");
- socket.connect(endpoint, ec);
+                        socket.connect(endpoint, ec);
 
                         if (ec) {
                             // If first address fails, try others
@@ -894,7 +894,7 @@ namespace MiningPool {
         // Update stats
         {
             std::lock_guard lock(stats_mutex_);
-            worker_stats_.current_difficulty = welcome.min_difficulty; // IN BITS
+            worker_stats_.current_difficulty = welcome.min_difficulty;
         }
 
         // Proceed to authentication

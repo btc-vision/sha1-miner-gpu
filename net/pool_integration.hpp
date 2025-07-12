@@ -269,7 +269,7 @@ namespace MiningPool {
             config.keepalive_interval_s = 30;
             config.response_timeout_ms = 10000;
             config.reconnect_delay_ms = 5000;
-            config.max_reconnect_delay_ms = 60000;
+            config.max_reconnect_delay_ms = 10000;
 
             return config;
         }

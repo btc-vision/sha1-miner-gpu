@@ -327,11 +327,11 @@ namespace MiningPool {
         }
 
         j["difficulty_credited"] = difficulty_credited;
-        j["bits_matched"] = bits_matched; // ADD THIS
+        j["bits_matched"] = bits_matched;
         if (!message.empty()) j["message"] = message;
         if (share_value > 0) j["share_value"] = share_value;
         if (total_shares > 0) j["total_shares"] = total_shares;
-        if (!difficulty_info.is_null()) j["difficulty_info"] = difficulty_info; // ADD THIS
+        if (!difficulty_info.is_null()) j["difficulty_info"] = difficulty_info;
         return j;
     }
 
@@ -357,7 +357,6 @@ namespace MiningPool {
 
         msg.difficulty_credited = j["difficulty_credited"].get<uint32_t>();
 
-        // ADD: Parse new fields
         if (j.contains("bits_matched") && !j["bits_matched"].is_null()) {
             msg.bits_matched = j["bits_matched"].get<uint32_t>();
         } else {
@@ -374,7 +373,6 @@ namespace MiningPool {
             msg.total_shares = j["total_shares"].get<uint64_t>();
         }
 
-        // ADD: Parse difficulty_info
         if (j.contains("difficulty_info") && !j["difficulty_info"].is_null()) {
             msg.difficulty_info = j["difficulty_info"];
         }
