@@ -42,3 +42,5 @@ vcpkg/*
 
 external
 external/*
+
+build/*

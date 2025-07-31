@@ -207,7 +207,7 @@ main() {
 
     # Install dependencies based on distro
     case $OS in
-        ubuntu|debian|linuxmint|pop|elementary|zorin)
+        ubuntu|debian|linuxmint|pop|elementary|zorin|kali)
             install_deps_debian
             ;;
         fedora|rhel|centos|rocky|almalinux|oracle)

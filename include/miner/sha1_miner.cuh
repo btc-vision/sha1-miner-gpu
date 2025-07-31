@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <vector>
 #include <string>
+#include <stdint.h>
 
 // Only include OpenSSL for host code
 #if !defined(__CUDACC__) && !defined(__HIPCC__)

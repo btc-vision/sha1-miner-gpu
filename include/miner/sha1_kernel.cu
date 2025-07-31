@@ -244,7 +244,10 @@ __global__ void sha1_mining_kernel_nvidia(
     }
 
     // Update total nonces processed
-    atomicAdd(actual_nonces_processed, nonces_processed);
+    atomicAdd(
+        reinterpret_cast<unsigned long long*>(actual_nonces_processed),
+        static_cast<unsigned long long>(nonces_processed)
+    );
 }
 
 /**
