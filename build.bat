@@ -130,7 +130,7 @@ if "%GPU_BACKEND%"=="AMD" (
 
     :: Set vcpkg paths
     if exist "vcpkg\scripts\buildsystems\vcpkg.cmake" (
-        set VCPKG_CMAKE=-DCMAKE_TOOLCHAIN_FILE=%CD%\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows
+        set VCPKG_CMAKE=-DCMAKE_TOOLCHAIN_FILE=%CD%\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static
     ) else (
         echo WARNING: vcpkg toolchain not found!
         set VCPKG_CMAKE=
@@ -261,7 +261,7 @@ if "%GPU_BACKEND%"=="AMD" (
         goto MAIN_MENU
     )
 
-    cmake --build %BUILD_DIR% -j 12
+    cmake --build %BUILD_DIR% --verbose -j 12
 
     if errorlevel 1 (
         echo.
@@ -807,28 +807,48 @@ echo Setting up Visual Studio environment...
 
 :: First try VS2022 Community
 if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
+    call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+    if errorlevel 1 (
+        echo ERROR: Failed to initialize Visual Studio 2022 Community environment
+        pause
+        exit /b 1
+    )
     echo Visual Studio 2022 Community environment loaded
     exit /b 0
 )
 
 :: Try VS2022 Professional
 if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
+    call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+    if errorlevel 1 (
+        echo ERROR: Failed to initialize Visual Studio 2022 Professional environment
+        pause
+        exit /b 1
+    )
     echo Visual Studio 2022 Professional environment loaded
     exit /b 0
 )
 
 :: Try VS2022 Enterprise
 if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
+    call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+    if errorlevel 1 (
+        echo ERROR: Failed to initialize Visual Studio 2022 Enterprise environment
+        pause
+        exit /b 1
+    )
     echo Visual Studio 2022 Enterprise environment loaded
     exit /b 0
 )
 
 :: Try VS2022 BuildTools
 if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
+    call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+    if errorlevel 1 (
+        echo ERROR: Failed to initialize Visual Studio 2022 Build Tools environment
+        pause
+        exit /b 1
+    )
     echo Visual Studio 2022 Build Tools environment loaded
     exit /b 0
 )
@@ -836,15 +856,20 @@ if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxi
 :: Try using vswhere to find VS installation
 for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
     if exist "%%i\VC\Auxiliary\Build\vcvars64.bat" (
-        call "%%i\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
+        call "%%i\VC\Auxiliary\Build\vcvars64.bat"
+        if errorlevel 1 (
+            echo ERROR: Failed to initialize Visual Studio environment from: %%i
+            pause
+            exit /b 1
+        )
         echo Visual Studio environment loaded from: %%i
         exit /b 0
     )
 )
 
 echo ERROR: Could not find Visual Studio 2022 installation!
-echo Please install Visual Studio 2022 with C++ development tools
-echo Or run this script from a "Developer Command Prompt for VS 2022"
+echo Please ensure Visual Studio 2022 with C++ development tools is installed.
+echo Alternatively, run this script from a "Developer Command Prompt for VS 2022".
 pause
 exit /b 1
 
