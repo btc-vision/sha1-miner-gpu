@@ -4,30 +4,30 @@
 #include "pool_protocol.hpp"
 
 // Standard library headers
-#include <thread>
-#include <queue>
-#include <condition_variable>
 #include <atomic>
-#include <unordered_map>
+#include <condition_variable>
 #include <memory>
+#include <queue>
+#include <thread>
+#include <unordered_map>
 
 // Windows-specific defines
 #ifdef _WIN32
 #ifndef _WIN32_WINNT
-        #define _WIN32_WINNT 0x0A00  // Windows 10
+#define _WIN32_WINNT 0x0A00 // Windows 10
 #endif
 #ifndef WIN32_LEAN_AND_MEAN
-        #define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #endif
 #endif
 
 // Boost.Beast includes - Works with Boost 1.88
-#include <boost/beast/core.hpp>
-#include <boost/beast/websocket.hpp>
-#include <boost/beast/ssl.hpp>
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/ssl.hpp>
+#include <boost/beast/websocket.hpp>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -95,14 +95,14 @@ namespace MiningPool {
         net::io_context ioc_;
 
         // Plain WebSocket
-        std::unique_ptr<websocket::stream<tcp::socket> > ws_;
+        std::unique_ptr<websocket::stream<tcp::socket>> ws_;
 
         // SSL WebSocket - using ssl::stream from boost::asio::ssl
-        std::unique_ptr<websocket::stream<ssl::stream<tcp::socket> > > wss_;
+        std::unique_ptr<websocket::stream<ssl::stream<tcp::socket>>> wss_;
         ssl::context ssl_ctx_{ssl::context::tlsv12_client};
 
         std::unique_ptr<std::thread> io_thread_;
-        std::unique_ptr<net::executor_work_guard<net::io_context::executor_type> > work_guard_;
+        std::unique_ptr<net::executor_work_guard<net::io_context::executor_type>> work_guard_;
 
         // Threading
         std::thread keepalive_thread_;
@@ -209,8 +209,7 @@ namespace MiningPool {
 
         ~PoolClientManager();
 
-        bool add_pool(const std::string &name, const PoolConfig &config,
-                      IPoolEventHandler *handler);
+        bool add_pool(const std::string &name, const PoolConfig &config, IPoolEventHandler *handler);
 
         bool remove_pool(const std::string &name);
 
@@ -234,7 +233,7 @@ namespace MiningPool {
 
     private:
         mutable std::mutex mutex_;
-        std::map<std::string, std::shared_ptr<PoolClient> > clients_;
+        std::map<std::string, std::shared_ptr<PoolClient>> clients_;
         std::string primary_pool_name_;
         bool failover_enabled_ = false;
         std::vector<std::string> failover_order_;

@@ -1,0 +1,169 @@
+# Optimized for modern C++ (C++20) and GPU mining projects
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: Latest  # or c++20
+
+# Indentation
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+IndentCaseLabels: true
+IndentCaseBlocks: false
+NamespaceIndentation: All
+IndentPPDirectives: BeforeHash
+IndentExternBlock: AfterExternBlock
+IndentGotoLabels: true
+
+# Alignment - Better readability
+AlignAfterOpenBracket: Align
+AlignArrayOfStructures: Left
+AlignConsecutiveAssignments: Consecutive  # or 'None', 'AcrossEmptyLines', 'AcrossComments', 'AcrossEmptyLinesAndComments'
+AlignConsecutiveBitFields: true
+AlignConsecutiveDeclarations: false  # Can be messy
+AlignConsecutiveMacros: true
+AlignEscapedNewlines: Right
+AlignOperands: Align
+AlignTrailingComments: true
+DerivePointerAlignment: false
+PointerAlignment: Right  # int *ptr (not int* ptr)
+
+# Line Breaking
+ColumnLimit: 120
+AlwaysBreakAfterReturnType: None
+AlwaysBreakBeforeMultilineStrings: true
+AlwaysBreakTemplateDeclarations: Yes
+BinPackArguments: true
+BinPackParameters: true
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: false
+  AfterClass: true          # Changed: easier to see class boundaries
+  AfterControlStatement: Never
+  AfterEnum: false
+  AfterFunction: true       # Changed: easier to see function boundaries
+  AfterNamespace: false
+  AfterStruct: true         # Changed: consistent with class
+  AfterUnion: false
+  AfterExternBlock: true
+  BeforeCatch: false
+  BeforeElse: false
+  BeforeLambdaBody: false
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
+BreakBeforeBinaryOperators: None
+BreakBeforeConceptDeclarations: true
+BreakBeforeTernaryOperators: true
+BreakConstructorInitializers: BeforeColon  # Changed: more readable
+BreakInheritanceList: BeforeColon
+BreakStringLiterals: true
+
+# Spaces
+SpaceAfterCStyleCast: false    # Changed: (int)x not (int) x
+SpaceAfterLogicalNot: false
+SpaceAfterTemplateKeyword: true  # Changed: template <typename T>
+SpaceAroundPointerQualifiers: Default
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeCaseColon: false
+SpaceBeforeCpp11BracedList: false
+SpaceBeforeCtorInitializerColon: true
+SpaceBeforeInheritanceColon: true
+SpaceBeforeParens: ControlStatements
+SpaceBeforeRangeBasedForLoopColon: true
+SpaceBeforeSquareBrackets: false
+SpaceInEmptyBlock: false
+SpaceInEmptyParentheses: false
+SpacesBeforeTrailingComments: 2
+SpacesInAngles: Never
+SpacesInConditionalStatement: false
+SpacesInContainerLiterals: false
+SpacesInCStyleCastParentheses: false
+SpacesInLineCommentPrefix:
+  Minimum: 1
+  Maximum: -1
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# Other Style Options
+AccessModifierOffset: -4
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never  # Avoid subtle bugs
+AllowShortLambdasOnASingleLine: All
+AllowShortLoopsOnASingleLine: false  # Avoid subtle bugs
+CompactNamespaces: false
+ConstructorInitializerIndentWidth: 4
+ContinuationIndentWidth: 4  # Changed: match IndentWidth
+Cpp11BracedListStyle: true
+DeriveLineEnding: true
+EmptyLineAfterAccessModifier: Never
+EmptyLineBeforeAccessModifier: LogicalBlock
+FixNamespaceComments: true
+IndentWrappedFunctionNames: false
+InsertNewlineAtEOF: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+LambdaBodyIndentation: Signature
+MaxEmptyLinesToKeep: 1  # Changed: cleaner code
+PackConstructorInitializers: NextLine
+RemoveBracesLLVM: false  # Keep braces for safety
+SeparateDefinitionBlocks: Always
+SortIncludes: CaseInsensitive
+SortUsingDeclarations: true
+
+# Include Categories - Better organization
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<ext/.*\.h>'
+    Priority: 2
+    SortPriority: 0
+  - Regex: '^<.*\.h>'
+    Priority: 1
+    SortPriority: 0
+  - Regex: '^<.*>'
+    Priority: 2
+    SortPriority: 0
+  - Regex: '^"(llvm|llvm-c|clang|clang-c)/'
+    Priority: 3
+    SortPriority: 0
+  - Regex: '^"(cuda|hip|rocm).*'
+    Priority: 4
+    SortPriority: 0
+  - Regex: '".*\.cuh"'
+    Priority: 5
+    SortPriority: 0
+  - Regex: '^".*'
+    Priority: 6
+    SortPriority: 0
+IncludeIsMainRegex: '([-_](test|unittest))?$'
+IncludeIsMainSourceRegex: ''
+
+# Penalties - Prefer readable line breaks
+PenaltyBreakAssignment: 2
+PenaltyBreakBeforeFirstCallParameter: 1
+PenaltyBreakComment: 300
+PenaltyBreakFirstLessLess: 120
+PenaltyBreakOpenParenthesis: 0
+PenaltyBreakString: 1000
+PenaltyBreakTemplateDeclaration: 10
+PenaltyExcessCharacter: 1000000
+PenaltyIndentedWhitespace: 0
+PenaltyReturnTypeOnItsOwnLine: 200
+
+# Experimental features for C++20
+RequiresClausePosition: OwnLine
+
+# Attributes
+AttributeMacros: [ '__capability', '__nodiscard' ]
+
+# Specific to your project
+StatementAttributeLikeMacros: [ 'emit' ]
+StatementMacros: [ 'Q_UNUSED', 'QT_REQUIRE_VERSION' ]
+WhitespaceSensitiveMacros: [ 'STRINGIZE', 'PP_STRINGIZE' ]
+...

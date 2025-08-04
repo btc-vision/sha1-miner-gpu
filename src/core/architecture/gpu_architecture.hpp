@@ -1,39 +1,39 @@
 #ifndef GPU_ARCHITECTURE_HPP
 #define GPU_ARCHITECTURE_HPP
 
-#include "gpu_platform.hpp"
-#include <string>
-#include <map>
-#include <iostream>
 #include <iomanip>
+#include <iostream>
+#include <map>
+#include <string>
+#include "gpu_platform.hpp"
 
 #ifdef USE_HIP
 
 // AMD GPU Architecture enumeration
 enum class AMDArchitecture {
     UNKNOWN,
-    GCN3,      // Fiji, Tonga (gfx8)
-    GCN4,      // Polaris (gfx8)
-    GCN5,      // Vega10, Vega20 (gfx9)
-    RDNA1,     // Navi10, Navi14 (gfx10.1)
-    RDNA2,     // Navi21, Navi22, Navi23 (gfx10.3)
-    RDNA3,     // Navi31, Navi32, Navi33 (gfx11)
-    RDNA4,     // Navi44, Navi48 (gfx12) - RX 9070 XT/9070
-    CDNA1,     // Arcturus (gfx908)
-    CDNA2,     // Aldebaran (gfx90a)
-    CDNA3      // Aqua Vanjaram (gfx940)
+    GCN3, // Fiji, Tonga (gfx8)
+    GCN4, // Polaris (gfx8)
+    GCN5, // Vega10, Vega20 (gfx9)
+    RDNA1, // Navi10, Navi14 (gfx10.1)
+    RDNA2, // Navi21, Navi22, Navi23 (gfx10.3)
+    RDNA3, // Navi31, Navi32, Navi33 (gfx11)
+    RDNA4, // Navi44, Navi48 (gfx12) - RX 9070 XT/9070
+    CDNA1, // Arcturus (gfx908)
+    CDNA2, // Aldebaran (gfx90a)
+    CDNA3 // Aqua Vanjaram (gfx940)
 };
 
 // Architecture-specific parameters
 struct AMDArchParams {
-    int waves_per_cu;      // Calculated based on architecture
-    int wave_size;         // From device properties
-    int lds_size_per_cu;   // From device properties
+    int waves_per_cu; // Calculated based on architecture
+    int wave_size; // From device properties
+    int lds_size_per_cu; // From device properties
     int max_workgroup_size; // From device properties
-    int max_waves_per_eu;   // Max concurrent waves per execution unit
+    int max_waves_per_eu; // Max concurrent waves per execution unit
 
     // Get parameters from actual device properties
-    static AMDArchParams getFromDevice(const hipDeviceProp_t& props, AMDArchitecture arch) {
+    static AMDArchParams getFromDevice(const hipDeviceProp_t &props, AMDArchitecture arch) {
         AMDArchParams params;
 
         // 1. Wave size - directly from device
@@ -88,7 +88,7 @@ struct AMDArchParams {
 
 class AMDGPUDetector {
 public:
-    static AMDArchitecture detectArchitecture(const hipDeviceProp_t& props) {
+    static AMDArchitecture detectArchitecture(const hipDeviceProp_t &props) {
         // Use gcnArchName for precise detection
         std::string arch_name = props.gcnArchName ? props.gcnArchName : "";
 
@@ -110,60 +110,87 @@ public:
             }
 
             // Map to architecture
-            if (arch_num >= 1200 && arch_num < 1300) return AMDArchitecture::RDNA4;
-            if (arch_num >= 1100 && arch_num < 1200) return AMDArchitecture::RDNA3;
-            if (arch_num >= 1030 && arch_num < 1100) return AMDArchitecture::RDNA2;
-            if (arch_num >= 1010 && arch_num < 1030) return AMDArchitecture::RDNA1;
-            if (arch_num >= 900 && arch_num < 910) return AMDArchitecture::GCN5;
-            if (arch_num >= 800 && arch_num < 900) return AMDArchitecture::GCN4;
+            if (arch_num >= 1200 && arch_num < 1300)
+                return AMDArchitecture::RDNA4;
+            if (arch_num >= 1100 && arch_num < 1200)
+                return AMDArchitecture::RDNA3;
+            if (arch_num >= 1030 && arch_num < 1100)
+                return AMDArchitecture::RDNA2;
+            if (arch_num >= 1010 && arch_num < 1030)
+                return AMDArchitecture::RDNA1;
+            if (arch_num >= 900 && arch_num < 910)
+                return AMDArchitecture::GCN5;
+            if (arch_num >= 800 && arch_num < 900)
+                return AMDArchitecture::GCN4;
 
             // CDNA architectures
-            if (arch_num == 908) return AMDArchitecture::CDNA1;
-            if (arch_num == 0x90a || arch_num == 910) return AMDArchitecture::CDNA2;
-            if (arch_num == 940) return AMDArchitecture::CDNA3;
+            if (arch_num == 908)
+                return AMDArchitecture::CDNA1;
+            if (arch_num == 0x90a || arch_num == 910)
+                return AMDArchitecture::CDNA2;
+            if (arch_num == 940)
+                return AMDArchitecture::CDNA3;
         }
 
         // Fallback: detect by device name
         std::string device_name = props.name;
-        if (device_name.find("gfx12") != std::string::npos) return AMDArchitecture::RDNA4;
-        if (device_name.find("gfx11") != std::string::npos) return AMDArchitecture::RDNA3;
-        if (device_name.find("gfx103") != std::string::npos) return AMDArchitecture::RDNA2;
-        if (device_name.find("gfx101") != std::string::npos) return AMDArchitecture::RDNA1;
-        if (device_name.find("Vega") != std::string::npos) return AMDArchitecture::GCN5;
-        if (device_name.find("RX 9") != std::string::npos) return AMDArchitecture::RDNA4;
-        if (device_name.find("RX 7") != std::string::npos) return AMDArchitecture::RDNA3;
-        if (device_name.find("RX 6") != std::string::npos) return AMDArchitecture::RDNA2;
-        if (device_name.find("RX 5") != std::string::npos) return AMDArchitecture::RDNA1;
+        if (device_name.find("gfx12") != std::string::npos)
+            return AMDArchitecture::RDNA4;
+        if (device_name.find("gfx11") != std::string::npos)
+            return AMDArchitecture::RDNA3;
+        if (device_name.find("gfx103") != std::string::npos)
+            return AMDArchitecture::RDNA2;
+        if (device_name.find("gfx101") != std::string::npos)
+            return AMDArchitecture::RDNA1;
+        if (device_name.find("Vega") != std::string::npos)
+            return AMDArchitecture::GCN5;
+        if (device_name.find("RX 9") != std::string::npos)
+            return AMDArchitecture::RDNA4;
+        if (device_name.find("RX 7") != std::string::npos)
+            return AMDArchitecture::RDNA3;
+        if (device_name.find("RX 6") != std::string::npos)
+            return AMDArchitecture::RDNA2;
+        if (device_name.find("RX 5") != std::string::npos)
+            return AMDArchitecture::RDNA1;
 
         return AMDArchitecture::UNKNOWN;
     }
 
     static std::string getArchitectureName(AMDArchitecture arch) {
         switch (arch) {
-            case AMDArchitecture::RDNA4: return "RDNA4";
-            case AMDArchitecture::RDNA3: return "RDNA3";
-            case AMDArchitecture::RDNA2: return "RDNA2";
-            case AMDArchitecture::RDNA1: return "RDNA1";
-            case AMDArchitecture::CDNA3: return "CDNA3";
-            case AMDArchitecture::CDNA2: return "CDNA2";
-            case AMDArchitecture::CDNA1: return "CDNA1";
-            case AMDArchitecture::GCN5: return "GCN5 (Vega)";
-            case AMDArchitecture::GCN4: return "GCN4 (Polaris)";
-            case AMDArchitecture::GCN3: return "GCN3";
-            default: return "Unknown";
+            case AMDArchitecture::RDNA4:
+                return "RDNA4";
+            case AMDArchitecture::RDNA3:
+                return "RDNA3";
+            case AMDArchitecture::RDNA2:
+                return "RDNA2";
+            case AMDArchitecture::RDNA1:
+                return "RDNA1";
+            case AMDArchitecture::CDNA3:
+                return "CDNA3";
+            case AMDArchitecture::CDNA2:
+                return "CDNA2";
+            case AMDArchitecture::CDNA1:
+                return "CDNA1";
+            case AMDArchitecture::GCN5:
+                return "GCN5 (Vega)";
+            case AMDArchitecture::GCN4:
+                return "GCN4 (Polaris)";
+            case AMDArchitecture::GCN3:
+                return "GCN3";
+            default:
+                return "Unknown";
         }
     }
 
     // Get architecture parameters - DO NOT USE the hardcoded map!
-    static AMDArchParams getArchitectureParams(AMDArchitecture arch, const hipDeviceProp_t& props) {
+    static AMDArchParams getArchitectureParams(AMDArchitecture arch, const hipDeviceProp_t &props) {
         return AMDArchParams::getFromDevice(props, arch);
     }
 
     // Template version to avoid circular dependency
     template<typename ConfigType>
-    static void configureForArchitecture(ConfigType& config,
-                                    const hipDeviceProp_t& props,
-                                    AMDArchitecture arch) {
+    static void configureForArchitecture(ConfigType &config, const hipDeviceProp_t &props, AMDArchitecture arch) {
         // Get actual parameters from device
         AMDArchParams params = AMDArchParams::getFromDevice(props, arch);
         int actual_cus = props.multiProcessorCount;
@@ -181,11 +208,13 @@ public:
         // Goal: Achieve high occupancy without oversubscribing
         int target_waves_per_cu = params.waves_per_cu * 0.75; // Target 75% occupancy
         int waves_per_block = config.threads_per_block / params.wave_size;
-        if (waves_per_block < 1) waves_per_block = 1;
+        if (waves_per_block < 1)
+            waves_per_block = 1;
         int blocks_per_cu = target_waves_per_cu / waves_per_block;
 
         // Ensure at least some minimum blocks per CU
-        if (blocks_per_cu < 4) blocks_per_cu = 4;
+        if (blocks_per_cu < 4)
+            blocks_per_cu = 4;
 
         // Architecture-specific tuning
         switch (arch) {
@@ -266,13 +295,13 @@ public:
         }
     }
 
-    static void displayDeviceLimits(const hipDeviceProp_t& props) {
+    static void displayDeviceLimits(const hipDeviceProp_t &props) {
         std::cout << "\nComplete Device Limits:\n";
         std::cout << "  Max Threads per Block: " << props.maxThreadsPerBlock << "\n";
         std::cout << "  Max Threads per CU: " << props.maxThreadsPerMultiProcessor << "\n";
         std::cout << "  Max Blocks per CU: " << props.maxBlocksPerMultiProcessor << "\n";
-        std::cout << "  Max Grid Size: [" << props.maxGridSize[0] << ", "
-                  << props.maxGridSize[1] << ", " << props.maxGridSize[2] << "]\n";
+        std::cout << "  Max Grid Size: [" << props.maxGridSize[0] << ", " << props.maxGridSize[1] << ", "
+                  << props.maxGridSize[2] << "]\n";
         std::cout << "  Warp/Wave Size: " << props.warpSize << "\n";
         std::cout << "  Registers per Block: " << props.regsPerBlock << "\n";
         std::cout << "  Shared Memory per Block: " << props.sharedMemPerBlock / 1024 << " KB\n";
@@ -284,7 +313,7 @@ public:
     }
 
     // Check if GPU is known to have issues
-    static bool hasKnownIssues(AMDArchitecture arch, const std::string& device_name) {
+    static bool hasKnownIssues(AMDArchitecture arch, const std::string &device_name) {
         // RDNA4 early drivers might have issues
         if (arch == AMDArchitecture::RDNA4) {
             // Check ROCm version
@@ -316,7 +345,7 @@ public:
 };
 
 // Helper function to print architecture info
-inline void printAMDArchitectureInfo(const hipDeviceProp_t& props) {
+inline void printAMDArchitectureInfo(const hipDeviceProp_t &props) {
     AMDArchitecture arch = AMDGPUDetector::detectArchitecture(props);
     AMDArchParams params = AMDArchParams::getFromDevice(props, arch);
 
@@ -335,10 +364,9 @@ inline void printAMDArchitectureInfo(const hipDeviceProp_t& props) {
     double compute_tflops = (props.clockRate / 1000.0) * props.multiProcessorCount * 128 * 2 / 1000.0; // Rough estimate
 
     std::cout << "\nPerformance Metrics:\n";
-    std::cout << "  Theoretical Memory Bandwidth: " << std::fixed << std::setprecision(1)
-              << memory_bandwidth_gb << " GB/s\n";
-    std::cout << "  Estimated FP32 Performance: " << std::setprecision(1)
-              << compute_tflops << " TFLOPS\n";
+    std::cout << "  Theoretical Memory Bandwidth: " << std::fixed << std::setprecision(1) << memory_bandwidth_gb
+              << " GB/s\n";
+    std::cout << "  Estimated FP32 Performance: " << std::setprecision(1) << compute_tflops << " TFLOPS\n";
     std::cout << "  Compute to Memory Ratio: " << std::setprecision(2)
               << (compute_tflops * 1000.0 / memory_bandwidth_gb) << " FLOP/byte\n";
 }

@@ -1,23 +1,32 @@
 #pragma once
 
-#include "pool_client.hpp"
-#include "../src/mining_system.hpp"
-#include "../include/multi_gpu_manager.hpp"
-#include "sha1_miner.cuh"
-#include <memory>
-#include <thread>
-#include <queue>
-#include <deque>
+#define NOMINMAX
+#ifdef _WIN32
+    #include <windows.h>
+#endif
+
 #include <condition_variable>
+#include <deque>
+#include <memory>
+#include <queue>
+#include <thread>
+
+#include "sha1_miner.cuh"
+
+#include "../include/multi_gpu_manager.hpp"
+#include "../src/core/mining_system.hpp"
+#include "pool_client.hpp"
 
 namespace MiningPool {
     static constexpr size_t MAX_SHARE_QUEUE_SIZE = 10000;
-    static constexpr size_t MAX_PENDING_RESULTS = 50000;
+    static constexpr size_t MAX_PENDING_RESULTS  = 50000;
 
     // Pool-aware mining system that integrates with the existing miner
-    class PoolMiningSystem : public IPoolEventHandler {
+    class PoolMiningSystem final : public IPoolEventHandler
+    {
     public:
-        struct Config {
+        struct Config
+        {
             PoolConfig pool_config;
 
             // Mining settings
@@ -26,16 +35,17 @@ namespace MiningPool {
             int gpu_id = 0;
 
             // Pool settings
-            uint32_t min_share_difficulty = 20; // Minimum difficulty in BITS (default: 20 bits)
-            uint32_t max_share_difficulty = 55; // Maximum difficulty in BITS (default: 50 bits)
-            bool enable_vardiff = true;
-            double target_share_time = 30.0; // Target seconds between shares
-            uint32_t share_scan_interval_ms = 100;
+            uint32_t min_share_difficulty   = 20;  // Minimum difficulty in BITS (default: 20 bits)
+            uint32_t max_share_difficulty   = 55;  // Maximum difficulty in BITS (default: 50 bits)
+            bool enable_vardiff             = true;
+            uint32_t share_scan_interval_ms = 500;
+
+            const void* mining_config = nullptr;
         };
 
-        PoolMiningSystem(const Config &config);
+        explicit PoolMiningSystem(Config config);
 
-        ~PoolMiningSystem();
+        ~PoolMiningSystem() override;
 
         // Start/stop pool mining
         bool start();
@@ -46,9 +56,10 @@ namespace MiningPool {
 
         bool is_running() const { return running_.load(); }
 
-        struct PoolMiningStats {
+        struct PoolMiningStats
+        {
             // Connection
-            bool connected = false;
+            bool connected     = false;
             bool authenticated = false;
 
             std::string worker_id;
@@ -56,20 +67,20 @@ namespace MiningPool {
 
             // Mining
             uint64_t total_hashes = 0;
-            double hashrate = 0.0;
+            double hashrate       = 0.0;
 
             // Shares
             uint64_t shares_submitted = 0;
-            uint64_t shares_accepted = 0;
-            uint64_t shares_rejected = 0;
+            uint64_t shares_accepted  = 0;
+            uint64_t shares_rejected  = 0;
             double share_success_rate = 0.0;
 
             // Difficulty - NOW TRACKING BITS
-            uint32_t current_difficulty = 0; // Current difficulty in BITS
-            uint32_t current_bits = 0; // Explicit bit tracking (same as current_difficulty)
-            uint32_t best_share_bits = 0; // Best share found in BITS
-            double total_scaled_difficulty = 0; // Total difficulty as sum of 2^bits
-            double total_difficulty_accepted = 0; // Backward compatibility
+            uint32_t current_difficulty      = 0;  // Current difficulty in BITS
+            uint32_t current_bits            = 0;  // Explicit bit tracking (same as current_difficulty)
+            uint32_t best_share_bits         = 0;  // Best share found in BITS
+            double total_scaled_difficulty   = 0;  // Total difficulty as sum of 2^bits
+            double total_difficulty_accepted = 0;  // Backward compatibility
 
             // Timing
             std::chrono::seconds uptime{0};
@@ -102,7 +113,7 @@ namespace MiningPool {
 
         void process_mining_results(const std::vector<MiningResult> &results);
 
-        MiningJob convert_to_mining_job(const JobMessage &job_msg);
+        static MiningJob convert_to_mining_job(const JobMessage &job_msg);
 
     private:
         std::atomic<uint64_t> global_nonce_offset_{1};
@@ -112,7 +123,8 @@ namespace MiningPool {
         std::mutex pending_results_mutex_;
 
         // ADD: Better job synchronization
-        struct JobUpdate {
+        struct JobUpdate
+        {
             PoolJob pool_job;
             MiningJob mining_job;
             uint64_t version;
@@ -188,9 +200,7 @@ namespace MiningPool {
         void submit_share(const MiningResult &result);
 
         // Vardiff
-        void adjust_local_difficulty();
-
-        uint32_t calculate_optimal_scan_difficulty();
+        static void adjust_local_difficulty();
 
         // Utilities
         void update_stats();
@@ -201,12 +211,14 @@ namespace MiningPool {
     };
 
     // Multi-pool manager with failover
-    class MultiPoolManager {
+    class MultiPoolManager
+    {
     public:
-        struct PoolEntry {
+        struct PoolEntry
+        {
             std::string name;
             PoolConfig config;
-            int priority; // Lower = higher priority
+            int priority;  // Lower = higher priority
             bool enabled;
             std::unique_ptr<PoolMiningSystem> mining_system;
         };
@@ -250,51 +262,4 @@ namespace MiningPool {
 
         void sort_pools_by_priority();
     };
-
-    // Example pool configurations
-    namespace PoolPresets {
-        inline PoolConfig create_default_pool(const std::string &url,
-                                              const std::string &wallet,
-                                              const std::string &worker_name) {
-            PoolConfig config;
-            config.url = url;
-            config.username = wallet;
-            config.worker_name = worker_name;
-            config.auth_method = AuthMethod::WORKER_PASS;
-
-            // Determine if TLS from URL
-            config.use_tls = (url.find("wss://") == 0);
-
-            // Connection settings
-            config.keepalive_interval_s = 30;
-            config.response_timeout_ms = 10000;
-            config.reconnect_delay_ms = 5000;
-            config.max_reconnect_delay_ms = 10000;
-
-            return config;
-        }
-
-        // Common pool configurations
-        inline PoolConfig create_local_pool(const std::string &worker_name) {
-            return create_default_pool("ws://localhost:3333", "local", worker_name);
-        }
-
-        inline PoolConfig create_ssl_pool(const std::string &url,
-                                          const std::string &wallet,
-                                          const std::string &worker_name,
-                                          const std::string &cert_file = "",
-                                          const std::string &key_file = "") {
-            auto config = create_default_pool(url, wallet, worker_name);
-            config.use_tls = true;
-            config.verify_server_cert = true;
-
-            if (!cert_file.empty()) {
-                config.tls_cert_file = cert_file;
-                config.tls_key_file = key_file;
-                config.auth_method = AuthMethod::CERTIFICATE;
-            }
-
-            return config;
-        }
-    }
-} // namespace MiningPool
+}  // namespace MiningPool

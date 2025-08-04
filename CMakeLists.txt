@@ -430,13 +430,31 @@ endif ()
 
 # Create main executable
 add_executable(sha1_miner
+        # Main entry point
         ${SRC_DIR}/main.cpp
-        ${SRC_DIR}/mining_system.cpp
-        ${SRC_DIR}/multi_gpu_manager.cpp
+
+        # Core mining components (in src/core)
+        ${SRC_DIR}/core/mining_system.cpp
+        ${SRC_DIR}/core/multi_gpu_manager.cpp
+        ${SRC_DIR}/core/pool_mining.cpp
+        ${SRC_DIR}/core/solo_mining.cpp
+
+        # Utility components (in src/utils)
+        ${SRC_DIR}/utils/platform_utils.cpp
+        ${SRC_DIR}/utils/test_utils.cpp
+
+        # Configuration (in src/configs)
+        ${SRC_DIR}/configs/config.cpp
+
+        # Global state
         ${SRC_DIR}/globals.cpp
+
+        # Network components
         ${NET_DIR}/pool_client.cpp
         ${NET_DIR}/pool_integration.cpp
         ${POOL_SOURCES}
+
+        # GPU kernel launcher
         ${MINER_DIR}/kernel_launcher.cpp
 )
 
@@ -449,6 +467,10 @@ target_include_directories(sha1_miner PRIVATE
         ${INCLUDE_DIR}
         ${MINER_DIR}
         ${NET_DIR}
+        ${SRC_DIR}  # Base src directory
+        ${SRC_DIR}/configs  # For config.hpp
+        ${SRC_DIR}/core     # For core headers
+        ${SRC_DIR}/utils    # For utility headers
         ${GPU_INCLUDES}
         ${Boost_INCLUDE_DIRS}
         ${ZLIB_INCLUDE_DIRS}

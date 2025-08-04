@@ -1,22 +1,21 @@
 #ifndef MINING_SYSTEM_HPP
 #define MINING_SYSTEM_HPP
 
-#include <iostream>
-#include <vector>
-#include <chrono>
-#include <thread>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
-#include <functional>
-#include <condition_variable>
+#include <vector>
 
-#include "gpu_platform.hpp"
 #include "sha1_miner.cuh"
-#include "../logging/logger.hpp"
+
+#include "../../logging/logger.hpp"
+#include "gpu_platform.hpp"
 
 #ifdef USE_HIP
-#include "gpu_architecture.hpp"
+    #include "architecture/gpu_architecture.hpp"
 #endif
 
 // Forward declare the global shutdown flag
@@ -30,7 +29,8 @@ using MiningResultCallback = std::function<void(const std::vector<MiningResult> 
 /**
  * Thread-safe tracker for best mining results
  */
-class BestResultTracker {
+class BestResultTracker
+{
 public:
     BestResultTracker();
 
@@ -60,37 +60,33 @@ private:
 /**
  * GPU vendor enumeration
  */
-enum class GPUVendor {
-    NVIDIA,
-    AMD,
-    UNKNOWN
-};
+enum class GPUVendor { NVIDIA, AMD, UNKNOWN };
 
 /**
  * Enhanced mining system with proper resource management
  * Supports both NVIDIA and AMD GPUs
  */
-class MiningSystem {
+class MiningSystem final
+{
 public:
-    struct Config {
+    struct Config
+    {
         int device_id;
         int num_streams;
         int blocks_per_stream;
         int threads_per_block;
         bool use_pinned_memory;
         size_t result_buffer_size;
-        bool force_generic_kernel;
 
         // Constructor with default values
         Config()
-            : device_id(0)
-              , num_streams(0)
-              , blocks_per_stream(0)
-              , threads_per_block(0)
-              , use_pinned_memory(true)
-              , result_buffer_size(0)
-              , force_generic_kernel(false) {
-        }
+            : device_id(0),
+              num_streams(0),
+              blocks_per_stream(0),
+              threads_per_block(0),
+              use_pinned_memory(true),
+              result_buffer_size(0)
+        {}
     };
 
     void sync() const;
@@ -106,8 +102,9 @@ public:
      * Set a callback to be called whenever new results are found
      * @param callback Function to call with new results
      */
-    void setResultCallback(MiningResultCallback callback) {
-        std::lock_guard<std::mutex> lock(callback_mutex_);
+    void setResultCallback(MiningResultCallback callback)
+    {
+        std::lock_guard lock(callback_mutex_);
         result_callback_ = callback;
     }
 
@@ -122,25 +119,25 @@ public:
      * Get results from the last batch
      * @return Vector of mining results
      */
-    std::vector<MiningResult> getLastResults() {
+    std::vector<MiningResult> getLastResults() const
+    {
         std::vector<MiningResult> results;
         // Get result count from first pool
         uint32_t count;
-        (void) gpuMemcpy(&count, gpu_pools_[0].count, sizeof(uint32_t), gpuMemcpyDeviceToHost);
+        (void)gpuMemcpy(&count, gpu_pools_[0].count, sizeof(uint32_t), gpuMemcpyDeviceToHost);
         if (count > 0 && count <= gpu_pools_[0].capacity) {
             results.resize(count);
-            (void) gpuMemcpy(results.data(), gpu_pools_[0].results, sizeof(MiningResult) * count,
-                             gpuMemcpyDeviceToHost);
+            (void)gpuMemcpy(results.data(), gpu_pools_[0].results, sizeof(MiningResult) * count, gpuMemcpyDeviceToHost);
         }
         return results;
     }
 
+    void setUserConfig(const void *user_config) { user_config_ = user_config; }
+
     /**
      * Get current configuration
      */
-    const Config &getConfig() const {
-        return config_;
-    }
+    const Config &getConfig() const { return config_; }
 
     /**
      * Reset internal state for new mining session
@@ -151,8 +148,9 @@ public:
      * Get all results found since last clear
      * Used for batch processing
      */
-    std::vector<MiningResult> getAllResults() {
-        std::lock_guard<std::mutex> lock(all_results_mutex_);
+    std::vector<MiningResult> getAllResults()
+    {
+        std::lock_guard lock(all_results_mutex_);
         auto results = all_results_;
         all_results_.clear();
         return results;
@@ -164,12 +162,13 @@ public:
     void clearResults();
 
     // Timing statistics structure
-    struct TimingStats {
-        double kernel_launch_time_ms = 0;
+    struct TimingStats
+    {
+        double kernel_launch_time_ms    = 0;
         double kernel_execution_time_ms = 0;
-        double result_copy_time_ms = 0;
-        double total_kernel_time_ms = 0;
-        int kernel_count = 0;
+        double result_copy_time_ms      = 0;
+        double total_kernel_time_ms     = 0;
+        int kernel_count                = 0;
 
         void reset();
 
@@ -214,6 +213,34 @@ public:
     void updateJobLive(const MiningJob &job, uint64_t job_version);
 
 private:
+    const void *user_config_ = nullptr;
+
+    struct UserSpecifiedFlags
+    {
+        bool threads = false;
+        bool streams = false;
+        bool blocks  = false;
+        bool buffer  = false;
+    };
+
+    struct OptimalConfig
+    {
+        int threads;
+        int streams;
+        int blocks_per_sm;
+        size_t buffer_size;
+    };
+
+    UserSpecifiedFlags detectUserSpecifiedValues() const;
+    OptimalConfig determineOptimalConfig();
+    static OptimalConfig getAMDOptimalConfig();
+    OptimalConfig getNVIDIAOptimalConfig() const;
+
+    void applyUserSpecifiedValues(const UserSpecifiedFlags &user_flags, const OptimalConfig &optimal);
+    void validateConfiguration();
+    void adjustForMemoryConstraints(const UserSpecifiedFlags &user_flags);
+    void logFinalConfiguration(const UserSpecifiedFlags &user_flags);
+
     std::atomic<bool> stop_mining_{false};
 
     // Event-based synchronization
@@ -226,7 +253,8 @@ private:
     std::atomic<int> active_streams_{0};
 
     // Structure to track per-stream state
-    struct StreamData {
+    struct StreamData
+    {
         uint64_t nonce_offset;
         bool busy;
         std::chrono::high_resolution_clock::time_point launch_time;
@@ -271,7 +299,7 @@ protected:
     BestResultTracker best_tracker_;
 
     // Thread management
-    //std::unique_ptr<std::thread> monitor_thread_;
+    // std::unique_ptr<std::thread> monitor_thread_;
     mutable std::mutex system_mutex_;
 
     // Callback management
@@ -289,7 +317,7 @@ protected:
 
     void cleanup();
 
-    virtual void processResultsOptimized(int stream_idx);
+    void processResultsOptimized(int stream_idx);
 
     void performanceMonitor();
 
@@ -310,4 +338,4 @@ protected:
 // Declare the global mining system pointer
 extern std::unique_ptr<MiningSystem> g_mining_system;
 
-#endif // MINING_SYSTEM_HPP
+#endif  // MINING_SYSTEM_HPP

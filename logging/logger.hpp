@@ -1,12 +1,12 @@
 // logger.hpp - Enhanced logging system with colors and debug levels
 #pragma once
 
-#include <iostream>
-#include <string>
-#include <mutex>
-#include <iomanip>
-#include <sstream>
 #include <chrono>
+#include <iomanip>
+#include <iostream>
+#include <mutex>
+#include <sstream>
+#include <string>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -14,13 +14,7 @@
 
 namespace MiningPool {
     // Debug levels
-    enum class LogLevel {
-        ERR = 0,
-        WARNING = 1,
-        INFO = 2,
-        DEBUG = 3,
-        TRACE = 4
-    };
+    enum class LogLevel { ERR = 0, WARNING = 1, INFO = 2, DEBUG = 3, TRACE = 4 };
 
     // ANSI color codes
     namespace Color {
@@ -55,7 +49,7 @@ namespace MiningPool {
         const std::string DIM = "\033[2m";
         const std::string ITALIC = "\033[3m";
         const std::string UNDERLINE = "\033[4m";
-    }
+    } // namespace Color
 
     class Logger {
     private:
@@ -88,8 +82,7 @@ namespace MiningPool {
         static std::string get_timestamp() {
             auto now = std::chrono::system_clock::now();
             auto time = std::chrono::system_clock::to_time_t(now);
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          now.time_since_epoch()) % 1000;
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
 
             std::stringstream ss;
             ss << std::put_time(std::localtime(&time), "%H:%M:%S");
@@ -101,32 +94,41 @@ namespace MiningPool {
             switch (level) {
                 case LogLevel::ERR:
                     return "ERROR";
-                case LogLevel::WARNING: return "WARN ";
-                case LogLevel::INFO: return "INFO ";
-                case LogLevel::DEBUG: return "DEBUG";
-                case LogLevel::TRACE: return "TRACE";
-                default: return "?????";
+                case LogLevel::WARNING:
+                    return "WARN ";
+                case LogLevel::INFO:
+                    return "INFO ";
+                case LogLevel::DEBUG:
+                    return "DEBUG";
+                case LogLevel::TRACE:
+                    return "TRACE";
+                default:
+                    return "?????";
             }
         }
 
         static std::string get_level_color(LogLevel level) {
-            if (!colors_enabled_) return "";
+            if (!colors_enabled_)
+                return "";
 
             switch (level) {
                 case LogLevel::ERR:
                     return Color::BRIGHT_RED;
-                case LogLevel::WARNING: return Color::BRIGHT_YELLOW;
-                case LogLevel::INFO: return Color::BRIGHT_GREEN;
-                case LogLevel::DEBUG: return Color::BRIGHT_CYAN;
-                case LogLevel::TRACE: return Color::BRIGHT_MAGENTA;
-                default: return Color::RESET;
+                case LogLevel::WARNING:
+                    return Color::BRIGHT_YELLOW;
+                case LogLevel::INFO:
+                    return Color::BRIGHT_GREEN;
+                case LogLevel::DEBUG:
+                    return Color::BRIGHT_CYAN;
+                case LogLevel::TRACE:
+                    return Color::BRIGHT_MAGENTA;
+                default:
+                    return Color::RESET;
             }
         }
 
     public:
-        static void set_level(LogLevel level) {
-            current_level_ = level;
-        }
+        static void set_level(LogLevel level) { current_level_ = level; }
 
         static void enable_colors(bool enable) {
             colors_enabled_ = enable;
@@ -137,29 +139,33 @@ namespace MiningPool {
 #endif
         }
 
-        static bool should_log(LogLevel level) {
-            return level <= current_level_;
-        }
+        static bool should_log(LogLevel level) { return level <= current_level_; }
 
         template<typename... Args>
         static void log(LogLevel level, const std::string &component, Args... args) {
-            if (!should_log(level)) return;
+            if (!should_log(level))
+                return;
 
             std::lock_guard<std::mutex> lock(mutex_);
 
             // Timestamp
-            if (colors_enabled_) std::cout << Color::DIM;
+            if (colors_enabled_)
+                std::cout << Color::DIM;
             std::cout << "[" << get_timestamp() << "] ";
-            if (colors_enabled_) std::cout << Color::RESET;
+            if (colors_enabled_)
+                std::cout << Color::RESET;
 
             // Level with color
             std::cout << get_level_color(level) << "[" << get_level_string(level) << "] ";
-            if (colors_enabled_) std::cout << Color::RESET;
+            if (colors_enabled_)
+                std::cout << Color::RESET;
 
             // Component
-            if (colors_enabled_) std::cout << Color::BRIGHT_BLUE;
+            if (colors_enabled_)
+                std::cout << Color::BRIGHT_BLUE;
             std::cout << "[" << component << "] ";
-            if (colors_enabled_) std::cout << Color::RESET;
+            if (colors_enabled_)
+                std::cout << Color::RESET;
 
             // Message
             ((std::cout << args), ...);

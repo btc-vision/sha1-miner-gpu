@@ -1,13 +1,15 @@
 #include "pool_client.hpp"
-#include "../logging/logger.hpp"
-#include "../tls/tls.hpp"
+
 #include <regex>
 
+#include "../logging/logger.hpp"
+#include "../tls/tls.hpp"
 #include "gpu_platform.hpp"
 
 namespace MiningPool {
     // ParsedUrl implementation
-    PoolClient::ParsedUrl PoolClient::parse_url(const std::string &url) {
+    PoolClient::ParsedUrl PoolClient::parse_url(const std::string &url)
+    {
         ParsedUrl result;
 
         // Updated regex that properly handles localhost and other hostnames
@@ -16,7 +18,7 @@ namespace MiningPool {
 
         if (std::regex_match(url, matches, url_regex)) {
             result.is_secure = (matches[1].str() == "wss");
-            result.host = matches[2].str();
+            result.host      = matches[2].str();
             // Extract port with proper defaults
             if (matches[3].length()) {
                 result.port = matches[3].str();
@@ -25,8 +27,8 @@ namespace MiningPool {
             }
             result.path = matches[4].length() ? matches[4].str() : "/";
             // Debug output
-            LOG_DEBUG("CLIENT", "Parsed URL - Host: ", result.host, ", Port: ", result.port,
-                      ", Path: ", result.path, ", Secure: ", result.is_secure);
+            LOG_DEBUG("CLIENT", "Parsed URL - Host: ", result.host, ", Port: ", result.port, ", Path: ", result.path,
+                      ", Secure: ", result.is_secure);
         } else {
             throw std::invalid_argument("Invalid WebSocket URL: " + url);
         }
@@ -36,20 +38,23 @@ namespace MiningPool {
 
     // PoolClient constructor
     PoolClient::PoolClient(const PoolConfig &config, IPoolEventHandler *handler)
-        : config_(config), event_handler_(handler) {
-        worker_stats_.worker_id = config.worker_name;
+        : config_(config), event_handler_(handler)
+    {
+        worker_stats_.worker_id       = config.worker_name;
         worker_stats_.connected_since = std::chrono::steady_clock::now();
 
         // Initialize work guard to keep io_context running
-        work_guard_ = std::make_unique<net::executor_work_guard<net::io_context::executor_type> >(ioc_.get_executor());
+        work_guard_ = std::make_unique<net::executor_work_guard<net::io_context::executor_type>>(ioc_.get_executor());
     }
 
     // PoolClient destructor
-    PoolClient::~PoolClient() {
+    PoolClient::~PoolClient()
+    {
         disconnect();
     }
 
-    bool PoolClient::connect() {
+    bool PoolClient::connect()
+    {
         if (connected_.load()) {
             return true;
         }
@@ -70,10 +75,10 @@ namespace MiningPool {
 
             // Start auxiliary threads
             message_processor_thread_ = std::thread(&PoolClient::message_processor_loop, this);
-            keepalive_thread_ = std::thread(&PoolClient::keepalive_loop, this);
+            keepalive_thread_         = std::thread(&PoolClient::keepalive_loop, this);
 
-            LOG_INFO("CLIENT", "Connecting to ", parsed.host, ":", parsed.port,
-                     " (", parsed.is_secure ? "secure" : "plain", ")");
+            LOG_INFO("CLIENT", "Connecting to ", parsed.host, ":", parsed.port, " (",
+                     parsed.is_secure ? "secure" : "plain", ")");
             LOG_DEBUG("CLIENT", "WebSocket path: ", parsed.path);
 
             std::promise<bool> connection_promise;
@@ -93,9 +98,8 @@ namespace MiningPool {
                     }
 
                     // Log resolved addresses
-                    for (auto const &endpoint: results) {
-                        LOG_DEBUG("CLIENT", "Resolved to: ",
-                                  endpoint.endpoint().address().to_string(), ":",
+                    for (auto const &endpoint : results) {
+                        LOG_DEBUG("CLIENT", "Resolved to: ", endpoint.endpoint().address().to_string(), ":",
                                   endpoint.endpoint().port());
                     }
 
@@ -112,40 +116,38 @@ namespace MiningPool {
                             ssl_ctx_.set_default_verify_paths();
 
                             // More permissive Chrome-like verification
-                            ssl_ctx_.set_verify_callback(
-                                [](bool preverified, ssl::verify_context &ctx) {
-                                    if (!preverified) {
-                                        X509_STORE_CTX *cts = ctx.native_handle();
-                                        int error = X509_STORE_CTX_get_error(cts);
-                                        int depth = X509_STORE_CTX_get_error_depth(cts);
+                            ssl_ctx_.set_verify_callback([](bool preverified, ssl::verify_context &ctx) {
+                                if (!preverified) {
+                                    X509_STORE_CTX *cts = ctx.native_handle();
+                                    int error           = X509_STORE_CTX_get_error(cts);
+                                    int depth           = X509_STORE_CTX_get_error_depth(cts);
 
-                                        // Get certificate info
-                                        X509 *cert = X509_STORE_CTX_get_current_cert(cts);
-                                        if (cert) {
-                                            char subject[256];
-                                            X509_NAME_oneline(X509_get_subject_name(cert), subject, sizeof(subject));
-                                            LOG_WARN("CLIENT", "Certificate verification issue at depth ", depth,
-                                                     ": ", X509_verify_cert_error_string(error),
-                                                     " - Subject: ", subject);
-                                        }
-
-                                        // Chrome allows many certificate issues
-                                        switch (error) {
-                                            case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY:
-                                            case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN:
-                                            case X509_V_ERR_CERT_UNTRUSTED:
-                                            case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE:
-                                            case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT:
-                                            case X509_V_ERR_CERT_HAS_EXPIRED:
-                                            case X509_V_ERR_CERT_NOT_YET_VALID:
-                                                LOG_WARN("CLIENT", "Allowing certificate despite verification issue");
-                                                return true; // Accept anyway
-                                            default:
-                                                return false; // Reject
-                                        }
+                                    // Get certificate info
+                                    X509 *cert = X509_STORE_CTX_get_current_cert(cts);
+                                    if (cert) {
+                                        char subject[256];
+                                        X509_NAME_oneline(X509_get_subject_name(cert), subject, sizeof(subject));
+                                        LOG_WARN("CLIENT", "Certificate verification issue at depth ", depth, ": ",
+                                                 X509_verify_cert_error_string(error), " - Subject: ", subject);
                                     }
-                                    return preverified;
-                                });
+
+                                    // Chrome allows many certificate issues
+                                    switch (error) {
+                                        case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY:
+                                        case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN:
+                                        case X509_V_ERR_CERT_UNTRUSTED:
+                                        case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE:
+                                        case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT:
+                                        case X509_V_ERR_CERT_HAS_EXPIRED:
+                                        case X509_V_ERR_CERT_NOT_YET_VALID:
+                                            LOG_WARN("CLIENT", "Allowing certificate despite verification issue");
+                                            return true;  // Accept anyway
+                                        default:
+                                            return false;  // Reject
+                                    }
+                                }
+                                return preverified;
+                            });
                         } else {
                             ssl_ctx_.set_verify_mode(ssl::verify_none);
                         }
@@ -157,7 +159,7 @@ namespace MiningPool {
                         }
 
                         // Create WebSocket SSL stream
-                        wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket> > >(ioc_, ssl_ctx_);
+                        wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket>>>(ioc_, ssl_ctx_);
 
                         // Get the lowest layer (TCP socket)
                         auto &socket = beast::get_lowest_layer(*wss_);
@@ -168,12 +170,10 @@ namespace MiningPool {
                         // Open socket with the correct protocol based on the endpoint
                         if (endpoint.address().is_v4()) {
                             socket.open(tcp::v4(), ec);
-                            LOG_DEBUG("CLIENT", "Opened IPv4 socket for address ",
-                                      endpoint.address().to_string());
+                            LOG_DEBUG("CLIENT", "Opened IPv4 socket for address ", endpoint.address().to_string());
                         } else if (endpoint.address().is_v6()) {
                             socket.open(tcp::v6(), ec);
-                            LOG_DEBUG("CLIENT", "Opened IPv6 socket for address ",
-                                      endpoint.address().to_string());
+                            LOG_DEBUG("CLIENT", "Opened IPv6 socket for address ", endpoint.address().to_string());
                         } else {
                             throw std::runtime_error("Unknown address family");
                         }
@@ -215,8 +215,8 @@ namespace MiningPool {
                         }
 
                         // Connect TCP
-                        LOG_DEBUG("CLIENT", "Connecting TCP socket to ", endpoint.address().to_string(),
-                                  ":", endpoint.port(), "...");
+                        LOG_DEBUG("CLIENT", "Connecting TCP socket to ", endpoint.address().to_string(), ":",
+                                  endpoint.port(), "...");
                         socket.connect(endpoint, ec);
 
                         if (ec) {
@@ -258,7 +258,7 @@ namespace MiningPool {
 
                         // Configure SSL before handshake
                         auto &ssl_stream = wss_->next_layer();
-                        SSL *ssl = ssl_stream.native_handle();
+                        SSL *ssl         = ssl_stream.native_handle();
                         ChromeTLSConfig::configureSSLStream(ssl, parsed.host);
 
                         // Perform SSL handshake
@@ -287,7 +287,7 @@ namespace MiningPool {
 
                         // Check ALPN
                         const unsigned char *alpn_proto = nullptr;
-                        unsigned int alpn_proto_len = 0;
+                        unsigned int alpn_proto_len     = 0;
                         SSL_get0_alpn_selected(ssl, &alpn_proto, &alpn_proto_len);
                         if (alpn_proto && alpn_proto_len > 0) {
                             std::string alpn(reinterpret_cast<const char *>(alpn_proto), alpn_proto_len);
@@ -298,31 +298,30 @@ namespace MiningPool {
                         wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
 
                         // Set WebSocket decorator with proper headers to fix "bad version"
-                        wss_->set_option(websocket::stream_base::decorator(
-                            [parsed](websocket::request_type &req) {
-                                req.set(http::field::host, parsed.host);
-                                req.set(http::field::upgrade, "websocket");
-                                req.set(http::field::connection, "Upgrade");
+                        wss_->set_option(websocket::stream_base::decorator([parsed](websocket::request_type &req) {
+                            req.set(http::field::host, parsed.host);
+                            req.set(http::field::upgrade, "websocket");
+                            req.set(http::field::connection, "Upgrade");
 
-                                // Chrome User-Agent
-                                req.set(http::field::user_agent,
-                                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                        "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36");
+                            // Chrome User-Agent
+                            req.set(http::field::user_agent,
+                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                    "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36");
 
-                                // Standard Chrome headers
-                                req.set(http::field::accept_language, "en-US,en;q=0.9");
-                                req.set(http::field::cache_control, "no-cache");
-                                req.set(http::field::pragma, "no-cache");
-                                req.set(http::field::origin, "https://" + parsed.host);
+                            // Standard Chrome headers
+                            req.set(http::field::accept_language, "en-US,en;q=0.9");
+                            req.set(http::field::cache_control, "no-cache");
+                            req.set(http::field::pragma, "no-cache");
+                            req.set(http::field::origin, "https://" + parsed.host);
 
-                                // WebSocket version (required)
-                                req.set("Sec-WebSocket-Version", "13");
+                            // WebSocket version (required)
+                            req.set("Sec-WebSocket-Version", "13");
 
-                                // Chrome Sec-Fetch headers
-                                req.set("Sec-Fetch-Dest", "websocket");
-                                req.set("Sec-Fetch-Mode", "websocket");
-                                req.set("Sec-Fetch-Site", "same-origin");
-                            }));
+                            // Chrome Sec-Fetch headers
+                            req.set("Sec-Fetch-Dest", "websocket");
+                            req.set("Sec-Fetch-Mode", "websocket");
+                            req.set("Sec-Fetch-Site", "same-origin");
+                        }));
 
                         // WebSocket handshake
                         LOG_DEBUG("CLIENT", "Starting WebSocket handshake...");
@@ -350,7 +349,7 @@ namespace MiningPool {
                         }
                     } else {
                         // Plain WebSocket (non-TLS)
-                        ws_ = std::make_unique<websocket::stream<tcp::socket> >(ioc_);
+                        ws_ = std::make_unique<websocket::stream<tcp::socket>>(ioc_);
 
                         auto &socket = beast::get_lowest_layer(*ws_);
 
@@ -360,12 +359,10 @@ namespace MiningPool {
                         // Open socket with correct protocol
                         if (endpoint.address().is_v4()) {
                             socket.open(tcp::v4(), ec);
-                            LOG_DEBUG("CLIENT", "Opened IPv4 socket for address ",
-                                      endpoint.address().to_string());
+                            LOG_DEBUG("CLIENT", "Opened IPv4 socket for address ", endpoint.address().to_string());
                         } else if (endpoint.address().is_v6()) {
                             socket.open(tcp::v6(), ec);
-                            LOG_DEBUG("CLIENT", "Opened IPv6 socket for address ",
-                                      endpoint.address().to_string());
+                            LOG_DEBUG("CLIENT", "Opened IPv6 socket for address ", endpoint.address().to_string());
                         } else {
                             throw std::runtime_error("Unknown address family");
                         }
@@ -415,14 +412,13 @@ namespace MiningPool {
                         }
 
                         ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-                        ws_->set_option(websocket::stream_base::decorator(
-                            [parsed](websocket::request_type &req) {
-                                req.set(http::field::host, parsed.host + ":" + parsed.port);
-                                req.set(http::field::upgrade, "websocket");
-                                req.set(http::field::connection, "Upgrade");
-                                req.set(http::field::user_agent, "SHA1-Miner/1.0 Boost.Beast");
-                                req.set("Sec-WebSocket-Version", "13");
-                            }));
+                        ws_->set_option(websocket::stream_base::decorator([parsed](websocket::request_type &req) {
+                            req.set(http::field::host, parsed.host + ":" + parsed.port);
+                            req.set(http::field::upgrade, "websocket");
+                            req.set(http::field::connection, "Upgrade");
+                            req.set(http::field::user_agent, "SHA1-Miner/1.0 Boost.Beast");
+                            req.set("Sec-WebSocket-Version", "13");
+                        }));
 
                         ws_->handshake(parsed.host + ":" + parsed.port, parsed.path, ec);
                         if (ec) {
@@ -430,7 +426,7 @@ namespace MiningPool {
                         }
                     }
 
-                    connected_ = true;
+                    connected_                    = true;
                     worker_stats_.connected_since = std::chrono::steady_clock::now();
 
                     LOG_INFO("CLIENT", Color::GREEN, "WebSocket connected successfully!", Color::RESET);
@@ -446,7 +442,7 @@ namespace MiningPool {
 
             // Wait for connection result
             if (!connection_future.get()) {
-                //running_ = false;
+                // running_ = false;
                 connected_ = false;
                 return false;
             }
@@ -457,15 +453,15 @@ namespace MiningPool {
             // Send initial HELLO message
             HelloMessage hello;
             hello.protocol_version = PROTOCOL_VERSION;
-            hello.client_version = "SHA1-Miner/1.0";
-            hello.capabilities = {"gpu", "multi-gpu", "vardiff"};
-            hello.user_agent = "SHA1-Miner";
+            hello.client_version   = "SHA1-Miner/1.0";
+            hello.capabilities     = {"gpu", "multi-gpu", "vardiff"};
+            hello.user_agent       = "SHA1-Miner";
 
             Message msg;
-            msg.type = MessageType::HELLO;
-            msg.id = Utils::generate_message_id();
+            msg.type      = MessageType::HELLO;
+            msg.id        = Utils::generate_message_id();
             msg.timestamp = Utils::current_timestamp_ms();
-            msg.payload = hello.to_json();
+            msg.payload   = hello.to_json();
 
             LOG_INFO("CLIENT", "Sending HELLO message");
             send_message(msg);
@@ -473,19 +469,20 @@ namespace MiningPool {
             return true;
         } catch (const std::exception &e) {
             LOG_ERROR("CLIENT", "Connection error: ", e.what());
-            //running_ = false;
+            // running_ = false;
             connected_ = false;
             return false;
         }
     }
 
-    void PoolClient::disconnect() {
+    void PoolClient::disconnect()
+    {
         if (!running_.load()) {
             return;
         }
 
-        running_ = false;
-        connected_ = false;
+        running_       = false;
+        connected_     = false;
         authenticated_ = false;
 
         // Close WebSocket connection
@@ -524,13 +521,13 @@ namespace MiningPool {
         }
 
         // Check if we're being called from keepalive_thread
-        if (keepalive_thread_.joinable() &&
-            keepalive_thread_.get_id() != std::this_thread::get_id()) {
+        if (keepalive_thread_.joinable() && keepalive_thread_.get_id() != std::this_thread::get_id()) {
             keepalive_thread_.join();
         }
     }
 
-    void PoolClient::io_loop() {
+    void PoolClient::io_loop()
+    {
         try {
             ioc_.run();
         } catch (const std::exception &e) {
@@ -538,7 +535,8 @@ namespace MiningPool {
         }
     }
 
-    void PoolClient::shutdown_connection() {
+    void PoolClient::shutdown_connection()
+    {
         LOG_DEBUG("CLIENT", "Shutting down connection...");
         // First, cancel all async operations
         if (config_.use_tls && wss_) {
@@ -547,26 +545,22 @@ namespace MiningPool {
                 boost::system::error_code ec;
                 socket.cancel(ec);
                 if (wss_->is_open()) {
-                    wss_->async_close(websocket::close_code::normal,
-                                      [](beast::error_code) {
-                                          // Ignore close errors during shutdown
-                                      });
+                    wss_->async_close(websocket::close_code::normal, [](beast::error_code) {
+                        // Ignore close errors during shutdown
+                    });
                 }
-            } catch (...) {
-            }
+            } catch (...) {}
         } else if (ws_) {
             try {
                 auto &socket = beast::get_lowest_layer(*ws_);
                 boost::system::error_code ec;
                 socket.cancel(ec);
                 if (ws_->is_open()) {
-                    ws_->async_close(websocket::close_code::normal,
-                                     [](beast::error_code) {
-                                         // Ignore close errors during shutdown
-                                     });
+                    ws_->async_close(websocket::close_code::normal, [](beast::error_code) {
+                        // Ignore close errors during shutdown
+                    });
                 }
-            } catch (...) {
-            }
+            } catch (...) {}
         }
 
         // Give async operations time to complete
@@ -576,7 +570,8 @@ namespace MiningPool {
         ioc_.stop();
     }
 
-    void PoolClient::send_message(const Message &msg) {
+    void PoolClient::send_message(const Message &msg)
+    {
         LOG_DEBUG("CLIENT", "send_message called for type: ", static_cast<int>(msg.type), ", ID: ", msg.id);
         if (!connected_.load()) {
             LOG_ERROR("CLIENT", "Cannot send message - not connected");
@@ -589,13 +584,12 @@ namespace MiningPool {
             LOG_TRACE("CLIENT", "Payload: ", payload);
 
             // Track pending requests if expecting response
-            if (msg.type == MessageType::AUTH ||
-                msg.type == MessageType::SUBMIT_SHARE ||
+            if (msg.type == MessageType::AUTH || msg.type == MessageType::SUBMIT_SHARE ||
                 msg.type == MessageType::GET_JOB) {
-                std::lock_guard<std::mutex> lock(pending_mutex_);
+                std::lock_guard lock(pending_mutex_);
                 PendingRequest req;
-                req.timestamp = std::chrono::steady_clock::now();
-                req.type = msg.type;
+                req.timestamp             = std::chrono::steady_clock::now();
+                req.type                  = msg.type;
                 pending_requests_[msg.id] = req;
                 LOG_DEBUG("CLIENT", "Added message ID ", msg.id, " (type ", static_cast<int>(msg.type),
                           ") to pending requests");
@@ -603,7 +597,7 @@ namespace MiningPool {
 
             // Queue message for sending
             {
-                std::lock_guard<std::mutex> lock(outgoing_mutex_);
+                std::lock_guard lock(outgoing_mutex_);
                 outgoing_queue_.push(msg);
                 LOG_DEBUG("CLIENT", "Message queued, queue size: ", outgoing_queue_.size());
                 outgoing_cv_.notify_one();
@@ -619,7 +613,8 @@ namespace MiningPool {
         }
     }
 
-    void PoolClient::do_read() {
+    void PoolClient::do_read()
+    {
         if (!connected_.load()) {
             LOG_ERROR("CLIENT", "do_read called but not connected!");
             return;
@@ -645,21 +640,22 @@ namespace MiningPool {
         }
     }
 
-    void PoolClient::do_write() {
+    void PoolClient::do_write()
+    {
         if (!connected_.load() || write_in_progress_.load()) {
             return;
         }
-        std::unique_lock<std::mutex> lock(outgoing_mutex_);
+        std::unique_lock lock(outgoing_mutex_);
         if (outgoing_queue_.empty()) {
             return;
         }
         write_in_progress_ = true;
-        Message msg = outgoing_queue_.front();
+        Message msg        = outgoing_queue_.front();
         outgoing_queue_.pop();
         lock.unlock();
 
         current_write_payload_ = msg.serialize();
-        auto write_handler = [this](const beast::error_code &ec, const std::size_t bytes_transferred) {
+        auto write_handler     = [this](const beast::error_code &ec, const std::size_t bytes_transferred) {
             write_in_progress_ = false;
             on_write(ec, bytes_transferred);
         };
@@ -671,7 +667,8 @@ namespace MiningPool {
         }
     }
 
-    void PoolClient::on_write(beast::error_code ec, std::size_t bytes_transferred) {
+    void PoolClient::on_write(beast::error_code ec, std::size_t bytes_transferred)
+    {
         if (ec) {
             LOG_ERROR("CLIENT", "Write error: ", ec.message());
             return;
@@ -684,7 +681,8 @@ namespace MiningPool {
         }
     }
 
-    void PoolClient::on_read(beast::error_code ec, std::size_t bytes_transferred) {
+    void PoolClient::on_read(beast::error_code ec, std::size_t bytes_transferred)
+    {
         if (ec) {
             if (ec != websocket::error::closed) {
                 std::string error_msg = ec.message();
@@ -697,19 +695,19 @@ namespace MiningPool {
                 LOG_ERROR("CLIENT", "Read error: ", error_msg);
             }
 
-            connected_ = false;
+            connected_     = false;
             authenticated_ = false;
             event_handler_->on_disconnected(ec.message());
 
-            bool should_reconnect = running_.load() && (config_.reconnect_attempts < 0 || // -1 means infinite
-                                                        reconnect_attempt_count_.load() < static_cast<unsigned>(config_.
-                                                            reconnect_attempts));
+            bool should_reconnect = running_.load() && (config_.reconnect_attempts < 0 ||  // -1 means infinite
+                                                        reconnect_attempt_count_.load() <
+                                                            static_cast<unsigned>(config_.reconnect_attempts));
 
             if (should_reconnect) {
-                LOG_WARN("CLIENT", "Scheduling reconnect (attempt ", reconnect_attempt_count_.load() + 1,
-                         config_.reconnect_attempts < 0 ? "/infinite" : "/" + std::to_string(config_.reconnect_attempts
-                         ),
-                         ")");
+                LOG_WARN(
+                    "CLIENT", "Scheduling reconnect (attempt ", reconnect_attempt_count_.load() + 1,
+                    config_.reconnect_attempts < 0 ? "/infinite" : "/" + std::to_string(config_.reconnect_attempts),
+                    ")");
                 // Schedule reconnect
                 std::thread([this]() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -717,8 +715,7 @@ namespace MiningPool {
                 }).detach();
             } else {
                 LOG_ERROR("CLIENT", "Not reconnecting - running=", running_.load(),
-                          ", attempts=", reconnect_attempt_count_.load(),
-                          "/", config_.reconnect_attempts);
+                          ", attempts=", reconnect_attempt_count_.load(), "/", config_.reconnect_attempts);
             }
             return;
         }
@@ -748,7 +745,7 @@ namespace MiningPool {
                 }
             }
 
-            std::lock_guard<std::mutex> lock(incoming_mutex_);
+            std::lock_guard lock(incoming_mutex_);
             incoming_queue_.push(*parsed);
             incoming_cv_.notify_one();
         }
@@ -759,22 +756,25 @@ namespace MiningPool {
         }
     }
 
-    bool PoolClient::is_authenticated() const {
+    bool PoolClient::is_authenticated() const
+    {
         return authenticated_.load();
     }
 
-    void PoolClient::keepalive_loop() {
+    void PoolClient::keepalive_loop()
+    {
         while (running_.load()) {
             for (int i = 0; i < config_.keepalive_interval_s && running_.load(); i++) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
 
-            if (!running_.load()) break;
+            if (!running_.load())
+                break;
 
             if (connected_.load() && authenticated_.load()) {
                 Message keepalive;
-                keepalive.type = MessageType::KEEPALIVE;
-                keepalive.id = Utils::generate_message_id();
+                keepalive.type      = MessageType::KEEPALIVE;
+                keepalive.id        = Utils::generate_message_id();
                 keepalive.timestamp = Utils::current_timestamp_ms();
                 send_message(keepalive);
             }
@@ -785,10 +785,11 @@ namespace MiningPool {
         LOG_DEBUG("CLIENT", "Keepalive loop exiting");
     }
 
-    void PoolClient::message_processor_loop() {
+    void PoolClient::message_processor_loop()
+    {
         LOG_DEBUG("CLIENT", "Message processor thread started (tid: ", std::this_thread::get_id(), ")");
         while (running_.load()) {
-            std::unique_lock<std::mutex> lock(incoming_mutex_);
+            std::unique_lock lock(incoming_mutex_);
             LOG_TRACE("CLIENT", "Message processor waiting for messages...");
             // Wait for messages with timeout to check running status
             bool has_message = incoming_cv_.wait_for(lock, std::chrono::milliseconds(1000), [this] {
@@ -824,15 +825,16 @@ namespace MiningPool {
         LOG_DEBUG("CLIENT", "Message processor thread stopped");
     }
 
-    void PoolClient::process_message(const Message &msg) {
+    void PoolClient::process_message(const Message &msg)
+    {
         // Remove from pending if this is a response
         {
-            std::lock_guard<std::mutex> lock(pending_mutex_);
+            std::lock_guard lock(pending_mutex_);
             pending_requests_.erase(msg.id);
         }
 
-        LOG_TRACE("CLIENT", "process_message called with type: ", static_cast<int>(msg.type),
-                  " (0x", std::hex, static_cast<int>(msg.type), std::dec, ")");
+        LOG_TRACE("CLIENT", "process_message called with type: ", static_cast<int>(msg.type), " (0x", std::hex,
+                  static_cast<int>(msg.type), std::dec, ")");
 
         try {
             switch (msg.type) {
@@ -854,7 +856,7 @@ namespace MiningPool {
                 case MessageType::POOL_STATUS:
                     handle_pool_status(PoolStatusMessage::from_json(msg.payload));
                     break;
-                case MessageType::ERROR_PROBLEM: // This is 0x17 = 23
+                case MessageType::ERROR_PROBLEM:  // This is 0x17 = 23
                     handle_error(msg);
                     break;
                 case MessageType::KEEP_ALIVE_RESPONSE:
@@ -868,19 +870,19 @@ namespace MiningPool {
                     reconnect();
                     break;
                 default:
-                    LOG_ERROR("CLIENT", "Unknown message type: ", static_cast<int>(msg.type),
-                              " (hex: 0x", std::hex, static_cast<int>(msg.type), std::dec, ")");
+                    LOG_ERROR("CLIENT", "Unknown message type: ", static_cast<int>(msg.type), " (hex: 0x", std::hex,
+                              static_cast<int>(msg.type), std::dec, ")");
             }
         } catch (const std::exception &e) {
-            LOG_ERROR("CLIENT", "Error processing message type ", static_cast<int>(msg.type),
-                      ": ", e.what());
+            LOG_ERROR("CLIENT", "Error processing message type ", static_cast<int>(msg.type), ": ", e.what());
             event_handler_->on_error(ErrorCode::PROTOCOL_ERROR, e.what());
         }
     }
 
-    void PoolClient::handle_welcome(const WelcomeMessage &welcome) {
-        LOG_INFO("CLIENT", Color::GREEN, "Connected to pool: ", Color::RESET, welcome.pool_name,
-                 " v", welcome.pool_version);
+    void PoolClient::handle_welcome(const WelcomeMessage &welcome)
+    {
+        LOG_INFO("CLIENT", Color::GREEN, "Connected to pool: ", Color::RESET, welcome.pool_name, " v",
+                 welcome.pool_version);
 
         // Check protocol compatibility
         if (welcome.protocol_version != PROTOCOL_VERSION) {
@@ -901,13 +903,14 @@ namespace MiningPool {
         authenticate();
     }
 
-    bool PoolClient::authenticate() {
+    bool PoolClient::authenticate()
+    {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         AuthMessage auth;
-        auth.method = config_.auth_method;
-        auth.username = config_.username + "." + config_.worker_name;
-        auth.password = config_.password;
+        auth.method     = config_.auth_method;
+        auth.username   = config_.username + "." + config_.worker_name;
+        auth.password   = config_.password;
         auth.session_id = session_id_;
 
         // Add client info for better server-side difficulty adjustment
@@ -922,32 +925,31 @@ namespace MiningPool {
             client_info.gpu_count = gpu_count;
             // Estimate based on typical GPU performance
             // Modern GPUs typically achieve 2-4 GH/s for SHA-1
-            client_info.estimated_hashrate = gpu_count * 2.5e9; // 2.5 GH/s per GPU
+            client_info.estimated_hashrate = gpu_count * 2.5e9;  // 2.5 GH/s per GPU
         } else {
             // CPU fallback (though not recommended)
-            client_info.gpu_count = 0;
-            client_info.estimated_hashrate = 100e6; // 100 MH/s for CPU
+            client_info.gpu_count          = 0;
+            client_info.estimated_hashrate = 100e6;  // 100 MH/s for CPU
         }
 
         client_info.miner_version = "SHA1-Miner/1.0.0";
-        auth.client_info = client_info;
+        auth.client_info          = client_info;
 
         LOG_INFO("CLIENT", "Sending AUTH message:");
-        LOG_DEBUG("CLIENT", "  Method: ", (auth.method == AuthMethod::WORKER_PASS
-                      ? "worker_pass"
-                      : auth.method == AuthMethod::API_KEY
-                      ? "api_key"
-                      : "certificate"));
+        LOG_DEBUG("CLIENT", "  Method: ",
+                  (auth.method == AuthMethod::WORKER_PASS ? "worker_pass"
+                   : auth.method == AuthMethod::API_KEY   ? "api_key"
+                                                          : "certificate"));
         LOG_DEBUG("CLIENT", "  Username: ", auth.username);
         LOG_DEBUG("CLIENT", "  Password: ", (auth.password.empty() ? "<empty>" : "<set>"));
         LOG_DEBUG("CLIENT", "  Estimated hashrate: ", client_info.estimated_hashrate / 1e9, " GH/s");
         LOG_DEBUG("CLIENT", "  GPU count: ", client_info.gpu_count);
 
         Message msg;
-        msg.type = MessageType::AUTH;
-        msg.id = Utils::generate_message_id();
+        msg.type      = MessageType::AUTH;
+        msg.id        = Utils::generate_message_id();
         msg.timestamp = Utils::current_timestamp_ms();
-        msg.payload = auth.to_json();
+        msg.payload   = auth.to_json();
 
         LOG_TRACE("CLIENT", "AUTH payload: ", msg.payload.dump());
 
@@ -955,19 +957,20 @@ namespace MiningPool {
         return true;
     }
 
-    void PoolClient::handle_auth_response(const AuthResponseMessage &response) {
+    void PoolClient::handle_auth_response(const AuthResponseMessage &response)
+    {
         if (response.success) {
             authenticated_ = true;
-            session_id_ = response.session_id;
-            worker_id_ = response.worker_id; {
-                std::lock_guard<std::mutex> lock(stats_mutex_);
+            session_id_    = response.session_id;
+            worker_id_     = response.worker_id;
+            {
+                std::lock_guard lock(stats_mutex_);
                 worker_stats_.worker_id = worker_id_;
 
                 // NEW: Set initial difficulty if provided
                 if (response.initial_difficulty > 0) {
                     worker_stats_.current_difficulty = response.initial_difficulty;
-                    LOG_INFO("CLIENT", "Initial difficulty set to ",
-                             response.initial_difficulty, " bits");
+                    LOG_INFO("CLIENT", "Initial difficulty set to ", response.initial_difficulty, " bits");
                 }
             }
 
@@ -981,27 +984,29 @@ namespace MiningPool {
         }
     }
 
-    void PoolClient::request_job() {
+    void PoolClient::request_job()
+    {
         Message msg;
-        msg.type = MessageType::GET_JOB;
-        msg.id = Utils::generate_message_id();
+        msg.type      = MessageType::GET_JOB;
+        msg.id        = Utils::generate_message_id();
         msg.timestamp = Utils::current_timestamp_ms();
         send_message(msg);
     }
 
-    void PoolClient::handle_new_job(const JobMessage &job) {
+    void PoolClient::handle_new_job(const JobMessage &job)
+    {
         PoolJob pool_job;
-        pool_job.job_id = job.job_id;
-        pool_job.job_data = job;
+        pool_job.job_id        = job.job_id;
+        pool_job.job_data      = job;
         pool_job.received_time = std::chrono::steady_clock::now();
-        pool_job.expiry_time = pool_job.received_time +
-                               std::chrono::seconds(job.expires_in_seconds);
-        pool_job.is_active = true; {
-            std::lock_guard<std::mutex> lock(jobs_mutex_);
+        pool_job.expiry_time   = pool_job.received_time + std::chrono::seconds(job.expires_in_seconds);
+        pool_job.is_active     = true;
+        {
+            std::lock_guard lock(jobs_mutex_);
 
             // Clean jobs if requested
             if (job.clean_jobs) {
-                for (auto &[id, existing_job]: active_jobs_) {
+                for (auto &[id, existing_job] : active_jobs_) {
                     existing_job.is_active = false;
                     event_handler_->on_job_cancelled(id);
                 }
@@ -1010,7 +1015,7 @@ namespace MiningPool {
 
             // Add new job
             active_jobs_[job.job_id] = pool_job;
-            current_job_id_ = job.job_id;
+            current_job_id_          = job.job_id;
 
             // Clean up expired jobs
             cleanup_expired_jobs();
@@ -1018,14 +1023,15 @@ namespace MiningPool {
 
         // Update stats
         {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
+            std::lock_guard lock(stats_mutex_);
             worker_stats_.last_job_time = std::chrono::steady_clock::now();
         }
 
         event_handler_->on_new_job(pool_job);
     }
 
-    void PoolClient::submit_share(const Share &share) {
+    void PoolClient::submit_share(const Share &share)
+    {
         if (!authenticated_.load()) {
             LOG_ERROR("SHARE", "Not authenticated, cannot submit share");
             return;
@@ -1054,7 +1060,7 @@ namespace MiningPool {
         }
 
         // Check if hash contains only hex characters
-        for (char c: share.hash) {
+        for (char c : share.hash) {
             if (!std::isxdigit(c)) {
                 LOG_ERROR("SHARE", "Invalid hash character: '", c, "' in hash: ", share.hash);
                 return;
@@ -1063,21 +1069,21 @@ namespace MiningPool {
 
         try {
             SubmitShareMessage submit;
-            submit.job_id = share.job_id;
-            submit.nonce = share.nonce;
-            submit.hash = share.hash;
+            submit.job_id        = share.job_id;
+            submit.nonce         = share.nonce;
+            submit.hash          = share.hash;
             submit.matching_bits = share.matching_bits;
-            submit.worker_name = config_.worker_name;
+            submit.worker_name   = config_.worker_name;
 
             Message msg;
-            msg.type = MessageType::SUBMIT_SHARE;
-            msg.id = Utils::generate_message_id();
+            msg.type      = MessageType::SUBMIT_SHARE;
+            msg.id        = Utils::generate_message_id();
             msg.timestamp = Utils::current_timestamp_ms();
-            msg.payload = submit.to_json();
+            msg.payload   = submit.to_json();
 
             // Track submission time for latency stats
             {
-                std::lock_guard<std::mutex> lock(stats_mutex_);
+                std::lock_guard lock(stats_mutex_);
                 worker_stats_.last_share_time = std::chrono::steady_clock::now();
             }
 
@@ -1087,7 +1093,8 @@ namespace MiningPool {
         }
     }
 
-    void PoolClient::handle_share_result(const ShareResultMessage &result) {
+    void PoolClient::handle_share_result(const ShareResultMessage &result)
+    {
         update_stats(result);
 
         if (result.status == ShareStatus::ACCEPTED) {
@@ -1118,9 +1125,9 @@ namespace MiningPool {
         }
     }
 
-
-    void PoolClient::update_stats(const ShareResultMessage &result) {
-        std::lock_guard<std::mutex> lock(stats_mutex_);
+    void PoolClient::update_stats(const ShareResultMessage &result)
+    {
+        std::lock_guard lock(stats_mutex_);
 
         if (result.status == ShareStatus::ACCEPTED) {
             worker_stats_.shares_accepted++;
@@ -1132,24 +1139,25 @@ namespace MiningPool {
         worker_stats_.last_share_time = std::chrono::steady_clock::now();
     }
 
-    void PoolClient::handle_difficulty_adjust(const DifficultyAdjustMessage &adjust) { {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            worker_stats_.current_difficulty = adjust.new_difficulty; // NOW IN BITS
+    void PoolClient::handle_difficulty_adjust(const DifficultyAdjustMessage &adjust)
+    {
+        {
+            std::lock_guard lock(stats_mutex_);
+            worker_stats_.current_difficulty = adjust.new_difficulty;  // NOW IN BITS
         }
 
-        LOG_INFO("POOL", "Difficulty adjusted to ", Color::BRIGHT_MAGENTA,
-                 adjust.new_difficulty, " bits", Color::RESET,
+        LOG_INFO("POOL", "Difficulty adjusted to ", Color::BRIGHT_MAGENTA, adjust.new_difficulty, " bits", Color::RESET,
                  " (", adjust.reason, ")");
 
         // Log scaled difficulty for clarity
         double scaled = DifficultyConverter::bitsToScaledDifficulty(adjust.new_difficulty);
-        LOG_DEBUG("POOL", "  Scaled difficulty: ",
-                  DifficultyConverter::formatDifficulty(scaled));
+        LOG_DEBUG("POOL", "  Scaled difficulty: ", DifficultyConverter::formatDifficulty(scaled));
 
         event_handler_->on_difficulty_changed(adjust.new_difficulty);
     }
 
-    void PoolClient::handle_pool_status(const PoolStatusMessage &status) {
+    void PoolClient::handle_pool_status(const PoolStatusMessage &status)
+    {
         // Log epoch information with bit difficulty if available
         if (!status.extra_info.is_null() && status.extra_info.contains("epoch_info")) {
             auto epoch_info = status.extra_info["epoch_info"];
@@ -1162,19 +1170,20 @@ namespace MiningPool {
         event_handler_->on_pool_status(status);
     }
 
-    void PoolClient::handle_error(const Message &msg) {
-        int error_code_int = msg.payload.value("code", 0);
-        ErrorCode code = static_cast<ErrorCode>(error_code_int);
+    void PoolClient::handle_error(const Message &msg)
+    {
+        int error_code_int  = msg.payload.value("code", 0);
+        ErrorCode code      = static_cast<ErrorCode>(error_code_int);
         std::string message = msg.payload.value("message", "Unknown error");
-        LOG_ERROR("CLIENT", Color::RED, "Received error from server - code: ", error_code_int,
-                  ", message: ", message, Color::RESET);
+        LOG_ERROR("CLIENT", Color::RED, "Received error from server - code: ", error_code_int, ", message: ", message,
+                  Color::RESET);
         // Handle specific error codes
         switch (code) {
             case ErrorCode::INVALID_MESSAGE:
             case ErrorCode::PROTOCOL_ERROR:
                 // These are fatal errors, disconnect
                 LOG_ERROR("CLIENT", "Fatal protocol error, disconnecting...");
-                connected_ = false;
+                connected_     = false;
                 authenticated_ = false;
                 // Close the websocket
                 if (ws_ && ws_->is_open()) {
@@ -1196,37 +1205,38 @@ namespace MiningPool {
         event_handler_->on_error(code, message);
     }
 
-    void PoolClient::report_hashrate(const HashrateReportMessage &report) {
+    void PoolClient::report_hashrate(const HashrateReportMessage &report)
+    {
         if (!authenticated_.load()) {
             return;
         }
 
         Message msg;
-        msg.type = MessageType::HASHRATE_REPORT;
-        msg.id = Utils::generate_message_id();
+        msg.type      = MessageType::HASHRATE_REPORT;
+        msg.id        = Utils::generate_message_id();
         msg.timestamp = Utils::current_timestamp_ms();
-        msg.payload = report.to_json();
+        msg.payload   = report.to_json();
 
         send_message(msg);
 
         // Update local stats
         {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
+            std::lock_guard lock(stats_mutex_);
             worker_stats_.current_hashrate = report.hashrate;
 
             // Update average hashrate with exponential moving average
-            const double alpha = 0.1; // Smoothing factor
+            const double alpha = 0.1;  // Smoothing factor
             if (worker_stats_.average_hashrate == 0) {
                 worker_stats_.average_hashrate = report.hashrate;
             } else {
-                worker_stats_.average_hashrate =
-                        alpha * report.hashrate + (1 - alpha) * worker_stats_.average_hashrate;
+                worker_stats_.average_hashrate = alpha * report.hashrate + (1 - alpha) * worker_stats_.average_hashrate;
             }
         }
     }
 
-    std::optional<PoolJob> PoolClient::get_current_job() const {
-        std::lock_guard<std::mutex> lock(jobs_mutex_);
+    std::optional<PoolJob> PoolClient::get_current_job() const
+    {
+        std::lock_guard lock(jobs_mutex_);
         auto it = active_jobs_.find(current_job_id_);
         if (it != active_jobs_.end() && it->second.is_active && !it->second.is_expired()) {
             return it->second;
@@ -1234,11 +1244,12 @@ namespace MiningPool {
         return std::nullopt;
     }
 
-    std::vector<PoolJob> PoolClient::get_active_jobs() const {
-        std::lock_guard<std::mutex> lock(jobs_mutex_);
+    std::vector<PoolJob> PoolClient::get_active_jobs() const
+    {
+        std::lock_guard lock(jobs_mutex_);
         std::vector<PoolJob> jobs;
 
-        for (const auto &[id, job]: active_jobs_) {
+        for (const auto &[id, job] : active_jobs_) {
             if (job.is_active && !job.is_expired()) {
                 jobs.push_back(job);
             }
@@ -1247,12 +1258,14 @@ namespace MiningPool {
         return jobs;
     }
 
-    WorkerStats PoolClient::get_stats() const {
-        std::lock_guard<std::mutex> lock(stats_mutex_);
+    WorkerStats PoolClient::get_stats() const
+    {
+        std::lock_guard lock(stats_mutex_);
         return worker_stats_;
     }
 
-    void PoolClient::cleanup_expired_jobs() {
+    void PoolClient::cleanup_expired_jobs()
+    {
         auto now = std::chrono::steady_clock::now();
 
         for (auto it = active_jobs_.begin(); it != active_jobs_.end();) {
@@ -1265,14 +1278,13 @@ namespace MiningPool {
         }
     }
 
-    void PoolClient::check_pending_timeouts() {
-        std::lock_guard<std::mutex> lock(pending_mutex_);
+    void PoolClient::check_pending_timeouts()
+    {
+        std::lock_guard lock(pending_mutex_);
         auto now = std::chrono::steady_clock::now();
 
         for (auto it = pending_requests_.begin(); it != pending_requests_.end();) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - it->second.timestamp
-            ).count();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.timestamp).count();
 
             if (elapsed > config_.response_timeout_ms) {
                 std::string msg_type_str;
@@ -1290,15 +1302,14 @@ namespace MiningPool {
                         msg_type_str = "UNKNOWN";
                 }
 
-                LOG_ERROR("CLIENT", "Request timeout: message_id=", it->first,
-                          ", type=", msg_type_str,
+                LOG_ERROR("CLIENT", "Request timeout: message_id=", it->first, ", type=", msg_type_str,
                           ", elapsed=", elapsed, "ms");
                 it = pending_requests_.erase(it);
                 // If we're getting timeouts, we might be disconnected
                 if (!connected_.load() && running_.load()) {
-                    bool should_reconnect = config_.reconnect_attempts < 0 ||
-                                            reconnect_attempt_count_.load() < static_cast<unsigned>(config_.
-                                                reconnect_attempts);
+                    bool should_reconnect =
+                        config_.reconnect_attempts < 0 ||
+                        reconnect_attempt_count_.load() < static_cast<unsigned>(config_.reconnect_attempts);
 
                     if (should_reconnect) {
                         LOG_INFO("CLIENT", "Connection seems lost (timeout), scheduling reconnect");
@@ -1315,11 +1326,13 @@ namespace MiningPool {
         }
     }
 
-    bool PoolClient::is_reconnecting() const {
+    bool PoolClient::is_reconnecting() const
+    {
         return reconnecting_.load();
     }
 
-    void PoolClient::reconnect() {
+    void PoolClient::reconnect()
+    {
         bool expected = false;
         if (!reconnecting_.compare_exchange_strong(expected, true)) {
             LOG_DEBUG("CLIENT", "Already reconnecting, skipping");
@@ -1336,11 +1349,10 @@ namespace MiningPool {
                 LOG_DEBUG("CLIENT", "Checking reconnect attempts: current=", reconnect_attempt_count_.load(),
                           ", max=", config_.reconnect_attempts, " (",
                           config_.reconnect_attempts < 0 ? "infinite" : "limited", ")");
-                if (config_.reconnect_attempts >= 0 && reconnect_attempt_count_ >= static_cast<unsigned>(config_.
-                        reconnect_attempts)) {
-                    LOG_ERROR("CLIENT", "Maximum reconnection attempts (",
-                              config_.reconnect_attempts, ") exceeded");
-                    running_ = false;
+                if (config_.reconnect_attempts >= 0 &&
+                    reconnect_attempt_count_ >= static_cast<unsigned>(config_.reconnect_attempts)) {
+                    LOG_ERROR("CLIENT", "Maximum reconnection attempts (", config_.reconnect_attempts, ") exceeded");
+                    running_      = false;
                     reconnecting_ = false;
                     return;
                 }
@@ -1353,8 +1365,7 @@ namespace MiningPool {
                     delay = std::min(delay * 2, config_.max_reconnect_delay_ms);
                 }
 
-                LOG_INFO("CLIENT", "Reconnection attempt #", reconnect_attempt_count_.load(),
-                         " in ", delay, "ms...");
+                LOG_INFO("CLIENT", "Reconnection attempt #", reconnect_attempt_count_.load(), " in ", delay, "ms...");
 
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 
@@ -1368,9 +1379,9 @@ namespace MiningPool {
                 LOG_INFO("CLIENT", "Shutting down current connection...");
 
                 // Signal threads to stop
-                running_ = false;
-                connected_ = false;
-                authenticated_ = false;
+                running_           = false;
+                connected_         = false;
+                authenticated_     = false;
                 write_in_progress_ = false;
 
                 // Clear session data
@@ -1418,26 +1429,28 @@ namespace MiningPool {
 
                 // Clear all queues
                 {
-                    std::lock_guard<std::mutex> lock(outgoing_mutex_);
+                    std::lock_guard lock(outgoing_mutex_);
                     std::queue<Message> empty;
                     std::swap(outgoing_queue_, empty);
-                } {
-                    std::lock_guard<std::mutex> lock(incoming_mutex_);
+                }
+                {
+                    std::lock_guard lock(incoming_mutex_);
                     std::queue<Message> empty;
                     std::swap(incoming_queue_, empty);
-                } {
-                    std::lock_guard<std::mutex> lock(pending_mutex_);
+                }
+                {
+                    std::lock_guard lock(pending_mutex_);
                     pending_requests_.clear();
                 }
 
                 // Reset io_context for fresh start
                 ioc_.restart();
                 // Reset work guard
-                work_guard_ = std::make_unique<net::executor_work_guard<net::io_context::executor_type> >(
-                    ioc_.get_executor());
+                work_guard_ =
+                    std::make_unique<net::executor_work_guard<net::io_context::executor_type>>(ioc_.get_executor());
 
                 // Reset state for fresh connection
-                running_ = true; // Set running back to true for the new connection
+                running_ = true;  // Set running back to true for the new connection
 
                 LOG_INFO("CLIENT", "Attempting to reconnect to ", config_.url, "...");
 
@@ -1445,7 +1458,7 @@ namespace MiningPool {
                 if (connect()) {
                     LOG_INFO("CLIENT", Color::GREEN, "Reconnection successful!", Color::RESET);
                     reconnect_attempt_count_ = 0;
-                    reconnecting_ = false;
+                    reconnecting_            = false;
                 } else {
                     LOG_ERROR("CLIENT", "Reconnection failed");
                     reconnecting_ = false;
@@ -1453,8 +1466,8 @@ namespace MiningPool {
                     bool should_retry = config_.reconnect_attempts < 0 ||
                                         reconnect_attempt_count_ < static_cast<unsigned>(config_.reconnect_attempts);
                     LOG_DEBUG("CLIENT", "Should retry? ", should_retry ? "YES" : "NO",
-                              " (attempts=", reconnect_attempt_count_.load(),
-                              ", max=", config_.reconnect_attempts, ")");
+                              " (attempts=", reconnect_attempt_count_.load(), ", max=", config_.reconnect_attempts,
+                              ")");
 
                     if (should_retry) {
                         // Remove "&& running_.load()" check here
@@ -1466,8 +1479,7 @@ namespace MiningPool {
                         // Only NOW set running_ = false when we've exhausted all attempts
                         LOG_ERROR("CLIENT", "Giving up on reconnection");
                         running_ = false;
-                        event_handler_->on_error(ErrorCode::CONNECTION_LOST,
-                                                 "Failed to reconnect after all attempts");
+                        event_handler_->on_error(ErrorCode::CONNECTION_LOST, "Failed to reconnect after all attempts");
                     }
                 }
             } catch (const std::exception &e) {
@@ -1475,9 +1487,9 @@ namespace MiningPool {
                 reconnecting_ = false;
 
                 // Try again if appropriate
-                bool should_retry = running_.load() &&
-                                    (config_.reconnect_attempts < 0 ||
-                                     reconnect_attempt_count_ < static_cast<unsigned>(config_.reconnect_attempts));
+                bool should_retry =
+                    running_.load() && (config_.reconnect_attempts < 0 ||
+                                        reconnect_attempt_count_ < static_cast<unsigned>(config_.reconnect_attempts));
 
                 if (should_retry) {
                     LOG_INFO("CLIENT", "Scheduling retry after exception");
@@ -1500,20 +1512,21 @@ namespace MiningPool {
     // PoolClientManager implementation
     PoolClientManager::PoolClientManager() = default;
 
-    PoolClientManager::~PoolClientManager() {
+    PoolClientManager::~PoolClientManager()
+    {
         disconnect_all();
     }
 
-    bool PoolClientManager::add_pool(const std::string &name, const PoolConfig &config,
-                                     IPoolEventHandler *handler) {
-        std::lock_guard<std::mutex> lock(mutex_);
+    bool PoolClientManager::add_pool(const std::string &name, const PoolConfig &config, IPoolEventHandler *handler)
+    {
+        std::lock_guard lock(mutex_);
 
         if (clients_.count(name) > 0) {
             LOG_ERROR("POOL_MGR", "Pool with name '", name, "' already exists");
             return false;
         }
 
-        auto client = std::make_shared<PoolClient>(config, handler);
+        auto client    = std::make_shared<PoolClient>(config, handler);
         clients_[name] = client;
 
         if (primary_pool_name_.empty()) {
@@ -1523,8 +1536,9 @@ namespace MiningPool {
         return true;
     }
 
-    bool PoolClientManager::remove_pool(const std::string &name) {
-        std::lock_guard<std::mutex> lock(mutex_);
+    bool PoolClientManager::remove_pool(const std::string &name)
+    {
+        std::lock_guard lock(mutex_);
 
         auto it = clients_.find(name);
         if (it == clients_.end()) {
@@ -1541,8 +1555,9 @@ namespace MiningPool {
         return true;
     }
 
-    bool PoolClientManager::set_primary_pool(const std::string &name) {
-        std::lock_guard<std::mutex> lock(mutex_);
+    bool PoolClientManager::set_primary_pool(const std::string &name)
+    {
+        std::lock_guard lock(mutex_);
 
         if (clients_.count(name) == 0) {
             return false;
@@ -1552,23 +1567,27 @@ namespace MiningPool {
         return true;
     }
 
-    std::string PoolClientManager::get_primary_pool() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+    std::string PoolClientManager::get_primary_pool() const
+    {
+        std::lock_guard lock(mutex_);
         return primary_pool_name_;
     }
 
-    void PoolClientManager::enable_failover(bool enable) {
-        std::lock_guard<std::mutex> lock(mutex_);
+    void PoolClientManager::enable_failover(bool enable)
+    {
+        std::lock_guard lock(mutex_);
         failover_enabled_ = enable;
     }
 
-    void PoolClientManager::set_failover_order(const std::vector<std::string> &pool_names) {
-        std::lock_guard<std::mutex> lock(mutex_);
+    void PoolClientManager::set_failover_order(const std::vector<std::string> &pool_names)
+    {
+        std::lock_guard lock(mutex_);
         failover_order_ = pool_names;
     }
 
-    std::shared_ptr<PoolClient> PoolClientManager::get_client(const std::string &name) const {
-        std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_ptr<PoolClient> PoolClientManager::get_client(const std::string &name) const
+    {
+        std::lock_guard lock(mutex_);
 
         auto it = clients_.find(name);
         if (it != clients_.end()) {
@@ -1578,14 +1597,16 @@ namespace MiningPool {
         return nullptr;
     }
 
-    std::shared_ptr<PoolClient> PoolClientManager::get_primary_client() const {
+    std::shared_ptr<PoolClient> PoolClientManager::get_primary_client() const
+    {
         return get_client(get_primary_pool());
     }
 
-    void PoolClientManager::connect_all() {
-        std::lock_guard<std::mutex> lock(mutex_);
+    void PoolClientManager::connect_all()
+    {
+        std::lock_guard lock(mutex_);
 
-        for (auto &[name, client]: clients_) {
+        for (auto &[name, client] : clients_) {
             if (!client->is_connected()) {
                 LOG_INFO("POOL_MGR", "Connecting to pool: ", name);
                 client->connect();
@@ -1593,10 +1614,11 @@ namespace MiningPool {
         }
     }
 
-    void PoolClientManager::disconnect_all() {
-        std::lock_guard<std::mutex> lock(mutex_);
+    void PoolClientManager::disconnect_all()
+    {
+        std::lock_guard lock(mutex_);
 
-        for (auto &[name, client]: clients_) {
+        for (auto &[name, client] : clients_) {
             if (client->is_connected()) {
                 LOG_INFO("POOL_MGR", "Disconnecting from pool: ", name);
                 client->disconnect();
@@ -1604,12 +1626,13 @@ namespace MiningPool {
         }
     }
 
-    std::map<std::string, WorkerStats> PoolClientManager::get_all_stats() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+    std::map<std::string, WorkerStats> PoolClientManager::get_all_stats() const
+    {
+        std::lock_guard lock(mutex_);
 
         std::map<std::string, WorkerStats> all_stats;
 
-        for (const auto &[name, client]: clients_) {
+        for (const auto &[name, client] : clients_) {
             if (client->is_connected()) {
                 all_stats[name] = client->get_stats();
             }
@@ -1618,19 +1641,19 @@ namespace MiningPool {
         return all_stats;
     }
 
-    void PoolClientManager::handle_failover() {
+    void PoolClientManager::handle_failover()
+    {
         if (!failover_enabled_) {
             return;
         }
 
         // Check if primary pool is still connected
-        auto primary = get_primary_client();
-        if (primary && primary->is_connected()) {
+        if (auto primary = get_primary_client(); primary && primary->is_connected()) {
             return;
         }
 
         // Try failover pools in order
-        for (const auto &pool_name: failover_order_) {
+        for (const auto &pool_name : failover_order_) {
             auto client = get_client(pool_name);
             if (client && client->is_connected()) {
                 LOG_INFO("POOL_MGR", "Failing over to pool: ", pool_name);
@@ -1640,8 +1663,8 @@ namespace MiningPool {
         }
 
         // If no pools in failover list are connected, try any connected pool
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (const auto &[name, client]: clients_) {
+        std::lock_guard lock(mutex_);
+        for (const auto &[name, client] : clients_) {
             if (client->is_connected() && name != primary_pool_name_) {
                 LOG_INFO("POOL_MGR", "Failing over to pool: ", name);
                 primary_pool_name_ = name;
@@ -1649,4 +1672,4 @@ namespace MiningPool {
             }
         }
     }
-} // namespace MiningPool
+}  // namespace MiningPool
