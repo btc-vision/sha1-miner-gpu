@@ -233,7 +233,7 @@ private:
 
     UserSpecifiedFlags detectUserSpecifiedValues() const;
     OptimalConfig determineOptimalConfig();
-    static OptimalConfig getAMDOptimalConfig();
+    OptimalConfig getAMDOptimalConfig();
     OptimalConfig getNVIDIAOptimalConfig() const;
 
     void applyUserSpecifiedValues(const UserSpecifiedFlags &user_flags, const OptimalConfig &optimal);

@@ -121,7 +121,7 @@ MiningSystem::UserSpecifiedFlags MiningSystem::detectUserSpecifiedValues() const
 
 MiningSystem::OptimalConfig MiningSystem::getAMDOptimalConfig()
 {
-    OptimalConfig config;
+    OptimalConfig config{};
 #ifdef USE_HIP
     AMDArchitecture arch = AMDGPUDetector::detectArchitecture(device_props_);
     detected_arch_       = arch;
@@ -153,10 +153,11 @@ MiningSystem::OptimalConfig MiningSystem::getAMDOptimalConfig()
             config.streams       = 4;
             config.buffer_size   = 256;
             break;
-            e AMDArchitecture::RDNA1 : config.blocks_per_sm = 4;
-            config.threads                                  = 256;
-            config.streams                                  = 2;
-            config.buffer_size                              = 128;
+        case AMDArchitecture::RDNA1:
+            config.blocks_per_sm = 4;
+            config.threads       = 256;
+            config.streams       = 2;
+            config.buffer_size   = 128;
             break;
         case AMDArchitecture::GCN5:
         case AMDArchitecture::GCN4:
