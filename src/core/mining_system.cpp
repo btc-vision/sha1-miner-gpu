@@ -623,13 +623,16 @@ bool MiningSystem::initialize()
     return true;
 }
 
-uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job, std::function<bool()> should_continue,
-                                                            uint64_t start_nonce)
+uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job,
+                                                            const std::function<bool()> &should_continue,
+                                                            const uint64_t start_nonce)
 {
     // Copy job to device
     for (int i = 0; i < config_.num_streams; i++) {
         device_jobs_[i].copyFromHost(job);
     }
+
+    LOG_INFO("LOOP", "Reset mining system and prepare for new job");
 
     // Reset flags and counters
     stop_mining_ = false;
@@ -744,10 +747,10 @@ void MiningSystem::runMiningLoop(const MiningJob &job)
 }
 
 // Update launchKernelOnStream to NOT modify global_nonce_offset
-void MiningSystem::launchKernelOnStream(int stream_idx, uint64_t nonce_offset, const MiningJob &job)
+void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t nonce_offset, const MiningJob &job)
 {
     // Configure kernel
-    KernelConfig config;
+    KernelConfig config{};
     config.blocks             = config_.blocks_per_stream;
     config.threads_per_block  = config_.threads_per_block;
     config.stream             = streams_[stream_idx];
@@ -771,7 +774,7 @@ void MiningSystem::launchKernelOnStream(int stream_idx, uint64_t nonce_offset, c
     }
 }
 
-void MiningSystem::processStreamResults(int stream_idx, StreamData &stream_data)
+void MiningSystem::processStreamResults(const int stream_idx, StreamData &stream_data)
 {
     // Get actual nonces processed
     uint64_t actual_nonces = 0;
@@ -782,7 +785,7 @@ void MiningSystem::processStreamResults(int stream_idx, StreamData &stream_data)
     gpuStreamSynchronize(streams_[stream_idx]);
 
     // Update hash count
-    uint64_t nonces_this_kernel = actual_nonces - stream_data.last_nonces_processed;
+    const uint64_t nonces_this_kernel = actual_nonces - stream_data.last_nonces_processed;
     total_hashes_ += nonces_this_kernel;
     stream_data.last_nonces_processed = actual_nonces;
 
@@ -790,11 +793,11 @@ void MiningSystem::processStreamResults(int stream_idx, StreamData &stream_data)
     processResultsOptimized(stream_idx);
 
     // Update timing statistics
-    auto kernel_time = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() -
-                                                                             kernel_launch_times_[stream_idx])
-                           .count() /
-                       1000.0;
     {
+        const auto kernel_time = std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::high_resolution_clock::now() - kernel_launch_times_[stream_idx])
+                                     .count() /
+                                 1000.0;
         std::lock_guard lock(timing_mutex_);
         timing_stats_.kernel_execution_time_ms += kernel_time;
         timing_stats_.kernel_count++;
@@ -1240,6 +1243,8 @@ void MiningSystem::cleanup()
 {
     std::lock_guard lock(system_mutex_);
 
+    printFinalStats();
+
     // Synchronize and destroy streams
     for (size_t i = 0; i < streams_.size(); i++) {
         if (streams_[i]) {
@@ -1260,7 +1265,7 @@ void MiningSystem::cleanup()
     }
 
     // Free GPU memory
-    for (auto &pool : gpu_pools_) {
+    for (const auto &pool : gpu_pools_) {
         if (pool.results)
             gpuFree(pool.results);
         if (pool.count)
@@ -1276,20 +1281,18 @@ void MiningSystem::cleanup()
     }
 
     // Free pinned memory
-    for (size_t i = 0; i < pinned_results_.size(); i++) {
-        if (pinned_results_[i]) {
+    for (const auto &pinned_result : pinned_results_) {
+        if (pinned_result) {
             if (config_.use_pinned_memory) {
-                gpuFreeHost(pinned_results_[i]);
+                gpuFreeHost(pinned_result);
             } else {
-                delete[] pinned_results_[i];
+                delete[] pinned_result;
             }
         }
     }
-
-    printFinalStats();
 }
 
-void MiningSystem::performanceMonitor()
+void MiningSystem::performanceMonitor() const
 {
     auto last_update     = std::chrono::steady_clock::now();
     uint64_t last_hashes = 0;
@@ -1301,14 +1304,15 @@ void MiningSystem::performanceMonitor()
         auto elapsed       = std::chrono::duration_cast<std::chrono::seconds>(now - last_update);
         auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
 
-        uint64_t current_hashes = total_hashes_.load();
-        uint64_t hash_diff      = current_hashes - last_hashes;
+        const uint64_t current_hashes = total_hashes_.load();
+        const uint64_t hash_diff      = current_hashes - last_hashes;
 
-        double instant_rate =
+        const double instant_rate =
             elapsed.count() > 0 ? static_cast<double>(hash_diff) / static_cast<double>(elapsed.count()) / 1e9 : 0.0;
-        double average_rate = total_elapsed.count() > 0 ? static_cast<double>(current_hashes) /
-                                                              static_cast<double>(total_elapsed.count()) / 1e9
-                                                        : 0.0;
+
+        const double average_rate = total_elapsed.count() > 0 ? static_cast<double>(current_hashes) /
+                                                                    static_cast<double>(total_elapsed.count()) / 1e9
+                                                              : 0.0;
 
         std::cout << "\r[" << total_elapsed.count() << "s] "
                   << "Rate: " << std::fixed << std::setprecision(2) << instant_rate << " GH/s"
@@ -1333,14 +1337,15 @@ void MiningSystem::performanceMonitorInterruptible(const std::function<bool()> &
         auto elapsed       = std::chrono::duration_cast<std::chrono::seconds>(now - last_update);
         auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
 
-        uint64_t current_hashes = total_hashes_.load();
-        uint64_t hash_diff      = current_hashes - last_hashes;
+        const uint64_t current_hashes = total_hashes_.load();
+        const uint64_t hash_diff      = current_hashes - last_hashes;
 
-        double instant_rate =
+        const double instant_rate =
             elapsed.count() > 0 ? static_cast<double>(hash_diff) / static_cast<double>(elapsed.count()) / 1e9 : 0.0;
-        double average_rate = total_elapsed.count() > 0 ? static_cast<double>(current_hashes) /
-                                                              static_cast<double>(total_elapsed.count()) / 1e9
-                                                        : 0.0;
+
+        const double average_rate = total_elapsed.count() > 0 ? static_cast<double>(current_hashes) /
+                                                                    static_cast<double>(total_elapsed.count()) / 1e9
+                                                              : 0.0;
 
         std::cout << "\r[" << total_elapsed.count() << "s] "
                   << "Rate: " << std::fixed << std::setprecision(2) << instant_rate << " GH/s"
@@ -1357,16 +1362,19 @@ void MiningSystem::performanceMonitorInterruptible(const std::function<bool()> &
     }
 }
 
-void MiningSystem::printFinalStats()
+void MiningSystem::printFinalStats() const
 {
-    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time_);
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time_);
+
+    const auto hashes = total_hashes_.load();
 
     std::cout << "\n\nFinal Statistics:\n";
     std::cout << "=====================================\n";
     std::cout << "  Platform: " << getGPUPlatformName() << "\n";
     std::cout << "  GPU: " << device_props_.name << "\n";
     std::cout << "  Total Time: " << elapsed.count() << " seconds\n";
-    std::cout << "  Total Hashes: " << static_cast<double>(total_hashes_.load()) / 1e12 << " TH\n";
+    std::cout << "  Total Hashes: " << hashes << " (" << (static_cast<double>(hashes) / 1e9) << " GH)\n";
     if (elapsed.count() > 0) {
         std::cout << "  Average Rate: "
                   << static_cast<double>(total_hashes_.load()) / static_cast<double>(elapsed.count()) / 1e9
@@ -1408,7 +1416,7 @@ uint64_t MiningSystem::runSingleBatch(const MiningJob &job)
     }
 
     // Configure kernel
-    KernelConfig kernel_config;
+    KernelConfig kernel_config{};
     kernel_config.blocks             = config_.blocks_per_stream;
     kernel_config.threads_per_block  = config_.threads_per_block;
     kernel_config.stream             = streams_[0];  // Use first stream
@@ -1451,6 +1459,8 @@ void MiningSystem::clearResults()
 
 void MiningSystem::resetState()
 {
+    LOG_INFO("RESET", "Resetting mining system state");
+
     best_tracker_.reset();
     total_hashes_        = 0;
     total_candidates_    = 0;
