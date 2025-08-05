@@ -197,7 +197,7 @@ public:
      * @param job Mining job configuration
      * @param should_continue Function that returns false when mining should stop
      */
-    uint64_t runMiningLoopInterruptibleWithOffset(const MiningJob &job, std::function<bool()> should_continue,
+    uint64_t runMiningLoopInterruptibleWithOffset(const MiningJob &job, const std::function<bool()> &should_continue,
                                                   uint64_t start_nonce);
 
     /**
@@ -233,7 +233,7 @@ private:
 
     UserSpecifiedFlags detectUserSpecifiedValues() const;
     OptimalConfig determineOptimalConfig();
-    static OptimalConfig getAMDOptimalConfig();
+    OptimalConfig getAMDOptimalConfig();
     OptimalConfig getNVIDIAOptimalConfig() const;
 
     void applyUserSpecifiedValues(const UserSpecifiedFlags &user_flags, const OptimalConfig &optimal);
@@ -319,9 +319,9 @@ protected:
 
     void processResultsOptimized(int stream_idx);
 
-    void performanceMonitor();
+    void performanceMonitor() const;
 
-    void printFinalStats();
+    void printFinalStats() const;
 
     uint64_t getTotalThreads() const;
 
@@ -330,7 +330,7 @@ protected:
     // Platform detection and optimization
     GPUVendor detectGPUVendor() const;
 
-    void optimizeForGPU();
+    static void optimizeForGPU();
 
     void autoTuneParameters();
 };
