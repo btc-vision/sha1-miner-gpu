@@ -141,29 +141,32 @@ MiningSystem::OptimalConfig MiningSystem::getAMDOptimalConfig()
             config.streams       = 4;
             config.buffer_size   = 512;
             break;
-            e AMDArchitecture::RDNA3 : config.blocks_per_sm = 6;
-            config.threads                                  = 256;
-            config.streams                                  = 4;
-            config.buffer_size                              = 256;
+        case AMDArchitecture::RDNA3:
+            config.blocks_per_sm = 6;
+            config.threads       = 256;
+            config.streams       = 4;
+            config.buffer_size   = 256;
             break;
-            e AMDArchitecture::RDNA2 : config.blocks_per_sm = 4;
-            config.threads                                  = 256;
-            config.streams                                  = 4;
-            config.buffer_size                              = 256;
+        case AMDArchitecture::RDNA2:
+            config.blocks_per_sm = 4;
+            config.threads       = 256;
+            config.streams       = 4;
+            config.buffer_size   = 256;
             break;
             e AMDArchitecture::RDNA1 : config.blocks_per_sm = 4;
             config.threads                                  = 256;
             config.streams                                  = 2;
             config.buffer_size                              = 128;
             break;
-        e AMDArchitecture::GCN5 : case AMDArchitecture::GCN4:
+        case AMDArchitecture::GCN5:
+        case AMDArchitecture::GCN4:
         case AMDArchitecture::GCN3:
             config.blocks_per_sm = 4;
             config.threads       = 256;
             config.streams       = 2;
             config.buffer_size   = 128;
             break;
-        ault:
+        default:
             config.blocks_per_sm = 2;
             config.threads       = 128;
             config.streams       = 2;
