@@ -585,11 +585,25 @@ void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job,
         worker->best_match_bits  = 0;
     }
 
+    // CRITICAL: Log initial state
     uint64_t initial_nonce = global_nonce_offset.load();
     LOG_INFO("MULTI_GPU", "Starting multi-GPU mining from nonce offset: ", initial_nonce);
 
-    // Start worker threads - they'll all share the same counter but take turns
-    for (auto &worker : workers_) {
+    // CRITICAL: Give each GPU a unique starting offset to prevent overlap
+    const size_t num_gpus = workers_.size();
+    const uint64_t gpu_spacing = NONCE_BATCH_SIZE * 1000;  // Space GPUs apart by 1000 batches
+
+    // Start worker threads with proper spacing
+    for (size_t i = 0; i < workers_.size(); i++) {
+        auto &worker = workers_[i];
+
+        // Set this GPU's initial offset
+        uint64_t gpu_start_offset = initial_nonce + (i * gpu_spacing);
+
+        // Create a per-GPU nonce counter
+        auto* gpu_nonce_counter = new std::atomic<uint64_t>(gpu_start_offset);
+
+        // Create a lambda that includes GPU-specific offset
         auto gpu_should_continue = [should_continue, gpu_id = worker->device_id]() -> bool {
             const bool cont = should_continue();
             if (!cont) {
@@ -598,10 +612,25 @@ void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job,
             return cont;
         };
 
-        // CRITICAL: Pass the shared global counter directly
+        // Pass the per-GPU counter instead of the global one
         worker->worker_thread =
-            std::make_unique<std::thread>(&MultiGPUManager::workerThreadInterruptibleWithOffset, this, worker.get(),
-                                          job, gpu_should_continue, std::ref(global_nonce_offset));
+            std::make_unique<std::thread>([this, worker_ptr = worker.get(), job, gpu_should_continue,
+                                          gpu_nonce_counter, &global_nonce_offset]() {
+                // Call the original function but with per-GPU counter
+                this->workerThreadInterruptibleWithOffset(worker_ptr, job, gpu_should_continue,
+                                                         *gpu_nonce_counter);
+
+                // Update global offset with this GPU's final position
+                uint64_t final_gpu_nonce = gpu_nonce_counter->load();
+                uint64_t current_global = global_nonce_offset.load();
+                while (current_global < final_gpu_nonce) {
+                    if (global_nonce_offset.compare_exchange_weak(current_global, final_gpu_nonce)) {
+                        break;
+                    }
+                }
+
+                delete gpu_nonce_counter;
+            });
     }
 
     // Wait for workers to finish
