@@ -491,35 +491,46 @@ namespace MiningPool {
 
             auto now = std::chrono::steady_clock::now();
 
+            // Update internal stats BEFORE reporting
+            update_stats();
+
             // Report hashrate periodically
             if (now - last_hashrate_report >= std::chrono::seconds(30)) {
                 last_hashrate_report = now;
 
                 HashrateReportMessage report;
 
-                // Get mining stats
-                if (multi_gpu_manager_) {
-                    // Get stats from multi-GPU - need to calculate from elapsed time
-                    if (auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
-                        elapsed.count() > 0) {
-                        report.hashrate = stats_.hashrate;  // Updated by update_stats()
+                // Get current stats (which were just updated)
+                {
+                    std::lock_guard lock(stats_mutex_);
+                    report.hashrate = stats_.hashrate;
+                    if (multi_gpu_manager_) {
+                        // Get GPU count from config or device count
+                        if (!config_.gpu_ids.empty()) {
+                            report.gpu_count = config_.gpu_ids.size();
+                        } else if (config_.use_all_gpus) {
+                            // Count all available GPUs
+                            int device_count = 0;
+                            gpuGetDeviceCount(&device_count);
+                            report.gpu_count = device_count;
+                        } else {
+                            report.gpu_count = 1;  // Default
+                        }
+                    } else {
+                        report.gpu_count = 1;
                     }
-                    report.gpu_count = config_.gpu_ids.empty() ? 1 : config_.gpu_ids.size();
-                } else if (mining_system_) {
-                    const auto mining_stats = mining_system_->getStats();
-                    report.hashrate         = mining_stats.hash_rate;
-                    report.gpu_count        = 1;
+                    report.shares_submitted = stats_.shares_submitted;
+                    report.shares_accepted  = stats_.shares_accepted;
                 }
-
-                report.shares_submitted = stats_.shares_submitted;
-                report.shares_accepted  = stats_.shares_accepted;
-                report.uptime_seconds   = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_).count();
+                report.uptime_seconds = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_).count();
 
                 // Add GPU stats
                 nlohmann::json gpu_stats;
-                if (multi_gpu_manager_) {
+                if (multi_gpu_manager_ && report.gpu_count > 0) {
+                    // Distribute hashrate across GPUs for reporting
+                    double per_gpu_hashrate = report.hashrate / report.gpu_count;
                     for (uint32_t i = 0; i < report.gpu_count; i++) {
-                        gpu_stats["gpu_" + std::to_string(i)]["hashrate"]    = report.hashrate / report.gpu_count;
+                        gpu_stats["gpu_" + std::to_string(i)]["hashrate"]    = per_gpu_hashrate;
                         gpu_stats["gpu_" + std::to_string(i)]["temperature"] = 0;  // TODO: Add temp monitoring
                     }
                 } else {
@@ -527,6 +538,9 @@ namespace MiningPool {
                     gpu_stats["gpu_0"]["temperature"] = 0;  // TODO: Add temp monitoring
                 }
                 report.gpu_stats = gpu_stats;
+
+                LOG_DEBUG("STATS", "Reporting hashrate: ", report.hashrate / 1e9, " GH/s across ", report.gpu_count,
+                          " GPUs");
 
                 pool_client_->report_hashrate(report);
             }
@@ -536,9 +550,6 @@ namespace MiningPool {
                 last_difficulty_check = now;
                 adjust_local_difficulty();
             }
-
-            // Update internal stats
-            update_stats();
         }
     }
 
@@ -959,13 +970,33 @@ namespace MiningPool {
     {
         std::lock_guard lock(stats_mutex_);
         if (mining_system_) {
+            // Single GPU - get stats directly
             const auto mining_stats = mining_system_->getStats();
             stats_.hashrate         = mining_stats.hash_rate;
             stats_.total_hashes     = mining_stats.hashes_computed;
         } else if (multi_gpu_manager_) {
-            stats_.hashrate = multi_gpu_manager_->getTotalHashRate();
-            // For multi-GPU, estimate total hashes from nonce progress
-            stats_.total_hashes = global_nonce_offset_.load() - 1;
+            // Multi-GPU - calculate hashrate from nonce progress and elapsed time
+            auto now     = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
+            // Get current nonce position
+            uint64_t current_nonce = global_nonce_offset_.load();
+            // Calculate total hashes (nonces processed minus starting position)
+            stats_.total_hashes = current_nonce - 1;
+
+            // Calculate hashrate
+            if (elapsed.count() > 0) {
+                stats_.hashrate = static_cast<double>(stats_.total_hashes) / elapsed.count();
+            } else {
+                stats_.hashrate = 0.0;
+            }
+
+            // Alternative: Get hashrate from multi_gpu_manager
+            // This uses the GPU's internal counters which might be more accurate
+            double gpu_reported_hashrate = multi_gpu_manager_->getTotalHashRate();
+            if (gpu_reported_hashrate > 0) {
+                // Use GPU-reported hashrate if available and seems reasonable
+                stats_.hashrate = gpu_reported_hashrate;
+            }
         }
 
         // Update current difficulty from the actual job
@@ -988,7 +1019,6 @@ namespace MiningPool {
             current_nonce - last_logged_nonce > 1000000000) {
             // Log every billion nonces
             LOG_DEBUG("POOL", "Nonce progress: ", current_nonce, " (", (current_nonce / 1000000000.0), " billion)");
-
             last_logged_nonce = current_nonce;
         }
     }

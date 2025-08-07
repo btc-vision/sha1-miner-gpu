@@ -147,7 +147,11 @@ int run_pool_mining(const MiningConfig &config)
         auto last_stats_time = std::chrono::steady_clock::now();
         while (!g_shutdown) {
             if (auto now = std::chrono::steady_clock::now(); now - last_stats_time >= std::chrono::seconds(1)) {
+                // Force an update of stats before displaying
+                pool_mining->force_update_stats();
+
                 auto stats = pool_mining->get_stats();
+
                 display_pool_stats(stats);
                 last_stats_time = now;
             }

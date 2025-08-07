@@ -114,6 +114,8 @@ namespace MiningPool {
 
         static MiningJob convert_to_mining_job(const JobMessage &job_msg);
 
+        void force_update_stats() { update_stats(); }
+
     private:
         std::atomic<uint64_t> global_nonce_offset_{1};
         std::atomic<uint64_t> last_job_nonce_offset_{0};
@@ -198,11 +200,11 @@ namespace MiningPool {
 
         void submit_share(const MiningResult &result);
 
-        // Vardiff
-        static void adjust_local_difficulty();
-
         // Utilities
         void update_stats();
+
+        // Vardiff
+        static void adjust_local_difficulty();
 
         void handle_reconnect();
 
