@@ -466,7 +466,7 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
             constexpr uint64_t nonces_to_process = gpu_batch_size;
             uint64_t nonces_processed            = 0;
 
-            while (nonces_processed >= nonces_to_process && should_continue() && !shutdown_) {
+            while (nonces_processed < nonces_to_process && should_continue() && !shutdown_) {
                 // Update job offset for this chunk
                 worker_job.nonce_offset = batch_start + nonces_processed;
 
