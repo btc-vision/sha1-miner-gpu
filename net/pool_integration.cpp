@@ -404,6 +404,147 @@ namespace MiningPool {
         LOG_INFO("MINING", "Mining loop exited, final nonce position: ", global_nonce_offset_.load());
     }
 
+    void PoolMiningSystem::reset_nonce_counter()
+    {
+        LOG_INFO("POOL", "Resetting nonce counter to 1");
+        global_nonce_offset_.store(1);
+    }
+
+    void PoolMiningSystem::share_scanner_loop()
+    {
+        LOG_INFO("SCANNER", "Share scanner loop started");
+        // Get the correct GPU device ID
+        int device_id         = 0;
+        bool need_gpu_context = false;
+        if (multi_gpu_manager_) {
+            // Multi-GPU manager handles contexts
+            LOG_INFO("SCANNER", "Using multi-GPU manager, context handled by workers");
+        } else if (mining_system_) {
+            device_id        = mining_system_->getConfig().device_id;
+            need_gpu_context = true;
+        } else if (!config_.gpu_ids.empty()) {
+            device_id        = config_.gpu_ids[0];
+            need_gpu_context = true;
+        }
+        // Set GPU context if needed
+        if (need_gpu_context) {
+            gpuError_t err = gpuSetDevice(device_id);
+            if (err != gpuSuccess) {
+                LOG_ERROR("SCANNER", "Failed to set GPU device ", device_id,
+                          " in scanner thread: ", gpuGetErrorString(err));
+                return;
+            }
+
+            LOG_INFO("SCANNER", "Scanner thread GPU context set to device ", device_id);
+        }
+
+        while (running_.load()) {
+            {
+                std::unique_lock lock(results_mutex_);
+                results_cv_.wait_for(lock, std::chrono::milliseconds(config_.share_scan_interval_ms),
+                                     [this] { return !current_mining_results_.empty() || !running_.load(); });
+            }
+            if (!running_.load())
+                break;
+            try {
+                scan_for_shares();
+            } catch (const std::exception &e) {
+                LOG_ERROR("SCANNER", "Share scanning exception: ", e.what());
+            }
+
+            // Small delay to prevent excessive CPU usage
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        LOG_INFO("SCANNER", "Share scanner loop stopped");
+    }
+
+    void PoolMiningSystem::stats_reporter_loop()
+    {
+        // Stats reporter might need GPU context for temperature monitoring in the future
+        int device_id         = 0;
+        bool need_gpu_context = false;
+        if (!multi_gpu_manager_ && mining_system_) {
+            device_id        = mining_system_->getConfig().device_id;
+            need_gpu_context = true;
+        } else if (!multi_gpu_manager_ && !config_.gpu_ids.empty()) {
+            device_id        = config_.gpu_ids[0];
+            need_gpu_context = true;
+        }
+
+        if (need_gpu_context) {
+            gpuError_t err = gpuSetDevice(device_id);
+            if (err != gpuSuccess) {
+                LOG_ERROR("STATS", "Failed to set GPU device ", device_id,
+                          " in stats thread: ", gpuGetErrorString(err));
+            } else {
+                LOG_INFO("STATS", "Stats thread GPU context set to device ", device_id);
+            }
+        }
+
+        auto last_hashrate_report  = std::chrono::steady_clock::now();
+        auto last_difficulty_check = std::chrono::steady_clock::now();
+
+        while (running_.load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+
+            if (!pool_client_->is_connected() || !mining_active_.load()) {
+                continue;
+            }
+
+            auto now = std::chrono::steady_clock::now();
+
+            // Report hashrate periodically
+            if (now - last_hashrate_report >= std::chrono::seconds(30)) {
+                last_hashrate_report = now;
+
+                HashrateReportMessage report;
+
+                // Get mining stats
+                if (multi_gpu_manager_) {
+                    // Get stats from multi-GPU - need to calculate from elapsed time
+                    if (auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
+                        elapsed.count() > 0) {
+                        report.hashrate = stats_.hashrate;  // Updated by update_stats()
+                    }
+                    report.gpu_count = config_.gpu_ids.empty() ? 1 : config_.gpu_ids.size();
+                } else if (mining_system_) {
+                    const auto mining_stats = mining_system_->getStats();
+                    report.hashrate         = mining_stats.hash_rate;
+                    report.gpu_count        = 1;
+                }
+
+                report.shares_submitted = stats_.shares_submitted;
+                report.shares_accepted  = stats_.shares_accepted;
+                report.uptime_seconds   = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_).count();
+
+                // Add GPU stats
+                nlohmann::json gpu_stats;
+                if (multi_gpu_manager_) {
+                    for (uint32_t i = 0; i < report.gpu_count; i++) {
+                        gpu_stats["gpu_" + std::to_string(i)]["hashrate"]    = report.hashrate / report.gpu_count;
+                        gpu_stats["gpu_" + std::to_string(i)]["temperature"] = 0;  // TODO: Add temp monitoring
+                    }
+                } else {
+                    gpu_stats["gpu_0"]["hashrate"]    = report.hashrate;
+                    gpu_stats["gpu_0"]["temperature"] = 0;  // TODO: Add temp monitoring
+                }
+                report.gpu_stats = gpu_stats;
+
+                pool_client_->report_hashrate(report);
+            }
+
+            // Check for vardiff adjustment
+            if (config_.enable_vardiff && now - last_difficulty_check >= std::chrono::seconds(60)) {
+                last_difficulty_check = now;
+                adjust_local_difficulty();
+            }
+
+            // Update internal stats
+            update_stats();
+        }
+    }
+
     void PoolMiningSystem::scan_for_shares()
     {
         std::vector<MiningResult> results_to_process;
