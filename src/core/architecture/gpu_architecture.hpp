@@ -299,7 +299,6 @@ public:
         std::cout << "\nComplete Device Limits:\n";
         std::cout << "  Max Threads per Block: " << props.maxThreadsPerBlock << "\n";
         std::cout << "  Max Threads per CU: " << props.maxThreadsPerMultiProcessor << "\n";
-        std::cout << "  Max Blocks per CU: " << props.maxBlocksPerMultiProcessor << "\n";
         std::cout << "  Max Grid Size: [" << props.maxGridSize[0] << ", " << props.maxGridSize[1] << ", "
                   << props.maxGridSize[2] << "]\n";
         std::cout << "  Warp/Wave Size: " << props.warpSize << "\n";
