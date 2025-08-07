@@ -247,6 +247,20 @@ namespace MiningPool {
     void PoolMiningSystem::mining_loop()
     {
         LOG_INFO("MINING", "Mining loop started");
+        // CRITICAL: Set GPU context for this thread
+        int device_id  = config_.gpu_id;
+        gpuError_t err = gpuSetDevice(device_id);
+        if (err != gpuSuccess) {
+            LOG_ERROR("MINING", "Failed to set GPU device in mining thread: ", gpuGetErrorString(err));
+            return;
+        }
+        // Synchronize to ensure device is ready
+        err = gpuDeviceSynchronize();
+        if (err != gpuSuccess) {
+            LOG_ERROR("MINING", "Device not ready in mining thread: ", gpuGetErrorString(err));
+            return;
+        }
+        LOG_INFO("MINING", "Mining thread GPU context set to device ", device_id);
 
         while (running_.load()) {
             // Wait for a job to be available
@@ -323,6 +337,13 @@ namespace MiningPool {
                           final_nonce);
             } catch (const std::exception &e) {
                 LOG_ERROR("MINING", "Mining loop exception: ", e.what());
+
+                // On error, try to recover by resetting GPU context
+                gpuSetDevice(device_id);
+                gpuGetLastError();  // Clear any errors
+
+                // Small delay before retry
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
             // If we exit the mining loop (due to job change or disconnect),
@@ -345,6 +366,14 @@ namespace MiningPool {
     void PoolMiningSystem::share_scanner_loop()
     {
         LOG_INFO("SCANNER", "Share scanner loop started");
+
+        // Set GPU context for this thread too
+        const int device_id = config_.gpu_id;
+        if (const gpuError_t err = gpuSetDevice(device_id); err != gpuSuccess) {
+            LOG_ERROR("SCANNER", "Failed to set GPU device in scanner thread: ", gpuGetErrorString(err));
+            return;
+        }
+
         while (running_.load()) {
             {
                 std::unique_lock lock(results_mutex_);

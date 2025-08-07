@@ -225,10 +225,17 @@ void MultiGPUManager::processWorkerResults(GPUWorker *worker, const std::vector<
 
 void MultiGPUManager::workerThread(GPUWorker *worker, const MiningJob &job)
 {
-    // Set GPU context for this thread
+    // CRITICAL: Set GPU context for this thread at the very beginning
     gpuError_t err = gpuSetDevice(worker->device_id);
     if (err != gpuSuccess) {
         LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Failed to set device context: ", gpuGetErrorString(err));
+        return;
+    }
+
+    // Synchronize to ensure device is ready
+    err = gpuDeviceSynchronize();
+    if (err != gpuSuccess) {
+        LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Device not ready: ", gpuGetErrorString(err));
         return;
     }
 
@@ -252,12 +259,43 @@ void MultiGPUManager::workerThread(GPUWorker *worker, const MiningJob &job)
     // Run until shutdown
     while (!shutdown_ && consecutive_errors < max_consecutive_errors) {
         try {
+            // IMPORTANT: Verify we still have the correct device context
+            int current_device;
+            gpuGetDevice(&current_device);
+            if (current_device != worker->device_id) {
+                LOG_WARN("MULTI_GPU", "GPU ", worker->device_id, " - Context switched, resetting");
+                err = gpuSetDevice(worker->device_id);
+                if (err != gpuSuccess) {
+                    LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id,
+                              " - Failed to reset context: ", gpuGetErrorString(err));
+                    consecutive_errors++;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
+            }
+
             // Create job with current nonce offset
             MiningJob worker_job    = job;
             worker_job.nonce_offset = current_nonce_base + nonces_used_in_batch;
 
             // Run a single kernel batch
-            uint64_t hashes_this_round = worker->mining_system->runSingleBatch(worker_job);
+            uint64_t hashes_this_round = 0;
+            try {
+                hashes_this_round = worker->mining_system->runSingleBatch(worker_job);
+            } catch (const std::runtime_error &e) {
+                LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Kernel launch failed: ", e.what());
+                consecutive_errors++;
+
+                // Try to recover by resetting the mining system
+                if (consecutive_errors >= 3) {
+                    LOG_WARN("MULTI_GPU", "GPU ", worker->device_id, " - Attempting recovery");
+                    worker->mining_system->resetState();
+                    // Clear any GPU errors
+                    gpuGetLastError();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+                continue;
+            }
 
             if (hashes_this_round == 0) {
                 // Fallback estimation
@@ -296,10 +334,17 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
                                                           std::function<bool()> should_continue,
                                                           std::atomic<uint64_t> &shared_nonce_counter)
 {
-    // Set GPU context for this thread
+    // CRITICAL: Set GPU context for this thread at the very beginning
     gpuError_t err = gpuSetDevice(worker->device_id);
     if (err != gpuSuccess) {
         LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Failed to set device context: ", gpuGetErrorString(err));
+        return;
+    }
+
+    // Synchronize to ensure device is ready
+    err = gpuDeviceSynchronize();
+    if (err != gpuSuccess) {
+        LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Device not ready: ", gpuGetErrorString(err));
         return;
     }
 
@@ -322,6 +367,21 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
     // Run until shutdown OR should_continue returns false
     while (!shutdown_ && consecutive_errors < max_consecutive_errors && should_continue()) {
         try {
+            // IMPORTANT: Verify we still have the correct device context
+            int current_device;
+            gpuGetDevice(&current_device);
+            if (current_device != worker->device_id) {
+                LOG_WARN("MULTI_GPU", "GPU ", worker->device_id, " - Context switched, resetting");
+                err = gpuSetDevice(worker->device_id);
+                if (err != gpuSuccess) {
+                    LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id,
+                              " - Failed to reset context: ", gpuGetErrorString(err));
+                    consecutive_errors++;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
+            }
+
             // Atomically get next nonce batch from shared counter
             uint64_t batch_start = shared_nonce_counter.fetch_add(gpu_batch_size);
 
@@ -331,20 +391,32 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
             MiningJob worker_job    = job;
             worker_job.nonce_offset = batch_start;
 
-            // Instead of runSingleBatch, use the continuous nonce method
-            // We'll run a limited batch to allow checking should_continue frequently
+            // Process the batch in smaller chunks to allow responsive stopping
+            const uint64_t chunk_size  = gpu_batch_size / 10;  // Process in 10 chunks
             uint64_t nonces_to_process = gpu_batch_size;
             uint64_t nonces_processed  = 0;
-
-            // Process the batch in smaller chunks to allow responsive stopping
-            const uint64_t chunk_size = gpu_batch_size / 10;  // Process in 10 chunks
 
             while (nonces_processed < nonces_to_process && should_continue() && !shutdown_) {
                 // Update job offset for this chunk
                 worker_job.nonce_offset = batch_start + nonces_processed;
 
-                // Run a single kernel batch
-                uint64_t hashes_this_round = worker->mining_system->runSingleBatch(worker_job);
+                // Run a single kernel batch with error handling
+                uint64_t hashes_this_round = 0;
+                try {
+                    hashes_this_round = worker->mining_system->runSingleBatch(worker_job);
+                } catch (const std::runtime_error &e) {
+                    LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Kernel launch failed: ", e.what());
+                    consecutive_errors++;
+
+                    // Try to recover
+                    if (consecutive_errors >= 3) {
+                        LOG_WARN("MULTI_GPU", "GPU ", worker->device_id, " - Attempting recovery");
+                        worker->mining_system->resetState();
+                        gpuGetLastError();  // Clear any GPU errors
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    }
+                    break;  // Exit inner loop, will retry with new batch
+                }
 
                 if (hashes_this_round == 0) {
                     // Fallback estimation
@@ -361,10 +433,11 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
                 if (nonces_processed >= nonces_to_process) {
                     break;
                 }
+
+                // Reset error counter on success
+                consecutive_errors = 0;
             }
 
-            // Reset error counter on success
-            consecutive_errors = 0;
         } catch (const std::exception &e) {
             LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Error: ", e.what());
             consecutive_errors++;
