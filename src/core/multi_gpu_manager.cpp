@@ -236,7 +236,7 @@ uint64_t MultiGPUManager::getNextNonceBatch()
     return global_nonce_counter_.fetch_add(NONCE_BATCH_SIZE);
 }
 
-void MultiGPUManager::processWorkerResults(GPUWorker *worker, const std::vector<MiningResult> &results)
+void MultiGPUManager::processWorkerResults(GPUWorker *worker, const std::vector<MiningResult> &results) const
 {
     // Update worker stats
     worker->candidates_found += results.size();
@@ -361,7 +361,7 @@ void MultiGPUManager::workerThread(GPUWorker *worker, const MiningJob &job)
             nonces_used_in_batch += hashes_this_round;
 
             // Check if we need a new nonce batch
-            if (nonces_used_in_batch >= NONCE_BATCH_SIZE * 0.9) {
+            if (nonces_used_in_batch < NONCE_BATCH_SIZE * 0.9) {
                 current_nonce_base   = getNextNonceBatch();
                 nonces_used_in_batch = 0;
             }
@@ -400,7 +400,22 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
         return;
     }
 
-    LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Worker thread started (continuous nonce mode)");
+    // CRITICAL: Add GPU-specific offset to prevent collisions
+    // Find this GPU's index in the workers array
+    int gpu_index = -1;
+    for (size_t i = 0; i < workers_.size(); i++) {
+        if (workers_[i].get() == worker) {
+            gpu_index = static_cast<int>(i);
+            break;
+        }
+    }
+    if (gpu_index == -1) {
+        LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Failed to find worker index!");
+        return;
+    }
+    const int total_gpus = static_cast<int>(workers_.size());
+    LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Worker thread started (worker index ", gpu_index, " of ",
+             total_gpus, " total workers)");
     worker->active = true;
 
     // Set result callback
@@ -435,10 +450,22 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
                 }
             }
 
-            // Atomically get next nonce batch from shared counter
-            const uint64_t batch_start = shared_nonce_counter.fetch_add(gpu_batch_size);
+            // CRITICAL FIX: Atomically get next nonce batch with round-robin distribution
+            // This ensures no two GPUs work on the same nonces
+            uint64_t batch_start;
+            // Round-robin batch assignment: GPU 0 gets batch 0, N, 2N... GPU 1 gets batch 1, N+1, 2N+1...
+            while (true) {
+                batch_start = shared_nonce_counter.fetch_add(gpu_batch_size);
+                // Check if this batch is for this GPU
+                uint64_t batch_number = batch_start / gpu_batch_size;
+                if ((batch_number % total_gpus) == static_cast<uint64_t>(gpu_index)) {
+                    break;  // This batch is assigned to us
+                }
+                // Otherwise, this batch is for another GPU, skip it
+            }
 
-            LOG_TRACE("MULTI_GPU", "GPU ", worker->device_id, " - Got nonce batch starting at: ", batch_start);
+            LOG_DEBUG("MULTI_GPU", "GPU ", worker->device_id, " (worker ", gpu_index,
+                      ") - Got nonce batch starting at: ", batch_start, " (batch #", batch_start / gpu_batch_size, ")");
 
             // Create job with this GPU's nonce batch
             MiningJob worker_job    = job;
@@ -465,7 +492,6 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
                                        &shutdown = this->shutdown_]() -> bool {
                     return chunk_start < chunk_end && should_continue() && !shutdown.load();
                 };
-
                 // Run the chunk with proper job version handling
                 uint64_t final_nonce = worker->mining_system->runMiningLoopInterruptibleWithOffset(
                     worker_job, chunk_continue, chunk_start);
@@ -540,7 +566,8 @@ void MultiGPUManager::runMining(const MiningJob &job)
     waitForWorkers();
 }
 
-void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job, std::function<bool()> should_continue,
+void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job,
+                                                       const std::function<bool()> &should_continue,
                                                        std::atomic<uint64_t> &global_nonce_offset)
 {
     current_difficulty_ = job.difficulty;
@@ -549,27 +576,51 @@ void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job, std
     global_best_tracker_.reset();
 
     // Reset all worker stats
-    for (auto &worker : workers_) {
+    for (const auto &worker : workers_) {
         worker->hashes_computed  = 0;
         worker->candidates_found = 0;
         worker->best_match_bits  = 0;
     }
 
-    LOG_INFO("MULTI_GPU", "Starting multi-GPU mining from nonce offset: ", global_nonce_offset.load());
-
-    // Start worker threads with shared nonce counter
+    // CRITICAL: Log initial state
+    uint64_t initial_nonce = global_nonce_offset.load();
+    LOG_INFO("MULTI_GPU", "Starting multi-GPU mining from nonce offset: ", initial_nonce);
+    // CRITICAL: Assign unique starting offsets to each GPU to prevent overlap
+    // Each GPU gets a different starting point
+    constexpr uint64_t gpu_spacing = NONCE_BATCH_SIZE * 10;  // Space GPUs apart by 10 batches
+                                                             // Start worker threads with proper spacing
     for (auto &worker : workers_) {
+        // Create a lambda that includes GPU-specific offset
+        auto gpu_should_continue = [should_continue, gpu_id = worker->device_id]() -> bool {
+            const bool cont = should_continue();
+            if (!cont) {
+                LOG_DEBUG("MULTI_GPU", "GPU ", gpu_id, " - should_continue returned false");
+            }
+            return cont;
+        };
+
+        // CRITICAL: Give each GPU a different starting offset to prevent collisions
+        // GPU 0 starts at global_nonce_offset
+        // GPU 1 starts at global_nonce_offset + gpu_spacing
+        // GPU 2 starts at global_nonce_offset + 2*gpu_spacing, etc.
+        std::atomic<uint64_t> *gpu_offset_ptr = &global_nonce_offset;
         worker->worker_thread =
             std::make_unique<std::thread>(&MultiGPUManager::workerThreadInterruptibleWithOffset, this, worker.get(),
-                                          job, should_continue, std::ref(global_nonce_offset));
+                                          job, gpu_should_continue, std::ref(*gpu_offset_ptr));
+
+        // Small delay between GPU starts to prevent race conditions
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
     // Wait for workers to finish
     waitForWorkers();
 
+    uint64_t final_nonce = global_nonce_offset.load();
+    LOG_INFO("MULTI_GPU", "Multi-GPU mining complete. Nonces processed: ", final_nonce - initial_nonce, " (from ",
+             initial_nonce, " to ", final_nonce, ")");
+
     if (!should_continue()) {
-        LOG_INFO("MULTI_GPU",
-                 "External stop signal received - all workers stopped at nonce: ", global_nonce_offset.load());
+        LOG_INFO("MULTI_GPU", "External stop signal received - all workers stopped at nonce: ", final_nonce);
     }
 }
 

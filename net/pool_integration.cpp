@@ -362,19 +362,16 @@ namespace MiningPool {
                 uint64_t final_nonce = starting_nonce;
 
                 if (multi_gpu_manager_) {
-                    // DO NOT call updateJobLive again here - already done above
-                    // Pass the global nonce offset atomic reference
+                    LOG_INFO("MINING", "Multi-GPU mining starting from global nonce: ", global_nonce_offset_.load());
                     multi_gpu_manager_->runMiningInterruptibleWithOffset(job_copy, should_continue,
                                                                          global_nonce_offset_);
-                    // For multi-GPU, the global_nonce_offset_ is updated by the workers directly
+
                     final_nonce = global_nonce_offset_.load();
+                    LOG_INFO("MINING", "Multi-GPU mining stopped at global nonce: ", final_nonce);
                 } else if (mining_system_) {
-                    // DO NOT call updateJobLive again here - already done above
-                    // Use the method that returns final nonce
                     final_nonce =
                         mining_system_->runMiningLoopInterruptibleWithOffset(job_copy, should_continue, starting_nonce);
 
-                    // CRITICAL: Update global offset with where we stopped
                     global_nonce_offset_.store(final_nonce);
                 }
 
