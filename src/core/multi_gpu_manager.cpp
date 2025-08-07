@@ -566,8 +566,8 @@ void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job,
     LOG_INFO("MULTI_GPU", "Starting multi-GPU mining from nonce offset: ", initial_nonce);
 
     // CRITICAL: Give each GPU a unique starting offset to prevent overlap
-    const size_t num_gpus      = workers_.size();
-    const uint64_t gpu_spacing = NONCE_BATCH_SIZE * 1000;  // Space GPUs apart by 1000 batches
+    const size_t num_gpus          = workers_.size();
+    constexpr uint64_t gpu_spacing = NONCE_BATCH_SIZE * 10000;  // Space GPUs apart by 1000 batches
 
     // Start worker threads with proper spacing
     for (size_t i = 0; i < workers_.size(); i++) {
