@@ -1648,14 +1648,13 @@ namespace MiningPool {
         }
 
         // Check if primary pool is still connected
-        if (auto primary = get_primary_client(); primary && primary->is_connected()) {
+        if (const auto primary = get_primary_client(); primary && primary->is_connected()) {
             return;
         }
 
         // Try failover pools in order
         for (const auto &pool_name : failover_order_) {
-            auto client = get_client(pool_name);
-            if (client && client->is_connected()) {
+            if (const auto client = get_client(pool_name); client && client->is_connected()) {
                 LOG_INFO("POOL_MGR", "Failing over to pool: ", pool_name);
                 set_primary_pool(pool_name);
                 return;

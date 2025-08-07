@@ -849,14 +849,21 @@ bool MiningSystem::validateStreams()
 void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version)
 {
     // Store current job version first
+    uint64_t old_version = current_job_version_.load();
     current_job_version_ = job_version;
-
-    // Update the device jobs with new data
+ LOG_INFO("MINING", "Updating job from version ", old_version, " to ", job_version);
+ // Update the device jobs with new data
     for (int i = 0; i < config_.num_streams; i++) {
         // Copy new job data to device
         gpuMemcpyAsync(device_jobs_[i].base_message, job.base_message, 32, gpuMemcpyHostToDevice, streams_[i]);
         gpuMemcpyAsync(device_jobs_[i].target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice,
                        streams_[i]);
+
+        // CRITICAL: Also update the job version in GPU memory if your ResultPool has it
+        if (gpu_pools_[i].job_version) {
+            gpuMemcpyAsync(gpu_pools_[i].job_version, &job_version, sizeof(uint64_t), gpuMemcpyHostToDevice,
+                           streams_[i]);
+        }
     }
 
     // Synchronize all streams to ensure job update is complete
@@ -864,7 +871,7 @@ void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version)
         gpuStreamSynchronize(streams_[i]);
     }
 
-    LOG_INFO("MINING", "Job update to version ", job_version, " completed");
+    LOG_INFO("MINING", "Job update to version ", job_version, " completed on all streams");
 }
 
 void MiningSystem::processResultsOptimized(int stream_idx)
@@ -1471,7 +1478,7 @@ void MiningSystem::resetState()
     // current_job_version_ = 0;
     clearResults();
     start_time_ = std::chrono::steady_clock::now();
- // Clear any GPU errors
+    // Clear any GPU errors
     gpuGetLastError();
 
     // Synchronize to ensure clean state
