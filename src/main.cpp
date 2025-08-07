@@ -48,11 +48,13 @@ std::vector<int> determine_gpu_ids(const MiningConfig &config, const int device_
     std::vector<int> gpu_ids_to_use;
 
     if (config.use_all_gpus) {
+        // Use all available GPUs
         for (int i = 0; i < device_count; i++) {
             gpu_ids_to_use.push_back(i);
         }
         LOG_INFO("MAIN", "Using all ", device_count, " available GPUs");
     } else if (!config.gpu_ids.empty()) {
+        // Use specifically listed GPUs (--gpus flag)
         gpu_ids_to_use = config.gpu_ids;
         // Validate GPU IDs
         for (const int id : gpu_ids_to_use) {
@@ -63,12 +65,13 @@ std::vector<int> determine_gpu_ids(const MiningConfig &config, const int device_
         }
         LOG_INFO("MAIN", "Using ", gpu_ids_to_use.size(), " specified GPU(s)");
     } else {
-        // Default to single GPU
+        // Default to single GPU specified by --gpu flag
         gpu_ids_to_use.push_back(config.gpu_id);
-        if (config.gpu_id >= device_count) {
-            LOG_ERROR("MAIN", "Invalid GPU ID. Available GPUs: 0-", device_count - 1);
+        if (config.gpu_id >= device_count || config.gpu_id < 0) {
+            LOG_ERROR("MAIN", "Invalid GPU ID: ", config.gpu_id, ". Available GPUs: 0-", device_count - 1);
             std::exit(1);
         }
+        LOG_INFO("MAIN", "Using GPU ", config.gpu_id);
     }
 
     return gpu_ids_to_use;

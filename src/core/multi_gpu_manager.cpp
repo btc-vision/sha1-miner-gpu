@@ -75,7 +75,28 @@ bool MultiGPUManager::initialize(const std::vector<int> &gpu_ids)
         if (user_config_) {
             // Cast to MiningConfig and apply settings
             auto mining_config = static_cast<const MiningConfig *>(user_config_);
-            ConfigUtils::applyMiningConfig(*mining_config, config);
+            // Apply ONLY the performance settings, NOT the device_id
+            if (mining_config->user_specified.num_streams && mining_config->num_streams > 0) {
+                config.num_streams = mining_config->num_streams;
+            } else {
+                config.num_streams = 8;  // Default
+            }
+            if (mining_config->user_specified.threads_per_block && mining_config->threads_per_block > 0) {
+                config.threads_per_block = mining_config->threads_per_block;
+            } else {
+                config.threads_per_block = DEFAULT_THREADS_PER_BLOCK;
+            }
+            if (mining_config->user_specified.blocks_per_stream && mining_config->blocks_per_stream > 0) {
+                config.blocks_per_stream = mining_config->blocks_per_stream;
+            }
+
+            if (mining_config->user_specified.result_buffer_size && mining_config->result_buffer_size > 0) {
+                config.result_buffer_size = mining_config->result_buffer_size;
+            } else {
+                config.result_buffer_size = 1024;  // Default
+            }
+
+            config.use_pinned_memory = mining_config->use_pinned_memory;
         } else {
             // Default values if no user config
             config.num_streams        = 8;
