@@ -482,8 +482,12 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
                                        &shutdown = this->shutdown_]() -> bool {
                     return chunk_start < chunk_end && should_continue() && !shutdown.load();
                 };
+
+                LOG_DEBUG("MULTI_GPU", "GPU ", worker->device_id, " - Processing chunk from ",
+                          chunk_start, " to ", chunk_end);
+                
                 // Run the chunk with proper job version handling
-                uint64_t final_nonce = worker->mining_system->runMiningLoopInterruptibleWithOffset(
+                const uint64_t final_nonce = worker->mining_system->runMiningLoopInterruptibleWithOffset(
                     worker_job, chunk_continue, chunk_start);
 
                 uint64_t hashes_this_round = final_nonce - chunk_start;
