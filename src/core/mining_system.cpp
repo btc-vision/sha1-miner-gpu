@@ -818,7 +818,7 @@ void MiningSystem::sync() const
     }
 }
 
-bool MiningSystem::validateStreams()
+bool MiningSystem::validateStreams() const
 {
     for (int i = 0; i < config_.num_streams; i++) {
         if (!streams_[i]) {
@@ -851,8 +851,8 @@ void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version)
     // Store current job version first
     uint64_t old_version = current_job_version_.load();
     current_job_version_ = job_version;
- LOG_INFO("MINING", "Updating job from version ", old_version, " to ", job_version);
- // Update the device jobs with new data
+    LOG_INFO("MINING", "Updating job from version ", old_version, " to ", job_version);
+    // Update the device jobs with new data
     for (int i = 0; i < config_.num_streams; i++) {
         // Copy new job data to device
         gpuMemcpyAsync(device_jobs_[i].base_message, job.base_message, 32, gpuMemcpyHostToDevice, streams_[i]);

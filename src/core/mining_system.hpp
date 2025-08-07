@@ -91,7 +91,7 @@ public:
 
     void sync() const;
 
-    bool validateStreams();
+    bool validateStreams() const;
 
     /**
      * Stop all mining operations

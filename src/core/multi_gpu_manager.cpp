@@ -456,18 +456,19 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
                 // CRITICAL FIX: Use runMiningLoopInterruptibleWithOffset instead of runSingleBatch
                 // This ensures proper job version handling
                 uint64_t chunk_start = batch_start + nonces_processed;
-                uint64_t chunk_end   = chunk_start + chunk_size < batch_start + nonces_to_process
-                                           ? chunk_start + chunk_size
-                                           : batch_start + nonces_to_process;
+                uint64_t chunk_end   = std::min(chunk_start + chunk_size, batch_start + nonces_to_process);
 
                 // Create a lambda that stops after processing the chunk
-                auto chunk_continue = [&chunk_start, chunk_end, &should_continue]() -> bool {
-                    return chunk_start < chunk_end && should_continue();
+                auto chunk_continue = [&chunk_start, chunk_end, &should_continue,
+                                       &shutdown = this->shutdown_]() -> bool {
+                    return chunk_start < chunk_end && should_continue() && !shutdown.load();
                 };
+
                 // Run the chunk with proper job version handling
-                uint64_t hashes_this_round = worker->mining_system->runMiningLoopInterruptibleWithOffset(
-                                                 worker_job, chunk_continue, chunk_start) -
-                                             chunk_start;
+                uint64_t final_nonce = worker->mining_system->runMiningLoopInterruptibleWithOffset(
+                    worker_job, chunk_continue, chunk_start);
+
+                uint64_t hashes_this_round = final_nonce - chunk_start;
 
                 if (hashes_this_round == 0) {
                     // Fallback estimation
@@ -479,7 +480,6 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
                 // Update stats
                 worker->hashes_computed += hashes_this_round;
                 nonces_processed += hashes_this_round;
-                chunk_start += hashes_this_round;
 
                 // Don't process more than our allocated batch
                 if (nonces_processed >= nonces_to_process) {
@@ -582,14 +582,19 @@ void MultiGPUManager::sync() const
 
 void MultiGPUManager::updateJobLive(const MiningJob &job, uint64_t job_version) const
 {
+    LOG_INFO("MULTI_GPU", "Updating job to version ", job_version, " on all GPUs");
+
     // Update job on all active GPUs
     for (const auto &worker : workers_) {
-        if (worker->mining_system && worker->active) {
+        if (worker->mining_system) {
             worker->mining_system->updateJobLive(job, job_version);
         }
     }
 
-    LOG_INFO("MULTI_GPU", "Updated job on all active GPUs to version ", job_version);
+    // Ensure all GPUs have completed the update
+    sync();
+
+    LOG_INFO("MULTI_GPU", "Job update to version ", job_version, " completed on all active GPUs");
 }
 
 double MultiGPUManager::getTotalHashRate() const
