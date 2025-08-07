@@ -38,21 +38,7 @@ class MultiGPUManager final
 {
 public:
     MultiGPUManager();
-
-    MultiGPUManager::~MultiGPUManager()
-    {
-        if (!shutdown_.load()) {
-            stopMining();
-        }
-
-        // Force cleanup any remaining resources
-        for (const auto &worker : workers_) {
-            if (worker->worker_thread && worker->worker_thread->joinable()) {
-                LOG_WARN("MULTI_GPU", "Destructor: Force detaching worker thread for GPU ", worker->device_id);
-                worker->worker_thread->detach();
-            }
-        }
-    }
+    ~MultiGPUManager();
 
     void setUserConfig(const void *user_config) { user_config_ = user_config; }
 
@@ -157,7 +143,7 @@ private:
 
     // Wait for workers to finish
     void waitForWorkers() const;
- void waitForWorkersWithTimeout(std::chrono::seconds timeout) const;
+    void waitForWorkersWithTimeout(std::chrono::seconds timeout) const;
 };
 
 #endif  // MULTI_GPU_MANAGER_HPP

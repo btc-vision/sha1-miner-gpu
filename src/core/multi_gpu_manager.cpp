@@ -13,6 +13,21 @@ MultiGPUManager::MultiGPUManager()
     start_time_ = std::chrono::steady_clock::now();
 }
 
+MultiGPUManager::~MultiGPUManager()
+{
+    if (!shutdown_.load()) {
+        stopMining();
+    }
+
+    // Force cleanup any remaining resources
+    for (const auto &worker : workers_) {
+        if (worker->worker_thread && worker->worker_thread->joinable()) {
+            LOG_WARN("MULTI_GPU", "Destructor: Force detaching worker thread for GPU ", worker->device_id);
+            worker->worker_thread->detach();
+        }
+    }
+}
+
 bool MultiGPUManager::initialize(const std::vector<int> &gpu_ids)
 {
     std::cout << "\nInitializing Multi-GPU Mining System\n";
