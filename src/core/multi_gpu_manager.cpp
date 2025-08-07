@@ -13,11 +13,6 @@ MultiGPUManager::MultiGPUManager()
     start_time_ = std::chrono::steady_clock::now();
 }
 
-MultiGPUManager::~MultiGPUManager()
-{
-    stopMining();
-}
-
 bool MultiGPUManager::initialize(const std::vector<int> &gpu_ids)
 {
     std::cout << "\nInitializing Multi-GPU Mining System\n";
@@ -147,32 +142,75 @@ void MultiGPUManager::stopMining()
 
     LOG_INFO("MULTI_GPU", "Stopping all mining operations...");
 
-    // Signal shutdown
+    // Signal shutdown FIRST
     shutdown_ = true;
 
-    // Stop all worker mining systems
+    // Stop all worker mining systems to interrupt any blocking operations
     for (auto &worker : workers_) {
         if (worker->mining_system) {
             worker->mining_system->stopMining();
         }
     }
 
-    // Wait for monitor thread
-    // if (monitor_thread_ && monitor_thread_->joinable()) {
-    //    monitor_thread_->join();
-    //}
+    // Give threads a moment to notice the shutdown flag
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    // Wait for all worker threads
-    waitForWorkers();
+    // Wait for all worker threads with timeout
+    waitForWorkersWithTimeout(std::chrono::seconds(5));
 
     LOG_INFO("MULTI_GPU", "All mining operations stopped");
 }
 
-void MultiGPUManager::waitForWorkers()
+void MultiGPUManager::waitForWorkers() const
 {
     for (auto &worker : workers_) {
         if (worker->worker_thread && worker->worker_thread->joinable()) {
             worker->worker_thread->join();
+        }
+        worker->active = false;
+    }
+}
+
+void MultiGPUManager::waitForWorkersWithTimeout(const std::chrono::seconds timeout) const
+{
+    auto start = std::chrono::steady_clock::now();
+    for (auto &worker : workers_) {
+        if (worker->worker_thread && worker->worker_thread->joinable()) {
+            // Calculate remaining timeout
+            auto elapsed   = std::chrono::steady_clock::now() - start;
+            auto remaining = timeout - std::chrono::duration_cast<std::chrono::seconds>(elapsed);
+            if (remaining.count() <= 0) {
+                LOG_ERROR("MULTI_GPU", "Timeout waiting for worker threads to stop");
+                // Force detach remaining threads
+                for (auto &w : workers_) {
+                    if (w->worker_thread && w->worker_thread->joinable()) {
+                        LOG_WARN("MULTI_GPU", "Force detaching worker thread for GPU ", w->device_id);
+                        w->worker_thread->detach();
+                    }
+                }
+                break;
+            }
+            // Try to join with timeout using a condition variable
+            std::mutex m;
+            std::condition_variable cv;
+            bool thread_finished = false;
+
+            std::thread joiner([&]() {
+                worker->worker_thread->join();
+                std::lock_guard<std::mutex> lock(m);
+                thread_finished = true;
+                cv.notify_all();
+            });
+
+            std::unique_lock<std::mutex> lock(m);
+            if (cv.wait_for(lock, remaining, [&]() { return thread_finished; })) {
+                joiner.join();
+                LOG_INFO("MULTI_GPU", "Worker thread for GPU ", worker->device_id, " stopped cleanly");
+            } else {
+                LOG_WARN("MULTI_GPU", "Worker thread for GPU ", worker->device_id, " did not stop in time");
+                joiner.detach();
+                worker->worker_thread->detach();
+            }
         }
         worker->active = false;
     }
@@ -357,14 +395,15 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
     worker->mining_system->setResultCallback(worker_callback);
 
     // Error handling
-    int consecutive_errors           = 0;
-    const int max_consecutive_errors = 5;
+    int consecutive_errors               = 0;
+    constexpr int max_consecutive_errors = 5;
 
     // Each GPU will grab nonce batches from the shared counter
-    const uint64_t gpu_batch_size = NONCE_BATCH_SIZE;
+    constexpr uint64_t gpu_batch_size = NONCE_BATCH_SIZE;
 
     // Run until shutdown OR should_continue returns false
-    while (!shutdown_ && consecutive_errors < max_consecutive_errors && should_continue()) {
+    while (!shutdown_.load(std::memory_order_relaxed) && consecutive_errors < max_consecutive_errors &&
+           should_continue()) {
         try {
             // IMPORTANT: Verify we still have the correct device context
             int current_device;
@@ -382,7 +421,7 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
             }
 
             // Atomically get next nonce batch from shared counter
-            uint64_t batch_start = shared_nonce_counter.fetch_add(gpu_batch_size);
+            const uint64_t batch_start = shared_nonce_counter.fetch_add(gpu_batch_size);
 
             LOG_TRACE("MULTI_GPU", "GPU ", worker->device_id, " - Got nonce batch starting at: ", batch_start);
 
@@ -391,9 +430,9 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
             worker_job.nonce_offset = batch_start;
 
             // Process the batch in smaller chunks to allow responsive stopping
-            const uint64_t chunk_size  = gpu_batch_size / 10;  // Process in 10 chunks
-            uint64_t nonces_to_process = gpu_batch_size;
-            uint64_t nonces_processed  = 0;
+            constexpr uint64_t chunk_size        = gpu_batch_size / 10;  // Process in 10 chunks
+            constexpr uint64_t nonces_to_process = gpu_batch_size;
+            uint64_t nonces_processed            = 0;
 
             while (nonces_processed < nonces_to_process && should_continue() && !shutdown_) {
                 // Update job offset for this chunk
@@ -440,6 +479,11 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
             LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Error: ", e.what());
             consecutive_errors++;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        if (shutdown_.load(std::memory_order_relaxed)) {
+            LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Shutdown detected, breaking loop");
+            break;
         }
 
         // Small delay to prevent CPU spinning
