@@ -29,15 +29,13 @@ namespace MiningPool {
 
     PoolMiningSystem::PoolMiningSystem(Config config) : config_(std::move(config))
     {
-        // Initialize statistics
         stats_                    = {};
         stats_.current_difficulty = config_.min_share_difficulty;
         stats_.current_bits       = config_.min_share_difficulty;
         stats_.best_share_bits    = 0;
         start_time_               = std::chrono::steady_clock::now();
 
-        // IMPORTANT: Start job version at 0
-        job_version_ = 0;
+        job_version_ = 1;
     }
 
     PoolMiningSystem::~PoolMiningSystem()
@@ -319,6 +317,7 @@ namespace MiningPool {
                         }
                     }
                 }
+
                 // Get current job data and version
                 MiningJob job_copy{};
                 {
@@ -334,7 +333,8 @@ namespace MiningPool {
                 auto should_continue = [this, mining_job_version]() -> bool {
                     // Stop if job version changed!
                     if (job_version_.load() != mining_job_version) {
-                        LOG_INFO("MINING", "Job version changed, stopping current mining");
+                        LOG_INFO("MINING", "Job version changed from ", mining_job_version, " to ", job_version_.load(),
+                                 ", stopping current mining");
                         return false;
                     }
 
@@ -346,10 +346,11 @@ namespace MiningPool {
                 LOG_INFO("MINING", "Starting mining with job version ", mining_job_version, " from nonce offset ",
                          starting_nonce);
 
-                // CRITICAL: Update the job with the correct version BEFORE starting mining
+                // CRITICAL: Ensure job version is set BEFORE starting mining
                 uint64_t final_nonce = starting_nonce;
 
                 if (multi_gpu_manager_) {
+                    // Make sure multi-GPU manager has the correct job version
                     multi_gpu_manager_->updateJobLive(job_copy, mining_job_version);
                     // Pass the global nonce offset atomic reference
                     multi_gpu_manager_->runMiningInterruptibleWithOffset(job_copy, should_continue,
@@ -357,6 +358,7 @@ namespace MiningPool {
                     // For multi-GPU, the global_nonce_offset_ is updated by the workers directly
                     final_nonce = global_nonce_offset_.load();
                 } else if (mining_system_) {
+                    // Make sure single GPU system has the correct job version
                     mining_system_->updateJobLive(job_copy, mining_job_version);
                     // Use the method that returns final nonce
                     final_nonce =
@@ -666,13 +668,18 @@ namespace MiningPool {
         }
 
         LOG_DEBUG("SHARE", "Current job: ", current_job_id, ", requires difficulty: ", current_job_difficulty,
-                  ", version: ", expected_job_version, "results: ", results.size());
+                  ", version: ", expected_job_version, ", results: ", results.size());
 
         // Filter results based on current job difficulty and version
         std::vector<MiningResult> filtered_results;
         int version_mismatches = 0;
+        int low_difficulty     = 0;
 
         for (const auto &result : results) {
+            // Debug log for each result
+            LOG_TRACE("SHARE", "Result: nonce=0x", std::hex, result.nonce, std::dec, ", bits=", result.matching_bits,
+                      ", job_version=", result.job_version, " (expected=", expected_job_version, ")");
+
             // Check job version to avoid stale shares
             if (result.job_version != expected_job_version) {
                 version_mismatches++;
@@ -683,10 +690,11 @@ namespace MiningPool {
 
             if (result.matching_bits >= current_job_difficulty) {
                 filtered_results.push_back(result);
-                LOG_DEBUG("SHARE", "Result meets difficulty: ", result.matching_bits, " bits, nonce: 0x", std::hex,
-                          result.nonce, std::dec, ", version: ", result.job_version);
+                LOG_INFO("SHARE", "Result meets difficulty: ", result.matching_bits, " bits, nonce: 0x", std::hex,
+                         result.nonce, std::dec, ", version: ", result.job_version);
             } else {
-                LOG_DEBUG("SHARE", "Result does not meet difficulty: ", result.matching_bits,
+                low_difficulty++;
+                LOG_TRACE("SHARE", "Result does not meet difficulty: ", result.matching_bits,
                           " bits (required: ", current_job_difficulty, ")");
             }
         }
@@ -695,9 +703,13 @@ namespace MiningPool {
             LOG_WARN("SHARE", "Discarded ", version_mismatches, " results with wrong job version");
         }
 
+        if (low_difficulty > 0) {
+            LOG_DEBUG("SHARE", "Discarded ", low_difficulty, " results below difficulty threshold");
+        }
+
         if (!filtered_results.empty()) {
-            LOG_DEBUG("SHARE", "Found ", filtered_results.size(), " results meeting difficulty ",
-                      current_job_difficulty, " (out of ", results.size(), " total)");
+            LOG_INFO("SHARE", "Found ", filtered_results.size(), " results meeting difficulty ", current_job_difficulty,
+                     " (out of ", results.size(), " total)");
 
             // Use double buffer to avoid race conditions
             {
@@ -817,8 +829,8 @@ namespace MiningPool {
 
     void PoolMiningSystem::update_mining_job(const PoolJob &pool_job)
     {
-        // Increment job version
-        const uint64_t new_version = job_version_.fetch_add(1) + 1;
+        // DON'T increment job version here - it should already be set by on_new_job
+        uint64_t new_version = job_version_.load();
 
         // Create new mining job
         MiningJob new_mining_job = convert_to_mining_job(pool_job.job_data);
@@ -851,6 +863,13 @@ namespace MiningPool {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
 
+        // CRITICAL: Update job version in mining systems BEFORE updating job data
+        if (multi_gpu_manager_) {
+            multi_gpu_manager_->updateJobLive(new_mining_job, new_version);
+        } else if (mining_system_) {
+            mining_system_->updateJobLive(new_mining_job, new_version);
+        }
+
         // Update job data atomically
         {
             std::lock_guard lock(job_mutex_);
@@ -878,7 +897,7 @@ namespace MiningPool {
             current_job_id_for_mining_ = pool_job.job_id;
             current_difficulty_        = pool_job.job_data.target_difficulty;
 
-            LOG_DEBUG("POOL", "Job data updated to ", pool_job.job_id, " with version ", new_version);
+            LOG_INFO("POOL", "Job data updated to ", pool_job.job_id, " with version ", new_version);
         }
 
         // Clear GPU state if we have a mining system
@@ -1076,6 +1095,10 @@ namespace MiningPool {
                 return;
             }
         }
+
+        // Increment job version ONLY for new jobs
+        uint64_t new_version = job_version_.fetch_add(1);
+        LOG_INFO("POOL", "New job version: ", new_version);
 
         // Always treat pool jobs as clean jobs that require full restart
         // BUT we keep the nonce position!

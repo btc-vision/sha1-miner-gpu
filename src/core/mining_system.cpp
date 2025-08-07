@@ -1466,11 +1466,20 @@ void MiningSystem::resetState()
     LOG_INFO("RESET", "Resetting mining system state");
 
     best_tracker_.reset();
-    total_hashes_        = 0;
-    total_candidates_    = 0;
-    current_job_version_ = 0;
+    total_hashes_     = 0;
+    total_candidates_ = 0;
+    // current_job_version_ = 0;
     clearResults();
     start_time_ = std::chrono::steady_clock::now();
+ // Clear any GPU errors
+    gpuGetLastError();
+
+    // Synchronize to ensure clean state
+    for (int i = 0; i < config_.num_streams; i++) {
+        if (streams_[i]) {
+            gpuStreamSynchronize(streams_[i]);
+        }
+    }
 }
 
 extern "C" void cleanup_mining_system()
