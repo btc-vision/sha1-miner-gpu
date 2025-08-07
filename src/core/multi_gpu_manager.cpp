@@ -456,7 +456,9 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
                 // CRITICAL FIX: Use runMiningLoopInterruptibleWithOffset instead of runSingleBatch
                 // This ensures proper job version handling
                 uint64_t chunk_start = batch_start + nonces_processed;
-                uint64_t chunk_end   = std::min(chunk_start + chunk_size, batch_start + nonces_to_process);
+                uint64_t chunk_end   = chunk_start + chunk_size < batch_start + nonces_to_process
+                                           ? chunk_start + chunk_size
+                                           : batch_start + nonces_to_process;
 
                 // Create a lambda that stops after processing the chunk
                 auto chunk_continue = [&chunk_start, chunk_end, &should_continue,
