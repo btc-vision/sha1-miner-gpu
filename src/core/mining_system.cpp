@@ -659,7 +659,7 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
     }
 
     // Nonce distribution - START FROM PROVIDED OFFSET
-    const uint64_t nonce_stride        = getHashesPerKernel();
+    const uint64_t nonce_stride  = getHashesPerKernel();
     uint64_t global_nonce_offset = start_nonce;
 
     LOG_INFO("MINING", "Starting mining from nonce offset: ", global_nonce_offset);

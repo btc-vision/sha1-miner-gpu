@@ -461,35 +461,40 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
             MiningJob worker_job    = job;
             worker_job.nonce_offset = batch_start;
 
+            // CRITICAL: Define clear boundaries for this batch
+            const uint64_t batch_end = batch_start + gpu_batch_size;
+            LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Processing batch: ", batch_start, " to ", batch_end,
+                     " (", gpu_batch_size, " nonces)");
+
             // Process the batch in smaller chunks to allow responsive stopping
-            constexpr uint64_t chunk_size        = gpu_batch_size / 10;  // Process in 10 chunks
-            constexpr uint64_t nonces_to_process = gpu_batch_size;
-            uint64_t nonces_processed            = 0;
+            constexpr uint64_t chunk_size = gpu_batch_size / 10;  // Process in 10 chunks
+            uint64_t nonces_processed     = 0;
 
-            while (nonces_processed < nonces_to_process && should_continue() && !shutdown_) {
-                // Update job offset for this chunk
-                worker_job.nonce_offset = batch_start + nonces_processed;
-
-                // CRITICAL FIX: Use runMiningLoopInterruptibleWithOffset instead of runSingleBatch
-                // This ensures proper job version handling
+            while (nonces_processed < gpu_batch_size && should_continue() && !shutdown_) {
+                // Calculate chunk boundaries
                 uint64_t chunk_start = batch_start + nonces_processed;
-                uint64_t chunk_end   = chunk_start + chunk_size < batch_start + nonces_to_process
-                                           ? chunk_start + chunk_size
-                                           : batch_start + nonces_to_process;
-
-                // Create a lambda that stops after processing the chunk
-                auto chunk_continue = [&chunk_start, chunk_end, &should_continue,
-                                       &shutdown = this->shutdown_]() -> bool {
-                    return chunk_start < chunk_end && should_continue() && !shutdown.load();
+                uint64_t chunk_end   = chunk_start + chunk_size < batch_end ? chunk_start + chunk_size : batch_end;
+                // CRITICAL: Create a lambda that enforces the chunk boundaries
+                auto chunk_continue = [&should_continue, &shutdown = this->shutdown_, chunk_start,
+                                       chunk_end]() -> bool { return should_continue() && !shutdown.load(); };
+                // CRITICAL: Tell the mining system to stop at chunk_end
+                // Create a modified job that knows its boundaries
+                MiningJob chunk_job    = worker_job;
+                chunk_job.nonce_offset = chunk_start;
+                // Add a custom continuation function that stops at chunk_end
+                auto bounded_continue = [&should_continue, &shutdown = this->shutdown_,
+                                         chunk_end](uint64_t current_nonce) -> bool {
+                    return current_nonce < chunk_end && should_continue() && !shutdown.load();
                 };
-
-                LOG_DEBUG("MULTI_GPU", "GPU ", worker->device_id, " - Processing chunk from ",
-                          chunk_start, " to ", chunk_end);
-                
                 // Run the chunk with proper job version handling
-                const uint64_t final_nonce = worker->mining_system->runMiningLoopInterruptibleWithOffset(
-                    worker_job, chunk_continue, chunk_start);
-
+                uint64_t final_nonce =
+                    worker->mining_system->runMiningLoopInterruptibleWithOffset(chunk_job, chunk_continue, chunk_start);
+                // CRITICAL: Ensure we don't go beyond our batch
+                if (final_nonce > chunk_end) {
+                    LOG_WARN("MULTI_GPU", "GPU ", worker->device_id, " exceeded chunk boundary: ", final_nonce, " > ",
+                             chunk_end);
+                    final_nonce = chunk_end;
+                }
                 uint64_t hashes_this_round = final_nonce - chunk_start;
 
                 if (hashes_this_round == 0) {
@@ -503,14 +508,18 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
                 worker->hashes_computed += hashes_this_round;
                 nonces_processed += hashes_this_round;
 
-                // Don't process more than our allocated batch
-                if (nonces_processed >= nonces_to_process) {
+                // CRITICAL: Ensure we don't process more than our allocated batch
+                if (nonces_processed >= gpu_batch_size) {
+                    LOG_DEBUG("MULTI_GPU", "GPU ", worker->device_id, " completed batch after ", nonces_processed,
+                              " nonces");
                     break;
                 }
 
                 // Reset error counter on success
                 consecutive_errors = 0;
             }
+            LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Batch complete. Processed ", nonces_processed,
+                     " nonces");
 
         } catch (const std::exception &e) {
             LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Error: ", e.what());
