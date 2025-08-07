@@ -481,32 +481,20 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
                 // Create a modified job that knows its boundaries
                 MiningJob chunk_job    = worker_job;
                 chunk_job.nonce_offset = chunk_start;
-                // Add a custom continuation function that stops at chunk_end
-                auto bounded_continue = [&should_continue, &shutdown = this->shutdown_,
-                                         chunk_end](uint64_t current_nonce) -> bool {
-                    return current_nonce < chunk_end && should_continue() && !shutdown.load();
-                };
+
                 // Run the chunk with proper job version handling
                 uint64_t final_nonce =
                     worker->mining_system->runMiningLoopInterruptibleWithOffset(chunk_job, chunk_continue, chunk_start);
+
                 // CRITICAL: Ensure we don't go beyond our batch
                 if (final_nonce > chunk_end) {
                     LOG_WARN("MULTI_GPU", "GPU ", worker->device_id, " exceeded chunk boundary: ", final_nonce, " > ",
                              chunk_end);
                     final_nonce = chunk_end;
                 }
-                uint64_t hashes_this_round = final_nonce - chunk_start;
 
-                if (hashes_this_round == 0) {
-                    // Fallback estimation
-                    auto config = worker->mining_system->getConfig();
-                    hashes_this_round =
-                        static_cast<uint64_t>(config.blocks_per_stream) * config.threads_per_block * NONCES_PER_THREAD;
-                }
-
-                // Update stats
-                worker->hashes_computed += hashes_this_round;
-                nonces_processed += hashes_this_round;
+                uint64_t chunk_nonces_processed = final_nonce - chunk_start;
+                nonces_processed += chunk_nonces_processed;
 
                 // CRITICAL: Ensure we don't process more than our allocated batch
                 if (nonces_processed >= gpu_batch_size) {
@@ -546,6 +534,18 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
     } else {
         LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Worker finished (shutdown)");
     }
+}
+
+uint64_t MultiGPUManager::getTotalHashes() const
+{
+    uint64_t total = 0;
+    for (const auto &worker : workers_) {
+        if (worker->mining_system && worker->active.load()) {
+            auto stats = worker->mining_system->getStats();
+            total += stats.hashes_computed;
+        }
+    }
+    return total;
 }
 
 void MultiGPUManager::runMining(const MiningJob &job)
@@ -590,7 +590,7 @@ void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job,
     LOG_INFO("MULTI_GPU", "Starting multi-GPU mining from nonce offset: ", initial_nonce);
 
     // CRITICAL: Give each GPU a unique starting offset to prevent overlap
-    const size_t num_gpus = workers_.size();
+    const size_t num_gpus      = workers_.size();
     const uint64_t gpu_spacing = NONCE_BATCH_SIZE * 1000;  // Space GPUs apart by 1000 batches
 
     // Start worker threads with proper spacing
@@ -601,7 +601,7 @@ void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job,
         uint64_t gpu_start_offset = initial_nonce + (i * gpu_spacing);
 
         // Create a per-GPU nonce counter
-        auto* gpu_nonce_counter = new std::atomic<uint64_t>(gpu_start_offset);
+        auto *gpu_nonce_counter = new std::atomic<uint64_t>(gpu_start_offset);
 
         // Create a lambda that includes GPU-specific offset
         auto gpu_should_continue = [should_continue, gpu_id = worker->device_id]() -> bool {
@@ -613,16 +613,14 @@ void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job,
         };
 
         // Pass the per-GPU counter instead of the global one
-        worker->worker_thread =
-            std::make_unique<std::thread>([this, worker_ptr = worker.get(), job, gpu_should_continue,
-                                          gpu_nonce_counter, &global_nonce_offset]() {
+        worker->worker_thread = std::make_unique<std::thread>(
+            [this, worker_ptr = worker.get(), job, gpu_should_continue, gpu_nonce_counter, &global_nonce_offset]() {
                 // Call the original function but with per-GPU counter
-                this->workerThreadInterruptibleWithOffset(worker_ptr, job, gpu_should_continue,
-                                                         *gpu_nonce_counter);
+                this->workerThreadInterruptibleWithOffset(worker_ptr, job, gpu_should_continue, *gpu_nonce_counter);
 
                 // Update global offset with this GPU's final position
                 uint64_t final_gpu_nonce = gpu_nonce_counter->load();
-                uint64_t current_global = global_nonce_offset.load();
+                uint64_t current_global  = global_nonce_offset.load();
                 while (current_global < final_gpu_nonce) {
                     if (global_nonce_offset.compare_exchange_weak(current_global, final_gpu_nonce)) {
                         break;
@@ -673,17 +671,26 @@ void MultiGPUManager::updateJobLive(const MiningJob &job, uint64_t job_version) 
 
 double MultiGPUManager::getTotalHashRate() const
 {
-    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time_);
+    auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time_);
 
-    if (elapsed.count() == 0)
+    // Need at least 1 second of data
+    if (elapsed.count() < 1000)
         return 0.0;
 
     uint64_t total_hashes = 0;
+
+    // CRITICAL: Get actual hashes from each GPU's mining system
     for (const auto &worker : workers_) {
-        total_hashes += worker->hashes_computed.load();
+        if (worker->mining_system && worker->active.load()) {
+            auto stats = worker->mining_system->getStats();
+            total_hashes += stats.hashes_computed;
+        }
     }
 
-    return static_cast<double>(total_hashes) / elapsed.count();
+    // Convert to seconds for accurate rate
+    double seconds = elapsed.count() / 1000.0;
+    return static_cast<double>(total_hashes) / seconds;
 }
 
 size_t MultiGPUManager::getActiveWorkerCount() const

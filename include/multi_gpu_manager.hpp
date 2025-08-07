@@ -103,6 +103,8 @@ public:
      */
     size_t getActiveWorkerCount() const;
 
+    uint64_t getTotalHashes() const;
+
 private:
     const void *user_config_ = nullptr;
 

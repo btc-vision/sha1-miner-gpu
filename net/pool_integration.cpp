@@ -969,34 +969,16 @@ namespace MiningPool {
     void PoolMiningSystem::update_stats()
     {
         std::lock_guard lock(stats_mutex_);
+
         if (mining_system_) {
             // Single GPU - get stats directly
             const auto mining_stats = mining_system_->getStats();
             stats_.hashrate         = mining_stats.hash_rate;
             stats_.total_hashes     = mining_stats.hashes_computed;
         } else if (multi_gpu_manager_) {
-            // Multi-GPU - calculate hashrate from nonce progress and elapsed time
-            auto now     = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
-            // Get current nonce position
-            uint64_t current_nonce = global_nonce_offset_.load();
-            // Calculate total hashes (nonces processed minus starting position)
-            stats_.total_hashes = current_nonce - 1;
-
-            // Calculate hashrate
-            if (elapsed.count() > 0) {
-                stats_.hashrate = static_cast<double>(stats_.total_hashes) / elapsed.count();
-            } else {
-                stats_.hashrate = 0.0;
-            }
-
-            // Alternative: Get hashrate from multi_gpu_manager
-            // This uses the GPU's internal counters which might be more accurate
-            double gpu_reported_hashrate = multi_gpu_manager_->getTotalHashRate();
-            if (gpu_reported_hashrate > 0) {
-                // Use GPU-reported hashrate if available and seems reasonable
-                stats_.hashrate = gpu_reported_hashrate;
-            }
+            // Multi-GPU - use the corrected getTotalHashRate()
+            stats_.hashrate     = multi_gpu_manager_->getTotalHashRate();
+            stats_.total_hashes = multi_gpu_manager_->getTotalHashes();
         }
 
         // Update current difficulty from the actual job
