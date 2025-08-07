@@ -27,17 +27,16 @@ namespace MiningPool {
         return result;
     }
 
-    // PoolMiningSystem implementation
     PoolMiningSystem::PoolMiningSystem(Config config) : config_(std::move(config))
     {
         // Initialize statistics
         stats_                    = {};
-        stats_.current_difficulty = config_.min_share_difficulty;  // Now in BITS
-        stats_.current_bits       = config_.min_share_difficulty;  // Track bits explicitly
-        stats_.best_share_bits    = 0;                             // Track best share
+        stats_.current_difficulty = config_.min_share_difficulty;
+        stats_.current_bits       = config_.min_share_difficulty;
+        stats_.best_share_bits    = 0;
         start_time_               = std::chrono::steady_clock::now();
 
-        // IMPORTANT: Start job version at 0, not implicitly
+        // IMPORTANT: Start job version at 0
         job_version_ = 0;
     }
 

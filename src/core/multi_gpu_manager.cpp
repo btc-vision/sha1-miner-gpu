@@ -399,23 +399,21 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
                 // Update job offset for this chunk
                 worker_job.nonce_offset = batch_start + nonces_processed;
 
-                // Run a single kernel batch with error handling
-                uint64_t hashes_this_round = 0;
-                try {
-                    hashes_this_round = worker->mining_system->runSingleBatch(worker_job);
-                } catch (const std::runtime_error &e) {
-                    LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Kernel launch failed: ", e.what());
-                    consecutive_errors++;
+                // CRITICAL FIX: Use runMiningLoopInterruptibleWithOffset instead of runSingleBatch
+                // This ensures proper job version handling
+                uint64_t chunk_start = batch_start + nonces_processed;
+                uint64_t chunk_end   = chunk_start + chunk_size < batch_start + nonces_to_process
+                                           ? chunk_start + chunk_size
+                                           : batch_start + nonces_to_process;
 
-                    // Try to recover
-                    if (consecutive_errors >= 3) {
-                        LOG_WARN("MULTI_GPU", "GPU ", worker->device_id, " - Attempting recovery");
-                        worker->mining_system->resetState();
-                        gpuGetLastError();  // Clear any GPU errors
-                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                    }
-                    break;  // Exit inner loop, will retry with new batch
-                }
+                // Create a lambda that stops after processing the chunk
+                auto chunk_continue = [&chunk_start, chunk_end, &should_continue]() -> bool {
+                    return chunk_start < chunk_end && should_continue();
+                };
+                // Run the chunk with proper job version handling
+                uint64_t hashes_this_round = worker->mining_system->runMiningLoopInterruptibleWithOffset(
+                                                 worker_job, chunk_continue, chunk_start) -
+                                             chunk_start;
 
                 if (hashes_this_round == 0) {
                     // Fallback estimation
@@ -427,6 +425,7 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
                 // Update stats
                 worker->hashes_computed += hashes_this_round;
                 nonces_processed += hashes_this_round;
+                chunk_start += hashes_this_round;
 
                 // Don't process more than our allocated batch
                 if (nonces_processed >= nonces_to_process) {
@@ -459,73 +458,6 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
     }
 }
 
-/*void MultiGPUManager::monitorThread(std::function<bool()> should_continue) {
-    auto last_update = std::chrono::steady_clock::now();
-    uint64_t last_total_hashes = 0;
-
-    while (!shutdown_ && should_continue()) {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
-
-        // Calculate combined stats
-        uint64_t total_hashes = 0;
-        uint64_t total_candidates = 0;
-        uint32_t best_bits = global_best_tracker_.getBestBits();
-
-        std::vector<double> gpu_rates;
-        for (const auto& worker : workers_) {
-            if (!worker->active) continue;
-
-            uint64_t gpu_hash_count = worker->hashes_computed.load();
-            total_hashes += gpu_hash_count;
-            total_candidates += worker->candidates_found.load();
-
-            // Calculate per-GPU rate
-            double gpu_rate = 0.0;
-            if (elapsed.count() > 0) {
-                gpu_rate = static_cast<double>(gpu_hash_count) / elapsed.count() / 1e9;
-            }
-            gpu_rates.push_back(gpu_rate);
-        }
-
-        // Calculate rates
-        uint64_t hash_diff = total_hashes - last_total_hashes;
-        auto interval = std::chrono::duration_cast<std::chrono::seconds>(now - last_update);
-        double instant_rate = 0.0;
-        double average_rate = 0.0;
-
-        if (interval.count() > 0) {
-            instant_rate = static_cast<double>(hash_diff) / interval.count() / 1e9;
-        }
-        if (elapsed.count() > 0) {
-            average_rate = static_cast<double>(total_hashes) / elapsed.count() / 1e9;
-        }
-
-        // Print status
-        std::cout << "\r[" << elapsed.count() << "s] "
-                  << "Rate: " << std::fixed << std::setprecision(2)
-                  << instant_rate << " GH/s"
-                  << " (avg: " << average_rate << " GH/s) | "
-                  << "Best: " << best_bits << " bits | "
-                  << "GPUs: ";
-
-        // Show per-GPU rates
-        for (size_t i = 0; i < gpu_rates.size(); i++) {
-            if (i > 0) std::cout << "+";
-            std::cout << std::fixed << std::setprecision(1) << gpu_rates[i];
-        }
-
-        std::cout << " | Total: " << std::fixed << std::setprecision(3)
-                  << static_cast<double>(total_hashes) / 1e12
-                  << " TH" << std::flush;
-
-        last_update = now;
-        last_total_hashes = total_hashes;
-    }
-}*/
-
 void MultiGPUManager::runMining(const MiningJob &job)
 {
     current_difficulty_ = job.difficulty;
@@ -544,21 +476,7 @@ void MultiGPUManager::runMining(const MiningJob &job)
     for (auto &worker : workers_) {
         worker->worker_thread = std::make_unique<std::thread>(&MultiGPUManager::workerThread, this, worker.get(), job);
     }
-
-    // Start monitor thread
-    // monitor_thread_ = std::make_unique<std::thread>(
-    //    &MultiGPUManager::monitorThread, this, []() { return true; }
-    //);
-
-    // Wait for workers to finish (only on shutdown)
     waitForWorkers();
-
-    // Wait for monitor thread
-    // if (monitor_thread_ && monitor_thread_->joinable()) {
-    //    monitor_thread_->join();
-    //}
-
-    // printCombinedStats();
 }
 
 void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job, std::function<bool()> should_continue,
@@ -650,80 +568,3 @@ bool MultiGPUManager::allWorkersReady() const
     }
     return true;
 }
-
-/*void MultiGPUManager::printCombinedStats() const {
-    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::steady_clock::now() - start_time_
-    );
-
-    uint64_t total_hashes = 0;
-    uint64_t total_candidates = 0;
-    uint32_t best_bits = global_best_tracker_.getBestBits();
-
-    std::cout << "\n=== Multi-GPU Mining Results ===\n";
-    std::cout << "=====================================\n";
-
-    // Per-GPU stats
-    for (size_t i = 0; i < workers_.size(); i++) {
-        const auto& worker = workers_[i];
-        uint64_t gpu_hashes = worker->hashes_computed.load();
-        uint64_t gpu_candidates = worker->candidates_found.load();
-        uint32_t gpu_best = worker->best_match_bits.load();
-        double gpu_rate = 0.0;
-
-        if (elapsed.count() > 0) {
-            gpu_rate = static_cast<double>(gpu_hashes) / elapsed.count() / 1e9;
-        }
-
-        // Get GPU name
-        gpuDeviceProp props;
-        gpuError_t err = gpuGetDeviceProperties(&props, worker->device_id);
-        if (err != gpuSuccess) {
-            std::cerr << "Failed to get device properties for GPU " << worker->device_id
-                     << ": " << gpuGetErrorString(err) << std::endl;
-            continue;
-        }
-
-        std::cout << "GPU " << worker->device_id << " (" << props.name << "):\n";
-        std::cout << "  Total Hashes: " << std::fixed << std::setprecision(3)
-                  << static_cast<double>(gpu_hashes) / 1e9 << " GH\n";
-        std::cout << "  Hash Rate: " << std::fixed << std::setprecision(2)
-                  << gpu_rate << " GH/s\n";
-        std::cout << "  Best Match: " << gpu_best << " bits\n";
-        std::cout << "  Candidates: " << gpu_candidates << "\n";
-
-        if (gpu_hashes > 0 && gpu_candidates > 0) {
-            double efficiency = 100.0 * gpu_candidates * std::pow(2.0, current_difficulty_) / gpu_hashes;
-            std::cout << "  Efficiency: " << std::fixed << std::setprecision(4)
-                     << efficiency << "%\n";
-        }
-        std::cout << "\n";
-
-        total_hashes += gpu_hashes;
-        total_candidates += gpu_candidates;
-    }
-
-    std::cout << "=====================================\n";
-    std::cout << "Combined Statistics:\n";
-    std::cout << "  Platform: " << getGPUPlatformName() << "\n";
-    std::cout << "  Total GPUs: " << workers_.size() << "\n";
-    std::cout << "  Active GPUs: " << getActiveWorkerCount() << "\n";
-    std::cout << "  Total Time: " << elapsed.count() << " seconds\n";
-    std::cout << "  Total Hashes: " << std::fixed << std::setprecision(3)
-             << static_cast<double>(total_hashes) / 1e12 << " TH\n";
-
-    if (elapsed.count() > 0) {
-        std::cout << "  Combined Rate: " << std::fixed << std::setprecision(2)
-                  << static_cast<double>(total_hashes) / elapsed.count() / 1e9 << " GH/s\n";
-    }
-
-    std::cout << "  Best Match: " << best_bits << " bits\n";
-    std::cout << "  Total Candidates: " << total_candidates << "\n";
-
-    if (total_hashes > 0 && total_candidates > 0) {
-        double global_efficiency = 100.0 * total_candidates * std::pow(2.0, current_difficulty_) / total_hashes;
-        std::cout << "  Global Efficiency: " << std::scientific << std::setprecision(2)
-                  << global_efficiency << "%\n";
-    }
-    std::cout << "=====================================\n";
-}*/
