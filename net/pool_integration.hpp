@@ -32,7 +32,6 @@ namespace MiningPool {
             // Mining settings
             bool use_all_gpus = false;
             std::vector<int> gpu_ids;
-            int gpu_id = 0;
 
             // Pool settings
             uint32_t min_share_difficulty   = 20;  // Minimum difficulty in BITS (default: 20 bits)
@@ -40,7 +39,7 @@ namespace MiningPool {
             bool enable_vardiff             = true;
             uint32_t share_scan_interval_ms = 500;
 
-            const void* mining_config = nullptr;
+            const void *mining_config = nullptr;
         };
 
         explicit PoolMiningSystem(Config config);

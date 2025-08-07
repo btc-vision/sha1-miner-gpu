@@ -132,8 +132,8 @@ namespace MiningPool {
                 mining_config.device_id = config_.gpu_ids[0];
             }
         } else {
-            // Single GPU specified by ID
-            mining_config.device_id = config_.gpu_id;
+            LOG_WARN("POOL", "No GPU configuration specified, defaulting to GPU 0");
+            return false;
         }
 
         // Initialize single GPU mining system if not using multi-GPU
@@ -176,6 +176,8 @@ namespace MiningPool {
 
     void PoolMiningSystem::share_submission_loop()
     {
+        // Share submission doesn't need GPU context as it only sends network messages
+        LOG_INFO("SHARE_SUBMIT", "Share submission loop started");
         while (running_.load()) {
             std::unique_lock lock(share_mutex_);
             share_cv_.wait_for(lock, std::chrono::seconds(1),
@@ -199,6 +201,8 @@ namespace MiningPool {
                 lock.lock();
             }
         }
+
+        LOG_INFO("SHARE_SUBMIT", "Share submission loop stopped");
     }
 
     void PoolMiningSystem::stop()
@@ -247,20 +251,35 @@ namespace MiningPool {
     void PoolMiningSystem::mining_loop()
     {
         LOG_INFO("MINING", "Mining loop started");
-        // CRITICAL: Set GPU context for this thread
-        int device_id  = config_.gpu_id;
-        gpuError_t err = gpuSetDevice(device_id);
-        if (err != gpuSuccess) {
-            LOG_ERROR("MINING", "Failed to set GPU device in mining thread: ", gpuGetErrorString(err));
-            return;
+        // CRITICAL: Get the correct GPU device ID
+        int device_id = 0;
+        if (multi_gpu_manager_) {
+            // For multi-GPU, each worker thread handles its own context
+            // We don't need to set it here
+            LOG_INFO("MINING", "Using multi-GPU manager, context handled by workers");
+        } else if (mining_system_) {
+            // Get device ID from the mining system's config
+            device_id = mining_system_->getConfig().device_id;
+        } else if (!config_.gpu_ids.empty()) {
+            // Use first GPU from the list
+            device_id = config_.gpu_ids[0];
         }
-        // Synchronize to ensure device is ready
-        err = gpuDeviceSynchronize();
-        if (err != gpuSuccess) {
-            LOG_ERROR("MINING", "Device not ready in mining thread: ", gpuGetErrorString(err));
-            return;
+        // Only set GPU context if not using multi-GPU manager
+        if (!multi_gpu_manager_) {
+            gpuError_t err = gpuSetDevice(device_id);
+            if (err != gpuSuccess) {
+                LOG_ERROR("MINING", "Failed to set GPU device ", device_id,
+                          " in mining thread: ", gpuGetErrorString(err));
+                return;
+            }
+            // Synchronize to ensure device is ready
+            err = gpuDeviceSynchronize();
+            if (err != gpuSuccess) {
+                LOG_ERROR("MINING", "Device ", device_id, " not ready in mining thread: ", gpuGetErrorString(err));
+                return;
+            }
+            LOG_INFO("MINING", "Mining thread GPU context set to device ", device_id);
         }
-        LOG_INFO("MINING", "Mining thread GPU context set to device ", device_id);
 
         while (running_.load()) {
             // Wait for a job to be available
@@ -286,6 +305,21 @@ namespace MiningPool {
             uint64_t mining_job_version = job_version_.load();
 
             try {
+                // Verify GPU context if not using multi-GPU
+                if (!multi_gpu_manager_) {
+                    int current_device;
+                    gpuGetDevice(&current_device);
+                    if (current_device != device_id) {
+                        LOG_WARN("MINING", "GPU context switched from ", device_id, " to ", current_device,
+                                 ", resetting");
+                        gpuError_t err = gpuSetDevice(device_id);
+                        if (err != gpuSuccess) {
+                            LOG_ERROR("MINING", "Failed to reset GPU context to device ", device_id, ": ",
+                                      gpuGetErrorString(err));
+                            continue;
+                        }
+                    }
+                }
                 // Get current job data and version
                 MiningJob job_copy{};
                 {
@@ -338,9 +372,11 @@ namespace MiningPool {
             } catch (const std::exception &e) {
                 LOG_ERROR("MINING", "Mining loop exception: ", e.what());
 
-                // On error, try to recover by resetting GPU context
-                gpuSetDevice(device_id);
-                gpuGetLastError();  // Clear any errors
+                // On error, try to recover by resetting GPU context (only if not multi-GPU)
+                if (!multi_gpu_manager_) {
+                    gpuSetDevice(device_id);
+                    gpuGetLastError();  // Clear any errors
+                }
 
                 // Small delay before retry
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -366,12 +402,29 @@ namespace MiningPool {
     void PoolMiningSystem::share_scanner_loop()
     {
         LOG_INFO("SCANNER", "Share scanner loop started");
+        // Get the correct GPU device ID
+        int device_id         = 0;
+        bool need_gpu_context = false;
+        if (multi_gpu_manager_) {
+            // Multi-GPU manager handles contexts
+            LOG_INFO("SCANNER", "Using multi-GPU manager, context handled by workers");
+        } else if (mining_system_) {
+            device_id        = mining_system_->getConfig().device_id;
+            need_gpu_context = true;
+        } else if (!config_.gpu_ids.empty()) {
+            device_id        = config_.gpu_ids[0];
+            need_gpu_context = true;
+        }
+        // Set GPU context if needed
+        if (need_gpu_context) {
+            gpuError_t err = gpuSetDevice(device_id);
+            if (err != gpuSuccess) {
+                LOG_ERROR("SCANNER", "Failed to set GPU device ", device_id,
+                          " in scanner thread: ", gpuGetErrorString(err));
+                return;
+            }
 
-        // Set GPU context for this thread too
-        const int device_id = config_.gpu_id;
-        if (const gpuError_t err = gpuSetDevice(device_id); err != gpuSuccess) {
-            LOG_ERROR("SCANNER", "Failed to set GPU device in scanner thread: ", gpuGetErrorString(err));
-            return;
+            LOG_INFO("SCANNER", "Scanner thread GPU context set to device ", device_id);
         }
 
         while (running_.load()) {
@@ -397,6 +450,27 @@ namespace MiningPool {
 
     void PoolMiningSystem::stats_reporter_loop()
     {
+        // Stats reporter might need GPU context for temperature monitoring in the future
+        int device_id         = 0;
+        bool need_gpu_context = false;
+        if (!multi_gpu_manager_ && mining_system_) {
+            device_id        = mining_system_->getConfig().device_id;
+            need_gpu_context = true;
+        } else if (!multi_gpu_manager_ && !config_.gpu_ids.empty()) {
+            device_id        = config_.gpu_ids[0];
+            need_gpu_context = true;
+        }
+
+        if (need_gpu_context) {
+            gpuError_t err = gpuSetDevice(device_id);
+            if (err != gpuSuccess) {
+                LOG_ERROR("STATS", "Failed to set GPU device ", device_id,
+                          " in stats thread: ", gpuGetErrorString(err));
+            } else {
+                LOG_INFO("STATS", "Stats thread GPU context set to device ", device_id);
+            }
+        }
+
         auto last_hashrate_report  = std::chrono::steady_clock::now();
         auto last_difficulty_check = std::chrono::steady_clock::now();
 
@@ -1200,9 +1274,9 @@ namespace MiningPool {
     {
         std::lock_guard lock(mutex_);
 
-        const auto it = std::ranges::find_if(pools_, [&name](const PoolEntry &entry) { return entry.name == name; });
-
-        if (it != pools_.end()) {
+        if (const auto it =
+                std::ranges::find_if(pools_, [&name](const PoolEntry &entry) { return entry.name == name; });
+            it != pools_.end()) {
             it->enabled = enable;
         }
     }

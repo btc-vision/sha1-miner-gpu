@@ -29,8 +29,7 @@ bool MultiGPUManager::initialize(const std::vector<int> &gpu_ids)
 
         // Get device properties
         gpuDeviceProp props;
-        gpuError_t err = gpuGetDeviceProperties(&props, gpu_id);
-        if (err != gpuSuccess) {
+        if (gpuError_t err = gpuGetDeviceProperties(&props, gpu_id); err != gpuSuccess) {
             std::cerr << "Failed to get properties for GPU " << gpu_id << "\n";
             continue;
         }
