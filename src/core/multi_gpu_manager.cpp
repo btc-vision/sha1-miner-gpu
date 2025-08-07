@@ -452,17 +452,7 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
 
             // CRITICAL FIX: Atomically get next nonce batch with round-robin distribution
             // This ensures no two GPUs work on the same nonces
-            uint64_t batch_start;
-            // Round-robin batch assignment: GPU 0 gets batch 0, N, 2N... GPU 1 gets batch 1, N+1, 2N+1...
-            while (true) {
-                batch_start = shared_nonce_counter.fetch_add(gpu_batch_size);
-                // Check if this batch is for this GPU
-                uint64_t batch_number = batch_start / gpu_batch_size;
-                if ((batch_number % total_gpus) == static_cast<uint64_t>(gpu_index)) {
-                    break;  // This batch is assigned to us
-                }
-                // Otherwise, this batch is for another GPU, skip it
-            }
+            const uint64_t batch_start = shared_nonce_counter.fetch_add(gpu_batch_size);
 
             LOG_DEBUG("MULTI_GPU", "GPU ", worker->device_id, " (worker ", gpu_index,
                       ") - Got nonce batch starting at: ", batch_start, " (batch #", batch_start / gpu_batch_size, ")");
@@ -476,7 +466,7 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
             constexpr uint64_t nonces_to_process = gpu_batch_size;
             uint64_t nonces_processed            = 0;
 
-            while (nonces_processed < nonces_to_process && should_continue() && !shutdown_) {
+            while (nonces_processed >= nonces_to_process && should_continue() && !shutdown_) {
                 // Update job offset for this chunk
                 worker_job.nonce_offset = batch_start + nonces_processed;
 
