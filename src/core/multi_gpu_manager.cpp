@@ -451,13 +451,13 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
 
             // Get next nonce batch atomically
             const uint64_t batch_start = shared_nonce_counter.fetch_add(gpu_batch_size);
-            const uint64_t batch_end = batch_start + gpu_batch_size;
+            const uint64_t batch_end   = batch_start + gpu_batch_size;
 
             LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Processing batch: ", batch_start, " to ", batch_end,
                      " (", gpu_batch_size, " nonces)");
 
             // Create job for this batch
-            MiningJob batch_job = job;
+            MiningJob batch_job    = job;
             batch_job.nonce_offset = batch_start;
 
             // Create continuation function for this batch
@@ -466,8 +466,8 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
             };
 
             // Run the entire batch
-            uint64_t final_nonce = worker->mining_system->runMiningLoopInterruptibleWithOffset(
-                batch_job, batch_continue, batch_start);
+            uint64_t final_nonce =
+                worker->mining_system->runMiningLoopInterruptibleWithOffset(batch_job, batch_continue, batch_start);
 
             // Calculate how many nonces were actually processed
             uint64_t nonces_processed = 0;
@@ -498,9 +498,6 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
             LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Shutdown detected, breaking loop");
             break;
         }
-
-        // Small delay to prevent CPU spinning
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     worker->active = false;
