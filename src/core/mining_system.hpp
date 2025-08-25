@@ -213,6 +213,30 @@ public:
     void updateJobLive(const MiningJob &job, uint64_t job_version);
 
 private:
+    struct StreamState
+    {
+        // Triple buffering
+        MiningResult *gpu_buffers[3];
+        MiningResult *pinned_buffers[3];
+        uint32_t *gpu_counts[3];
+        uint32_t *pinned_counts[3];
+        int write_idx = 0;  // GPU kernel writes here
+        int copy_idx  = 1;  // Being copied to host
+        int read_idx  = 2;  // CPU reads here
+        gpuEvent_t copy_events[3];
+        bool copy_pending[3] = {false, false, false};
+    };
+
+    std::vector<StreamState> stream_states_;
+    // For async logging
+    std::mutex log_queue_mutex_;
+    std::vector<std::pair<MiningResult, uint64_t>> log_queue_;
+    std::thread logger_thread_;
+    std::atomic<bool> logger_running_{false};
+
+    void processCPUSide(MiningResult *results, uint32_t count, int stream_idx);
+    void loggerThread();
+
     const void *user_config_ = nullptr;
 
     struct UserSpecifiedFlags
@@ -258,7 +282,7 @@ private:
         uint64_t nonce_offset;
         bool busy;
         std::chrono::high_resolution_clock::time_point launch_time;
-        //uint64_t last_nonces_processed;
+        // uint64_t last_nonces_processed;
     };
 
     std::atomic<uint64_t> current_job_version_{0};

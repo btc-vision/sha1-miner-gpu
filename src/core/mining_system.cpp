@@ -692,7 +692,7 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
         }
 
         if (!found_completed) {
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
             continue;
         }
 
@@ -875,132 +875,159 @@ void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version)
 
 void MiningSystem::processResultsOptimized(int stream_idx)
 {
-    auto &pool    = gpu_pools_[stream_idx];
-    auto &results = pinned_results_[stream_idx];
-
-    // Get result count
-    uint32_t count;
-    gpuMemcpyAsync(&count, pool.count, sizeof(uint32_t), gpuMemcpyDeviceToHost, streams_[stream_idx]);
-    gpuStreamSynchronize(streams_[stream_idx]);
-
-    if (count == 0)
-        return;
-
-    // Limit to capacity
-    if (count > pool.capacity) {
-        LOG_WARN("MINING", "Result count (", count, ") exceeds capacity (", pool.capacity, "), capping results");
-        count = pool.capacity;
+    auto &state = stream_states_[stream_idx];
+    auto &pool  = gpu_pools_[stream_idx];
+    // 1. Check if previous copy completed (non-blocking)
+    if (state.copy_pending[state.read_idx]) {
+        if (gpuEventQuery(state.copy_events[state.read_idx]) == gpuSuccess) {
+            // Process completed buffer
+            uint32_t count = *state.pinned_counts[state.read_idx];
+            if (count > 0 && count <= config_.result_buffer_size) {
+                processCPUSide(state.pinned_buffers[state.read_idx], count, stream_idx);
+            }
+            state.copy_pending[state.read_idx] = false;
+        }
     }
-
-    // Copy results
-    auto copy_start = std::chrono::high_resolution_clock::now();
-
-    gpuMemcpyAsync(results, pool.results, sizeof(MiningResult) * count, gpuMemcpyDeviceToHost, streams_[stream_idx]);
+    // 2. Start copying current write buffer
+    int current_write = state.write_idx;
+    // Copy count first
+    gpuMemcpyAsync(state.pinned_counts[current_write], state.gpu_counts[current_write], sizeof(uint32_t),
+                   gpuMemcpyDeviceToHost, streams_[stream_idx]);
+    // Small sync just to get count for sizing the result copy
     gpuStreamSynchronize(streams_[stream_idx]);
-
-    auto copy_time =
-        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - copy_start)
-            .count() /
-        1000.0;
-
-    LOG_TRACE("MINING", "Copied ", count, " results from stream ", stream_idx, " in ", copy_time, " ms");
-
-    // Update timing stats with proper lock
-    {
-        std::lock_guard lock(timing_mutex_);
-        timing_stats_.result_copy_time_ms += copy_time;
+    uint32_t count = *state.pinned_counts[current_write];
+    if (count > 0) {
+        // Limit to capacity
+        if (count > config_.result_buffer_size) {
+            LOG_WARN("MINING", "Result count (", count, ") exceeds capacity (", config_.result_buffer_size,
+                     "), capping results");
+            count                               = config_.result_buffer_size;
+            *state.pinned_counts[current_write] = count;
+        }
+        // Copy actual results
+        auto copy_start = std::chrono::high_resolution_clock::now();
+        gpuMemcpyAsync(state.pinned_buffers[current_write], state.gpu_buffers[current_write],
+                       sizeof(MiningResult) * count, gpuMemcpyDeviceToHost, streams_[stream_idx]);
+        // Record completion event
+        gpuEventRecord(state.copy_events[current_write], streams_[stream_idx]);
+        state.copy_pending[current_write] = true;
+        // Update timing stats
+        auto copy_time = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::high_resolution_clock::now() - copy_start)
+                             .count() /
+                         1000.0;
+        LOG_TRACE("MINING", "Started copying ", count, " results from stream ", stream_idx);
+        {
+            std::lock_guard lock(timing_mutex_);
+            timing_stats_.result_copy_time_ms += copy_time;
+        }
     }
+    // 3. Reset count for reuse
+    gpuMemsetAsync(state.gpu_counts[current_write], 0, sizeof(uint32_t), streams_[stream_idx]);
+    // 4. Rotate buffers
+    state.read_idx  = state.copy_idx;
+    state.copy_idx  = state.write_idx;
+    state.write_idx = (state.write_idx + 1) % 3;
+    // 5. Update pool pointers for next kernel
+    pool.results = state.gpu_buffers[state.write_idx];
+    pool.count   = state.gpu_counts[state.write_idx];
 
-    // Process results
-    std::vector<MiningResult> valid_results;
-    uint32_t stale_count = 0;
+    LOG_TRACE("MINING", "Rotated buffers for stream ", stream_idx, ": write=", state.write_idx,
+              " copy=", state.copy_idx, " read=", state.read_idx);
+}
 
+void MiningSystem::processCPUSide(MiningResult *results, uint32_t count, int stream_idx)
+{
+    // Pre-allocate thread local storage to avoid allocations
+    thread_local std::vector<MiningResult> valid_batch;
+    valid_batch.clear();
+    valid_batch.reserve(count);
+    uint64_t current_version = current_job_version_.load();
+    uint32_t stale_count     = 0;
+    // Fast scan with minimal branching
     for (uint32_t i = 0; i < count; i++) {
+        // Skip invalid
         if (results[i].nonce == 0)
             continue;
-
-        // Check if result is from current job version
-        if (results[i].job_version != current_job_version_) {
-            // Skip stale results from old job versions
+        // Check job version
+        if (results[i].job_version != current_version) {
             stale_count++;
             LOG_TRACE("MINING", "Skipping stale result from job version ", results[i].job_version);
             continue;
         }
-
-        // Store all valid results from current job
-        valid_results.push_back(results[i]);
-
-        // Track best result
+        valid_batch.push_back(results[i]);
+        // Check for new best
         if (best_tracker_.isNewBest(results[i].matching_bits)) {
-            // Calculate elapsed time
-            auto elapsed =
-                std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time_);
-
-            std::string hash_str = "0x";
-            for (int j = 0; j < 5; j++) {
-                char buf[9];
-                snprintf(buf, sizeof(buf), "%08x", results[i].hash[j]);
-                hash_str += buf;
+            // Queue for async logging - don't do it inline
+            {
+                std::lock_guard<std::mutex> lock(log_queue_mutex_);
+                log_queue_.emplace_back(results[i], total_hashes_.load());
             }
-
-            double hash_rate = static_cast<double>(total_hashes_.load()) / elapsed.count() / 1e9;
-
-            // Format all values
-            std::string time_str     = std::to_string(elapsed.count()) + "s";
-            std::string platform_str = getGPUPlatformName();
-
-            // Format nonce using snprintf to avoid locale issues
-            char nonce_buffer[32];
-            snprintf(nonce_buffer, sizeof(nonce_buffer), "0x%llx", (unsigned long long)results[i].nonce);
-            std::string nonce_str = nonce_buffer;
-
-            std::string bits_str = std::to_string(results[i].matching_bits);
-
-            std::stringstream rate_stream;
-            rate_stream << std::fixed << std::setprecision(2) << hash_rate << " GH/s";
-            std::string rate_str = rate_stream.str();
-
-            // Build complete colored strings to avoid logger parsing issues
-            std::stringstream line;
-
-            // Log new best as a single line
-            LOG_INFO("MINING", Color::BRIGHT_CYAN, "NEW BEST! ", Color::RESET, "Time: ", Color::BRIGHT_WHITE, time_str,
-                     Color::RESET, " | Nonce: ", Color::BRIGHT_GREEN, nonce_str, Color::RESET,
-                     " | Bits: ", Color::BRIGHT_MAGENTA, bits_str, Color::RESET, " | Hash: ", Color::BRIGHT_YELLOW,
-                     hash_str);
         }
-
         ++total_candidates_;
     }
-
     if (stale_count > 0) {
         LOG_DEBUG("MINING", "Discarded ", stale_count, " stale results from stream ", stream_idx);
     }
-
-    if (!valid_results.empty()) {
-        LOG_DEBUG("MINING", "Found ", valid_results.size(), " valid results from stream ", stream_idx);
+    if (!valid_batch.empty()) {
+        LOG_DEBUG("MINING", "Found ", valid_batch.size(), " valid results from stream ", stream_idx);
     }
-
     // Store results for batch processing
-    if (!valid_results.empty()) {
+    if (!valid_batch.empty()) {
         {
             std::lock_guard results_lock(all_results_mutex_);
-            all_results_.insert(all_results_.end(), valid_results.begin(), valid_results.end());
+            all_results_.insert(all_results_.end(), valid_batch.begin(), valid_batch.end());
         }
 
         // Call the callback if set
         {
             std::lock_guard callback_lock(callback_mutex_);
             if (result_callback_) {
-                LOG_TRACE("MINING", "Invoking result callback with ", valid_results.size(), " results");
-                result_callback_(valid_results);
+                LOG_TRACE("MINING", "Invoking result callback with ", valid_batch.size(), " results");
+                // Create a copy for the async callback
+                auto callback_batch = valid_batch;
+                std::thread([cb = result_callback_, batch = std::move(callback_batch)]() { cb(batch); }).detach();
             }
         }
     }
+}
 
-    // Reset pool count
-    gpuMemsetAsync(pool.count, 0, sizeof(uint32_t), streams_[stream_idx]);
-    LOG_TRACE("MINING", "Reset result count for stream ", stream_idx);
+void MiningSystem::loggerThread()
+{
+    while (logger_running_ && !g_shutdown && !stop_mining_) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::vector<std::pair<MiningResult, uint64_t>> to_log;
+        {
+            std::lock_guard<std::mutex> lock(log_queue_mutex_);
+            to_log.swap(log_queue_);
+        }
+        for (const auto &[result, total_hashes_at_time] : to_log) {
+            // Do expensive formatting here, outside critical path
+            auto elapsed =
+                std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time_);
+            std::string hash_str = "0x";
+            for (int j = 0; j < 5; j++) {
+                char buf[9];
+                snprintf(buf, sizeof(buf), "%08x", result.hash[j]);
+                hash_str += buf;
+            }
+            double hash_rate = static_cast<double>(total_hashes_at_time) / elapsed.count() / 1e9;
+            // Format nonce
+            char nonce_buffer[32];
+            snprintf(nonce_buffer, sizeof(nonce_buffer), "0x%llx", (unsigned long long)result.nonce);
+            std::string nonce_str = nonce_buffer;
+            std::string time_str  = std::to_string(elapsed.count()) + "s";
+            std::string bits_str  = std::to_string(result.matching_bits);
+            std::stringstream rate_stream;
+            rate_stream << std::fixed << std::setprecision(2) << hash_rate << " GH/s";
+            std::string rate_str = rate_stream.str();
+            // Log new best as a single line
+            LOG_INFO("MINING", Color::BRIGHT_CYAN, "NEW BEST! ", Color::RESET, "Time: ", Color::BRIGHT_WHITE, time_str,
+                     Color::RESET, " | Nonce: ", Color::BRIGHT_GREEN, nonce_str, Color::RESET,
+                     " | Bits: ", Color::BRIGHT_MAGENTA, bits_str, Color::RESET, " | Hash: ", Color::BRIGHT_YELLOW,
+                     hash_str, Color::RESET);
+        }
+    }
 }
 
 MiningStats MiningSystem::getStats() const
@@ -1100,9 +1127,10 @@ bool MiningSystem::initializeGPUResources()
 
 bool MiningSystem::initializeMemoryPools()
 {
-    std::cout << "[DEBUG] Allocating GPU memory pools\n";
+    std::cout << "[DEBUG] Allocating GPU memory pools (triple buffered)\n";
 
-    // Allocate GPU memory pools
+    // Resize for triple buffering
+    stream_states_.resize(config_.num_streams);
     gpu_pools_.resize(config_.num_streams);
     pinned_results_.resize(config_.num_streams);
 
@@ -1110,14 +1138,9 @@ bool MiningSystem::initializeMemoryPools()
     size_t alignment = getMemoryAlignment();
 
     for (int i = 0; i < config_.num_streams; i++) {
+        auto &state      = stream_states_[i];
         ResultPool &pool = gpu_pools_[i];
         pool.capacity    = config_.result_buffer_size;
-
-        // Initialize all pointers to nullptr first
-        pool.results          = nullptr;
-        pool.count            = nullptr;
-        pool.nonces_processed = nullptr;
-        pool.job_version      = nullptr;
 
         // Check if stream is valid before using it
         if (!streams_[i]) {
@@ -1125,80 +1148,65 @@ bool MiningSystem::initializeMemoryPools()
             return false;
         }
 
-        // Allocate device memory with proper alignment
-        size_t result_size  = sizeof(MiningResult) * pool.capacity;
-        size_t aligned_size = ((result_size + alignment - 1) / alignment) * alignment;
-
-        gpuError_t err = gpuMalloc(&pool.results, aligned_size);
-        if (err != gpuSuccess) {
-            std::cerr << "Failed to allocate GPU results buffer for stream " << i << ": " << gpuGetErrorString(err)
-                      << "\n";
-            return false;
+        // Allocate triple buffers
+        for (int b = 0; b < 3; b++) {
+            // GPU buffers
+            size_t result_size  = sizeof(MiningResult) * config_.result_buffer_size;
+            size_t aligned_size = ((result_size + alignment - 1) / alignment) * alignment;
+            gpuError_t err      = gpuMalloc(&state.gpu_buffers[b], aligned_size);
+            if (err != gpuSuccess) {
+                std::cerr << "Failed to allocate GPU buffer " << b << " for stream " << i << ": "
+                          << gpuGetErrorString(err) << "\n";
+                return false;
+            }
+            gpuMemsetAsync(state.gpu_buffers[b], 0, aligned_size, streams_[i]);
+            err = gpuMalloc(&state.gpu_counts[b], sizeof(uint32_t));
+            if (err != gpuSuccess) {
+                std::cerr << "Failed to allocate count buffer " << b << ": " << gpuGetErrorString(err) << "\n";
+                return false;
+            }
+            gpuMemsetAsync(state.gpu_counts[b], 0, sizeof(uint32_t), streams_[i]);
+            // Pinned host buffers
+            err = gpuHostAlloc(&state.pinned_buffers[b], result_size, gpuHostAllocDefault);
+            if (err != gpuSuccess) {
+                std::cerr << "Failed to allocate pinned buffer " << b << ": " << gpuGetErrorString(err) << "\n";
+                // Fallback to regular memory
+                state.pinned_buffers[b]   = new MiningResult[config_.result_buffer_size];
+                config_.use_pinned_memory = false;
+            }
+            err = gpuHostAlloc(&state.pinned_counts[b], sizeof(uint32_t), gpuHostAllocDefault);
+            if (err != gpuSuccess) {
+                std::cerr << "Failed to allocate pinned count " << b << ": " << gpuGetErrorString(err) << "\n";
+                // Fallback to regular memory
+                state.pinned_counts[b]  = new uint32_t;
+                *state.pinned_counts[b] = 0;
+            }
+            // Create events
+            err = gpuEventCreateWithFlags(&state.copy_events[b], gpuEventDisableTiming);
+            if (err != gpuSuccess) {
+                std::cerr << "Failed to create event " << b << ": " << gpuGetErrorString(err) << "\n";
+                return false;
+            }
+            state.copy_pending[b] = false;
         }
-
-        // Clear memory immediately
-        err = gpuMemsetAsync(pool.results, 0, aligned_size, streams_[i]);
-        if (err != gpuSuccess) {
-            std::cerr << "Failed to clear results buffer: " << gpuGetErrorString(err) << "\n";
-            return false;
-        }
-
-        // Allocate count with alignment
-        err = gpuMalloc(&pool.count, sizeof(uint32_t));
-        if (err != gpuSuccess) {
-            std::cerr << "Failed to allocate count buffer: " << gpuGetErrorString(err) << "\n";
-            return false;
-        }
-
-        // Verify the pointer is valid
-        if (!pool.count) {
-            std::cerr << "pool.count is null after allocation!\n";
-            return false;
-        }
-
-        err = gpuMemsetAsync(pool.count, 0, sizeof(uint32_t), streams_[i]);
-        if (err != gpuSuccess) {
-            std::cerr << "Failed to clear count buffer: " << gpuGetErrorString(err) << "\n";
-            return false;
-        }
-
-        // Allocate nonces_processed
-        err = gpuMalloc(&pool.nonces_processed, sizeof(uint64_t));
+        // Point pool to first write buffer
+        pool.results = state.gpu_buffers[0];
+        pool.count   = state.gpu_counts[0];
+        // Allocate other pool members (nonces_processed, job_version)
+        gpuError_t err = gpuMalloc(&pool.nonces_processed, sizeof(uint64_t));
         if (err != gpuSuccess) {
             std::cerr << "Failed to allocate nonce counter: " << gpuGetErrorString(err) << "\n";
             return false;
         }
-        err = gpuMemsetAsync(pool.nonces_processed, 0, sizeof(uint64_t), streams_[i]);
-        if (err != gpuSuccess) {
-            std::cerr << "Failed to clear nonce counter: " << gpuGetErrorString(err) << "\n";
-            return false;
-        }
-
-        // Allocate job_version
+        gpuMemsetAsync(pool.nonces_processed, 0, sizeof(uint64_t), streams_[i]);
         err = gpuMalloc(&pool.job_version, sizeof(uint64_t));
         if (err != gpuSuccess) {
             std::cerr << "Failed to allocate job version: " << gpuGetErrorString(err) << "\n";
             return false;
         }
-
-        err = gpuMemsetAsync(pool.job_version, 0, sizeof(uint64_t), streams_[i]);
-        if (err != gpuSuccess) {
-            std::cerr << "Failed to clear job version: " << gpuGetErrorString(err) << "\n";
-            return false;
-        }
-
-        // Allocate pinned host memory
-        if (config_.use_pinned_memory) {
-            err = gpuHostAlloc(&pinned_results_[i], result_size, gpuHostAllocMapped | gpuHostAllocWriteCombined);
-            if (err != gpuSuccess) {
-                std::cerr << "Warning: Failed to allocate pinned memory, using regular memory\n";
-                pinned_results_[i]        = new MiningResult[pool.capacity];
-                config_.use_pinned_memory = false;
-            }
-        } else {
-            pinned_results_[i] = new MiningResult[pool.capacity];
-        }
-
+        gpuMemsetAsync(pool.job_version, 0, sizeof(uint64_t), streams_[i]);
+        // Keep pinned_results_ for compatibility (point to first buffer)
+        pinned_results_[i] = state.pinned_buffers[0];
         // Synchronize to ensure all allocations are complete
         err = gpuStreamSynchronize(streams_[i]);
         if (err != gpuSuccess) {
@@ -1213,7 +1221,6 @@ bool MiningSystem::initializeMemoryPools()
     for (int i = 0; i < config_.num_streams; i++) {
         if (!device_jobs_[i].allocate()) {
             std::cerr << "Failed to allocate device job " << i << "\n";
-            // Clean up previously allocated jobs
             for (int j = 0; j < i; j++) {
                 device_jobs_[j].free();
             }
@@ -1225,26 +1232,23 @@ bool MiningSystem::initializeMemoryPools()
     // Initialize job version
     current_job_version_ = 0;
 
-    // Final validation
-    for (int i = 0; i < config_.num_streams; i++) {
-        if (!gpu_pools_[i].count || !gpu_pools_[i].results || !gpu_pools_[i].nonces_processed ||
-            !gpu_pools_[i].job_version) {
-            std::cerr << "GPU pool " << i << " has null pointers after allocation\n";
-            std::cerr << "  count: " << gpu_pools_[i].count << "\n";
-            std::cerr << "  results: " << gpu_pools_[i].results << "\n";
-            std::cerr << "  nonces_processed: " << gpu_pools_[i].nonces_processed << "\n";
-            std::cerr << "  job_version: " << gpu_pools_[i].job_version << "\n";
-            return false;
-        }
-    }
+    // Start logger thread
+    logger_running_ = true;
+    logger_thread_  = std::thread(&MiningSystem::loggerThread, this);
 
-    std::cout << "Successfully allocated GPU resources for " << config_.num_streams << " streams\n";
+    std::cout << "Successfully allocated triple-buffered GPU resources for " << config_.num_streams << " streams\n";
     return true;
 }
 
 void MiningSystem::cleanup()
 {
     std::lock_guard lock(system_mutex_);
+
+    // Stop logger thread
+    logger_running_ = false;
+    if (logger_thread_.joinable()) {
+        logger_thread_.join();
+    }
 
     printFinalStats();
 
@@ -1267,12 +1271,35 @@ void MiningSystem::cleanup()
         }
     }
 
-    // Free GPU memory
+    // Free triple buffers
+    for (size_t i = 0; i < stream_states_.size(); i++) {
+        auto &state = stream_states_[i];
+        for (int b = 0; b < 3; b++) {
+            if (state.gpu_buffers[b])
+                gpuFree(state.gpu_buffers[b]);
+            if (state.gpu_counts[b])
+                gpuFree(state.gpu_counts[b]);
+            if (state.pinned_buffers[b]) {
+                if (config_.use_pinned_memory) {
+                    gpuFreeHost(state.pinned_buffers[b]);
+                } else {
+                    delete[] state.pinned_buffers[b];
+                }
+            }
+            if (state.pinned_counts[b]) {
+                if (config_.use_pinned_memory) {
+                    gpuFreeHost(state.pinned_counts[b]);
+                } else {
+                    delete state.pinned_counts[b];
+                }
+            }
+            if (state.copy_events[b])
+                gpuEventDestroy(state.copy_events[b]);
+        }
+    }
+
+    // Free other GPU memory
     for (const auto &pool : gpu_pools_) {
-        if (pool.results)
-            gpuFree(pool.results);
-        if (pool.count)
-            gpuFree(pool.count);
         if (pool.nonces_processed)
             gpuFree(pool.nonces_processed);
         if (pool.job_version)
@@ -1283,16 +1310,8 @@ void MiningSystem::cleanup()
         job.free();
     }
 
-    // Free pinned memory
-    for (const auto &pinned_result : pinned_results_) {
-        if (pinned_result) {
-            if (config_.use_pinned_memory) {
-                gpuFreeHost(pinned_result);
-            } else {
-                delete[] pinned_result;
-            }
-        }
-    }
+    // Note: We don't need to free pinned_results_ separately anymore
+    // since they just point to buffers in stream_states_
 }
 
 void MiningSystem::performanceMonitor() const
