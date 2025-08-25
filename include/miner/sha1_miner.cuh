@@ -28,7 +28,7 @@
     #define NONCES_PER_THREAD         8192
     #define DEFAULT_THREADS_PER_BLOCK 256
 #else
-    #define NONCES_PER_THREAD         2097152  // 8192
+    #define NONCES_PER_THREAD         8192
     #define DEFAULT_THREADS_PER_BLOCK 256
 #endif
 

@@ -188,10 +188,6 @@ __global__ void sha1_mining_kernel_nvidia(const uint8_t *__restrict__ base_messa
             }
         }
     }
-
-    // Update total nonces processed
-    atomicAdd(reinterpret_cast<unsigned long long *>(actual_nonces_processed),
-              static_cast<unsigned long long>(nonces_processed));
 }
 
 // Launcher
