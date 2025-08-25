@@ -619,6 +619,22 @@ void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job,
     }
 }
 
+void MultiGPUManager::resetHashCounter() const
+{
+    // Reset each GPU's hash counter
+    for (const auto &worker : workers_) {
+        if (worker->mining_system) {
+            worker->mining_system->resetHashCounter();
+        }
+    }
+
+    // Reset manager's start time for accurate hashrate calculation
+    start_time_ = std::chrono::steady_clock::now();
+
+    // Reset global best tracker if needed
+    global_best_tracker_.reset();
+}
+
 void MultiGPUManager::sync() const
 {
     for (const auto &worker : workers_) {

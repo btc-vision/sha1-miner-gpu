@@ -11,6 +11,8 @@
 #include "config.hpp"
 #include "utilities.hpp"
 
+extern __constant__ uint32_t d_base_message[8];
+
 // Global system instance
 std::unique_ptr<MiningSystem> g_mining_system;
 
@@ -62,7 +64,9 @@ void MiningSystem::TimingStats::print() const
 // MiningSystem implementation
 MiningSystem::MiningSystem(const Config &config)
     : config_(config), device_props_(), gpu_vendor_(GPUVendor::UNKNOWN), best_tracker_()
-{}
+{
+    hashrate_start_time_ = std::chrono::steady_clock::now();
+}
 
 MiningSystem::~MiningSystem()
 {
@@ -762,9 +766,37 @@ void MiningSystem::runMiningLoop(const MiningJob &job)
     runMiningLoopInterruptibleWithOffset(job, []() { return !g_shutdown; }, 1);
 }
 
-// Update launchKernelOnStream to NOT modify global_nonce_offset
 void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t nonce_offset, const MiningJob &job)
 {
+    // Use a static atomic with proper initialization
+    static std::atomic<uint64_t> last_updated_job_version{UINT64_MAX};
+    // Load the current value for comparison
+    uint64_t last_version    = last_updated_job_version.load();
+    uint64_t current_version = current_job_version_.load();
+    if (current_version != last_version) {
+        // Convert job.base_message (uint8_t[32]) to uint32_t[8] for constant memory
+        uint32_t base_msg_words[8];
+        memcpy(base_msg_words, job.base_message, 32);
+        // Copy to constant memory using platform-agnostic call
+#ifdef USE_HIP
+        hipError_t err = hipMemcpyToSymbol(d_base_message, base_msg_words, 32);
+        if (err != hipSuccess) {
+            LOG_ERROR("MINING", "Failed to copy base message to constant memory: ", hipGetErrorString(err));
+            throw std::runtime_error("Constant memory copy failed");
+        }
+#else
+        cudaError_t err = cudaMemcpyToSymbol(d_base_message, base_msg_words, 32);
+        if (err != cudaSuccess) {
+            LOG_ERROR("MINING", "Failed to copy base message to constant memory: ", cudaGetErrorString(err));
+            throw std::runtime_error("Constant memory copy failed");
+        }
+#endif
+
+        // Store the new version
+        last_updated_job_version.store(current_version);
+        LOG_TRACE("MINING", "Updated constant memory with new base message for job version ", current_version);
+    }
+
     // Configure kernel
     KernelConfig config{};
     config.blocks             = config_.blocks_per_stream;
@@ -792,16 +824,10 @@ void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t non
 
 void MiningSystem::processStreamResults(const int stream_idx, StreamData &stream_data)
 {
-    // Get actual nonces processed
-    /*uint64_t actual_nonces = 0;
-    gpuMemcpyAsync(&actual_nonces, gpu_pools_[stream_idx].nonces_processed, sizeof(uint64_t), gpuMemcpyDeviceToHost,
-                   streams_[stream_idx]);
-
-    // Ensure the copy is complete
-    gpuStreamSynchronize(streams_[stream_idx]);*/
-
-    // Update hash count
-    total_hashes_ += getHashesPerKernel();
+    // Update both counters
+    uint64_t hashes_this_batch = getHashesPerKernel();
+    total_hashes_ += hashes_this_batch;
+    hashes_since_reset_ += hashes_this_batch;
 
     // Process mining results
     processResultsOptimized(stream_idx);
@@ -856,6 +882,16 @@ bool MiningSystem::validateStreams() const
     return true;
 }
 
+void MiningSystem::resetHashCounter()
+{
+    // Reset hashrate tracking
+    hashes_since_reset_  = 0;
+    hashrate_start_time_ = std::chrono::steady_clock::now();
+
+    // Reset best tracker for new job
+    best_tracker_.reset();
+}
+
 void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version)
 {
     // Store current job version first
@@ -865,7 +901,6 @@ void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version)
     // Update the device jobs with new data
     for (int i = 0; i < config_.num_streams; i++) {
         // Copy new job data to device
-        gpuMemcpyAsync(device_jobs_[i].base_message, job.base_message, 32, gpuMemcpyHostToDevice, streams_[i]);
         gpuMemcpyAsync(device_jobs_[i].target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice,
                        streams_[i]);
 
@@ -1016,15 +1051,18 @@ void MiningSystem::processResultsOptimized(int stream_idx)
 
 MiningStats MiningSystem::getStats() const
 {
-    const auto elapsed =
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time_);
-
     MiningStats stats{};
     stats.hashes_computed  = total_hashes_.load();
     stats.candidates_found = total_candidates_.load();
     stats.best_match_bits  = best_tracker_.getBestBits();
-    stats.hash_rate =
-        elapsed.count() > 0 ? static_cast<double>(stats.hashes_computed) / static_cast<double>(elapsed.count()) : 0.0;
+    // Calculate hashrate from reset point (for per-job accuracy)
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - hashrate_start_time_);
+    if (elapsed.count() > 0) {
+        stats.hash_rate = static_cast<double>(hashes_since_reset_.load()) / static_cast<double>(elapsed.count());
+    } else {
+        stats.hash_rate = 0.0;
+    }
 
     return stats;
 }

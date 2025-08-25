@@ -28,7 +28,7 @@
     #define NONCES_PER_THREAD         8192
     #define DEFAULT_THREADS_PER_BLOCK 256
 #else
-    #define NONCES_PER_THREAD         16384  // 32768 16384 131072
+    #define NONCES_PER_THREAD         512  // 32768 16384 131072
     #define DEFAULT_THREADS_PER_BLOCK 256
 #endif
 
@@ -83,10 +83,9 @@ struct KernelConfig
 
 struct DeviceMiningJob
 {
-    uint8_t *base_message;
     uint32_t *target_hash;
 
-    DeviceMiningJob() : base_message(nullptr), target_hash(nullptr) {}
+    DeviceMiningJob() : target_hash(nullptr) {}
 
     ~DeviceMiningJob() { free(); }
 
@@ -127,7 +126,6 @@ struct DeviceMiningJob
         if (err != gpuSuccess) {
             fprintf(stderr, "[DeviceMiningJob] ERROR: Failed to allocate base_message: %s (error code: %d)\n",
                     gpuGetErrorString(err), err);
-            base_message = nullptr;
 
             // Try to understand why allocation failed
 #ifdef USE_HIP
@@ -153,16 +151,6 @@ struct DeviceMiningJob
 #endif
             return false;
         }
-
-        base_message = reinterpret_cast<uint8_t *>(temp_ptr);
-        fprintf(stderr, "[DeviceMiningJob] Successfully allocated base_message at %p (alignment: %llu bytes)\n",
-                base_message, (uintptr_t)base_message % alignment);
-
-        // Verify alignment
-        if ((uintptr_t)base_message % 16 != 0) {
-            fprintf(stderr, "[DeviceMiningJob] WARNING: base_message not 16-byte aligned for uint4 access!\n");
-        }
-
         // Allocate target_hash with proper alignment
         size_t target_size         = 5 * sizeof(uint32_t);  // 20 bytes
         size_t target_aligned_size = ((target_size + alignment - 1) / alignment) * alignment;
@@ -174,10 +162,7 @@ struct DeviceMiningJob
         if (err != gpuSuccess) {
             fprintf(stderr, "[DeviceMiningJob] ERROR: Failed to allocate target_hash: %s (error code: %d)\n",
                     gpuGetErrorString(err), err);
-            // Free the successfully allocated base_message
-            gpuFree(base_message);
-            base_message = nullptr;
-            target_hash  = nullptr;
+            target_hash = nullptr;
             return false;
         }
 
@@ -191,16 +176,10 @@ struct DeviceMiningJob
         }
 
         // Verify allocations
-        if (!base_message || !target_hash) {
+        if (!target_hash) {
             fprintf(stderr, "[DeviceMiningJob] ERROR: Pointers are null after allocation\n");
             free();
             return false;
-        }
-
-        // Clear the allocated memory - use aligned size for clearing
-        err = gpuMemset(base_message, 0, base_msg_aligned_size);
-        if (err != gpuSuccess) {
-            fprintf(stderr, "[DeviceMiningJob] Warning: Failed to clear base_message: %s\n", gpuGetErrorString(err));
         }
 
         err = gpuMemset(target_hash, 0, target_aligned_size);
@@ -210,8 +189,6 @@ struct DeviceMiningJob
 
         // Final alignment verification
         fprintf(stderr, "[DeviceMiningJob] Allocation successful - Final alignment check:\n");
-        fprintf(stderr, "  base_message: %p (mod 16: %llu, mod 256: %llu)\n", base_message,
-                (uintptr_t)base_message % 16, (uintptr_t)base_message % 256);
         fprintf(stderr, "  target_hash: %p (mod 16: %llu, mod 256: %llu)\n", target_hash, (uintptr_t)target_hash % 16,
                 (uintptr_t)target_hash % 256);
 
@@ -220,13 +197,6 @@ struct DeviceMiningJob
 
     void free()
     {
-        if (base_message) {
-            gpuError_t err = gpuFree(base_message);
-            if (err != gpuSuccess) {
-                fprintf(stderr, "[DeviceMiningJob] Warning: Failed to free base_message: %s\n", gpuGetErrorString(err));
-            }
-            base_message = nullptr;
-        }
         if (target_hash) {
             gpuError_t err = gpuFree(target_hash);
             if (err != gpuSuccess) {
@@ -238,16 +208,12 @@ struct DeviceMiningJob
 
     void copyFromHost(const MiningJob &job) const
     {
-        if (!base_message || !target_hash) {
-            fprintf(stderr, "[DeviceMiningJob] Error: Not allocated (base_message=%p, target_hash=%p)\n", base_message,
-                    target_hash);
+        if (!target_hash) {
+            fprintf(stderr, "[DeviceMiningJob] Error: Not allocated (target_hash=%p)\n", target_hash);
             return;
         }
-        gpuError_t err = gpuMemcpy(base_message, job.base_message, 32, gpuMemcpyHostToDevice);
-        if (err != gpuSuccess) {
-            fprintf(stderr, "[DeviceMiningJob] Failed to copy base_message: %s\n", gpuGetErrorString(err));
-        }
-        err = gpuMemcpy(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice);
+
+        gpuError_t err = gpuMemcpy(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice);
         if (err != gpuSuccess) {
             fprintf(stderr, "[DeviceMiningJob] Failed to copy target_hash: %s\n", gpuGetErrorString(err));
         }
@@ -255,15 +221,13 @@ struct DeviceMiningJob
 
     void copyFromHostAsync(const MiningJob &job, gpuStream_t stream) const
     {
-        if (!base_message || !target_hash) {
+        if (!target_hash) {
             fprintf(stderr, "[DeviceMiningJob] Error: Not allocated\n");
             return;
         }
-        gpuError_t err = gpuMemcpyAsync(base_message, job.base_message, 32, gpuMemcpyHostToDevice, stream);
-        if (err != gpuSuccess) {
-            fprintf(stderr, "[DeviceMiningJob] Failed to async copy base_message: %s\n", gpuGetErrorString(err));
-        }
-        err = gpuMemcpyAsync(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice, stream);
+
+        gpuError_t err =
+            gpuMemcpyAsync(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice, stream);
         if (err != gpuSuccess) {
             fprintf(stderr, "[DeviceMiningJob] Failed to async copy target_hash: %s\n", gpuGetErrorString(err));
         }
@@ -271,7 +235,7 @@ struct DeviceMiningJob
 
     void updateFromHost(const MiningJob &job) const { copyFromHost(job); }
 
-    bool isAllocated() const { return base_message != nullptr && target_hash != nullptr; }
+    bool isAllocated() const { return target_hash != nullptr; }
 };
 
 // API functions - Host side

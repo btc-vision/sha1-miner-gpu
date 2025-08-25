@@ -1,4 +1,3 @@
-// SHA-1 Mining - FAST VERSION with proper alignment assumptions
 #include <cuda_runtime.h>
 
 #include <cstdio>
@@ -113,22 +112,15 @@ __device__ __forceinline__ uint32_t count_leading_zeros_160bit(const uint32_t ha
     W[t & 15] = __funnelshift_l(W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15],               \
                                 W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15], 1)
 
-__global__ void sha1_mining_kernel_nvidia(const uint8_t *__restrict__ base_message,
-                                          const uint32_t *__restrict__ target_hash, uint32_t difficulty,
+__constant__ uint32_t d_base_message[8];
+
+__global__ void sha1_mining_kernel_nvidia(const uint32_t *__restrict__ target_hash, uint32_t difficulty,
                                           MiningResult *__restrict__ results, uint32_t *__restrict__ result_count,
                                           uint32_t result_capacity, uint64_t nonce_base, uint32_t nonces_per_thread,
                                           uint64_t job_version)
 {
     const uint32_t tid               = blockIdx.x * blockDim.x + threadIdx.x;
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
-
-    // Load base message - ASSUME ALIGNED (enforce in host code)
-    uint32_t base_msg[8];
-    const uint32_t *base_msg_words = reinterpret_cast<const uint32_t *>(base_message);
-#pragma unroll
-    for (int i = 0; i < 8; i++) {
-        base_msg[i] = base_msg_words[i];
-    }
 
     // Load target hash into registers
     uint32_t target[5];
@@ -146,7 +138,7 @@ __global__ void sha1_mining_kernel_nvidia(const uint8_t *__restrict__ base_messa
         uint32_t msg_words[8];
 #pragma unroll
         for (int j = 0; j < 8; j++) {
-            msg_words[j] = base_msg[j];
+            msg_words[j] = d_base_message[j];
         }
 
         // Apply nonce
@@ -349,19 +341,24 @@ __global__ void sha1_mining_kernel_nvidia(const uint8_t *__restrict__ base_messa
         // Check difficulty using optimized function
         uint32_t matching_bits = count_leading_zeros_160bit(hash, target);
 
+        // After your hash computation, force the compiler to keep the values
         if (matching_bits >= difficulty) {
             uint32_t idx = atomicAdd(result_count, 1);
             if (idx < result_capacity) {
-                results[idx].nonce            = nonce;
-                results[idx].matching_bits    = matching_bits;
-                results[idx].difficulty_score = matching_bits;
-                results[idx].job_version      = job_version;
+                results[idx].nonce         = nonce;
+                results[idx].matching_bits = 0;  // matching_bits;
 
-// Store hash
+// Force all hash values to be stored
 #pragma unroll
                 for (int j = 0; j < 5; j++) {
                     results[idx].hash[j] = hash[j];
                 }
+            }
+        } else {
+            // Even on non-matches, force some observable side effect
+            // This prevents the compiler from eliminating the hash computation
+            if ((nonce & 0xFFFFF) == 0) {                // Every ~1M nonces
+                atomicMax(result_count, hash[0] & 0x1);  // Minimal side effect
             }
         }
     }
@@ -384,9 +381,6 @@ void launch_mining_kernel_nvidia(const DeviceMiningJob &device_job, uint32_t dif
         return;
     }
 
-    // IMPORTANT: Ensure alignment in host code when allocating!
-    // The host code should use cudaMallocAligned or ensure proper alignment
-
     // Reset result count
     cudaError_t err = cudaMemsetAsync(pool.count, 0, sizeof(uint32_t), config.stream);
     if (err != cudaSuccess) {
@@ -397,13 +391,14 @@ void launch_mining_kernel_nvidia(const DeviceMiningJob &device_job, uint32_t dif
     // Clear previous errors
     cudaGetLastError();
 
-    // Launch kernel with optimal configuration for RTX 5090
-    dim3 gridDim(config.blocks, 1, 1);
-    dim3 blockDim(config.threads_per_block, 1, 1);
+    // printf("Grid configuration: blocks=%d, threads=%d\n", config.blocks, config.threads_per_block);
 
-    sha1_mining_kernel_nvidia<<<gridDim, blockDim, 0, config.stream>>>(
-        device_job.base_message, device_job.target_hash, difficulty, pool.results, pool.count, pool.capacity,
-        nonce_offset, NONCES_PER_THREAD, job_version);
+    dim3 gridDim(config.threads_per_block, 1, 1);
+    dim3 blockDim(config.blocks, 1, 1);
+
+    sha1_mining_kernel_nvidia<<<gridDim, blockDim, 0, config.stream>>>(device_job.target_hash, difficulty, pool.results,
+                                                                       pool.count, pool.capacity, nonce_offset,
+                                                                       NONCES_PER_THREAD, job_version);
 
     // Check for launch errors
     err = cudaGetLastError();

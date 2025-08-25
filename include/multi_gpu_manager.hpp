@@ -42,7 +42,8 @@ public:
 
     void setUserConfig(const void *user_config) { user_config_ = user_config; }
 
-    /**
+    void resetHashCounter() const;
+ /**
      * Initialize mining on specified GPUs
      * @param gpu_ids List of GPU device IDs to use
      * @return true if at least one GPU was initialized successfully
