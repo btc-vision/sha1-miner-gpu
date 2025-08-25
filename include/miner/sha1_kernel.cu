@@ -1,3 +1,4 @@
+// SHA-1 Mining - FAST VERSION with proper alignment assumptions
 #include <cuda_runtime.h>
 
 #include <cstdio>
@@ -5,8 +6,16 @@
 #include "sha1_miner.cuh"
 
 // SHA-1 constants
-__device__ __constant__ uint32_t K[4]  = {0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xCA62C1D6};
-__device__ __constant__ uint32_t H0[5] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
+#define K0 0x5A827999
+#define K1 0x6ED9EBA1
+#define K2 0x8F1BBCDC
+#define K3 0xCA62C1D6
+
+#define H0_0 0x67452301
+#define H0_1 0xEFCDAB89
+#define H0_2 0x98BADCFE
+#define H0_3 0x10325476
+#define H0_4 0xC3D2E1F0
 
 // Optimized byte swap using PTX
 __device__ __forceinline__ uint32_t bswap32_ptx(uint32_t x)
@@ -16,7 +25,7 @@ __device__ __forceinline__ uint32_t bswap32_ptx(uint32_t x)
     return result;
 }
 
-// Count leading zeros with PTX
+// Optimized count leading zeros - fully unrolled
 __device__ __forceinline__ uint32_t count_leading_zeros_160bit(const uint32_t hash[5], const uint32_t target[5])
 {
     uint32_t xor_val;
@@ -27,6 +36,7 @@ __device__ __forceinline__ uint32_t count_leading_zeros_160bit(const uint32_t ha
         asm("clz.b32 %0, %1;" : "=r"(clz) : "r"(xor_val));
         return clz;
     }
+
     xor_val = hash[1] ^ target[1];
     if (xor_val != 0) {
         asm("clz.b32 %0, %1;" : "=r"(clz) : "r"(xor_val));
@@ -54,6 +64,55 @@ __device__ __forceinline__ uint32_t count_leading_zeros_160bit(const uint32_t ha
     return 160;
 }
 
+// SHA-1 round macros for maximum performance
+#define SHA1_ROUND_0_19(a, b, c, d, e, W_val)                                                                          \
+    do {                                                                                                               \
+        uint32_t f    = (b & c) | (~b & d);                                                                            \
+        uint32_t temp = __funnelshift_l(a, a, 5) + f + e + K0 + W_val;                                                 \
+        e             = d;                                                                                             \
+        d             = c;                                                                                             \
+        c             = __funnelshift_l(b, b, 30);                                                                     \
+        b             = a;                                                                                             \
+        a             = temp;                                                                                          \
+    } while (0)
+
+#define SHA1_ROUND_20_39(a, b, c, d, e, W_val)                                                                         \
+    do {                                                                                                               \
+        uint32_t f    = b ^ c ^ d;                                                                                     \
+        uint32_t temp = __funnelshift_l(a, a, 5) + f + e + K1 + W_val;                                                 \
+        e             = d;                                                                                             \
+        d             = c;                                                                                             \
+        c             = __funnelshift_l(b, b, 30);                                                                     \
+        b             = a;                                                                                             \
+        a             = temp;                                                                                          \
+    } while (0)
+
+#define SHA1_ROUND_40_59(a, b, c, d, e, W_val)                                                                         \
+    do {                                                                                                               \
+        uint32_t f    = (b & c) | (d & (b ^ c));                                                                       \
+        uint32_t temp = __funnelshift_l(a, a, 5) + f + e + K2 + W_val;                                                 \
+        e             = d;                                                                                             \
+        d             = c;                                                                                             \
+        c             = __funnelshift_l(b, b, 30);                                                                     \
+        b             = a;                                                                                             \
+        a             = temp;                                                                                          \
+    } while (0)
+
+#define SHA1_ROUND_60_79(a, b, c, d, e, W_val)                                                                         \
+    do {                                                                                                               \
+        uint32_t f    = b ^ c ^ d;                                                                                     \
+        uint32_t temp = __funnelshift_l(a, a, 5) + f + e + K3 + W_val;                                                 \
+        e             = d;                                                                                             \
+        d             = c;                                                                                             \
+        c             = __funnelshift_l(b, b, 30);                                                                     \
+        b             = a;                                                                                             \
+        a             = temp;                                                                                          \
+    } while (0)
+
+#define COMPUTE_W(t)                                                                                                   \
+    W[t & 15] = __funnelshift_l(W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15],               \
+                                W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15], 1)
+
 __global__ void sha1_mining_kernel_nvidia(const uint8_t *__restrict__ base_message,
                                           const uint32_t *__restrict__ target_hash, uint32_t difficulty,
                                           MiningResult *__restrict__ results, uint32_t *__restrict__ result_count,
@@ -63,131 +122,231 @@ __global__ void sha1_mining_kernel_nvidia(const uint8_t *__restrict__ base_messa
     const uint32_t tid               = blockIdx.x * blockDim.x + threadIdx.x;
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
 
-    // Load base message using vectorized access
-    uint8_t base_msg[32];
-    auto *base_msg_vec           = reinterpret_cast<uint4 *>(base_msg);
-    const auto *base_message_vec = reinterpret_cast<const uint4 *>(base_message);
-    base_msg_vec[0]              = base_message_vec[0];
-    base_msg_vec[1]              = base_message_vec[1];
+    // Load base message - ASSUME ALIGNED (enforce in host code)
+    uint32_t base_msg[8];
+    const uint32_t *base_msg_words = reinterpret_cast<const uint32_t *>(base_message);
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        base_msg[i] = base_msg_words[i];
+    }
 
-    // Load target
+    // Load target hash into registers
     uint32_t target[5];
 #pragma unroll
     for (int i = 0; i < 5; i++) {
         target[i] = target_hash[i];
     }
 
-    uint32_t nonces_processed = 0;
-
-    // Main mining loop
     for (uint32_t i = 0; i < nonces_per_thread; i++) {
         uint64_t nonce = thread_nonce_base + i;
         if (nonce == 0)
             continue;
 
-        nonces_processed++;
+        // Create message with nonce
+        uint32_t msg_words[8];
+#pragma unroll
+        for (int j = 0; j < 8; j++) {
+            msg_words[j] = base_msg[j];
+        }
 
-        // Create message copy with vectorized ops
-        uint8_t msg_bytes[32];
-        auto *msg_bytes_vec = reinterpret_cast<uint4 *>(msg_bytes);
-        msg_bytes_vec[0]    = base_msg_vec[0];
-        msg_bytes_vec[1]    = base_msg_vec[1];
-
-        // Apply nonce efficiently - THIS IS THE KEY FIX
-        auto *msg_words = reinterpret_cast<uint32_t *>(msg_bytes);
+        // Apply nonce
         msg_words[6] ^= bswap32_ptx(nonce >> 32);
         msg_words[7] ^= bswap32_ptx(nonce & 0xFFFFFFFF);
 
-        // Convert to big-endian words for SHA-1
+        // Convert to big-endian and prepare W array
         uint32_t W[16];
-        const auto *msg_words_local = reinterpret_cast<uint32_t *>(msg_bytes);
-#pragma unroll
-        for (int j = 0; j < 8; j++) {
-            W[j] = bswap32_ptx(msg_words_local[j]);
-        }
 
-        // Apply SHA-1 padding
-        W[8] = 0x80000000;
-#pragma unroll
-        for (int j = 9; j < 15; j++) {
-            W[j] = 0;
-        }
-        W[15] = 0x00000100;  // Message length (256 bits) in big-endian
+        // Unrolled byte swap
+        W[0] = bswap32_ptx(msg_words[0]);
+        W[1] = bswap32_ptx(msg_words[1]);
+        W[2] = bswap32_ptx(msg_words[2]);
+        W[3] = bswap32_ptx(msg_words[3]);
+        W[4] = bswap32_ptx(msg_words[4]);
+        W[5] = bswap32_ptx(msg_words[5]);
+        W[6] = bswap32_ptx(msg_words[6]);
+        W[7] = bswap32_ptx(msg_words[7]);
 
-        // Initialize hash values
-        uint32_t a = H0[0];
-        uint32_t b = H0[1];
-        uint32_t c = H0[2];
-        uint32_t d = H0[3];
-        uint32_t e = H0[4];
+        // Apply padding
+        W[8]  = 0x80000000;
+        W[9]  = 0;
+        W[10] = 0;
+        W[11] = 0;
+        W[12] = 0;
+        W[13] = 0;
+        W[14] = 0;
+        W[15] = 0x00000100;
 
-// SHA-1 rounds 0-19
-#pragma unroll
-        for (int t = 0; t < 20; t++) {
-            if (t >= 16) {
-                uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15];
-                W[t & 15]     = __funnelshift_l(temp, temp, 1);
-            }
-            uint32_t f    = (b & c) | (~b & d);
-            uint32_t temp = __funnelshift_l(a, a, 5) + f + e + K[0] + W[t & 15];
-            e             = d;
-            d             = c;
-            c             = __funnelshift_l(b, b, 30);
-            b             = a;
-            a             = temp;
-        }
+        // Initialize working variables
+        uint32_t a = H0_0;
+        uint32_t b = H0_1;
+        uint32_t c = H0_2;
+        uint32_t d = H0_3;
+        uint32_t e = H0_4;
 
-// Rounds 20-39
-#pragma unroll
-        for (int t = 20; t < 40; t++) {
-            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15];
-            W[t & 15]     = __funnelshift_l(temp, temp, 1);
-            uint32_t f    = b ^ c ^ d;
-            temp          = __funnelshift_l(a, a, 5) + f + e + K[1] + W[t & 15];
-            e             = d;
-            d             = c;
-            c             = __funnelshift_l(b, b, 30);
-            b             = a;
-            a             = temp;
-        }
+        // FULLY UNROLLED SHA-1 rounds for maximum speed
+        // Rounds 0-15 (no message schedule needed)
+        SHA1_ROUND_0_19(a, b, c, d, e, W[0]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[1]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[2]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[3]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[4]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[5]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[6]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[7]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[8]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[9]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[10]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[11]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[12]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[13]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[14]);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[15]);
 
-// Rounds 40-59
-#pragma unroll
-        for (int t = 40; t < 60; t++) {
-            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15];
-            W[t & 15]     = __funnelshift_l(temp, temp, 1);
-            uint32_t f    = (b & c) | (d & (b ^ c));
-            temp          = __funnelshift_l(a, a, 5) + f + e + K[2] + W[t & 15];
-            e             = d;
-            d             = c;
-            c             = __funnelshift_l(b, b, 30);
-            b             = a;
-            a             = temp;
-        }
+        // Rounds 16-19 with message schedule
+        COMPUTE_W(16);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[0]);
+        COMPUTE_W(17);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[1]);
+        COMPUTE_W(18);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[2]);
+        COMPUTE_W(19);
+        SHA1_ROUND_0_19(a, b, c, d, e, W[3]);
 
-// Rounds 60-79
-#pragma unroll
-        for (int t = 60; t < 80; t++) {
-            uint32_t temp = W[(t - 3) & 15] ^ W[(t - 8) & 15] ^ W[(t - 14) & 15] ^ W[(t - 16) & 15];
-            W[t & 15]     = __funnelshift_l(temp, temp, 1);
-            uint32_t f    = b ^ c ^ d;
-            temp          = __funnelshift_l(a, a, 5) + f + e + K[3] + W[t & 15];
-            e             = d;
-            d             = c;
-            c             = __funnelshift_l(b, b, 30);
-            b             = a;
-            a             = temp;
-        }
+        // Rounds 20-39
+        COMPUTE_W(20);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[4]);
+        COMPUTE_W(21);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[5]);
+        COMPUTE_W(22);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[6]);
+        COMPUTE_W(23);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[7]);
+        COMPUTE_W(24);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[8]);
+        COMPUTE_W(25);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[9]);
+        COMPUTE_W(26);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[10]);
+        COMPUTE_W(27);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[11]);
+        COMPUTE_W(28);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[12]);
+        COMPUTE_W(29);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[13]);
+        COMPUTE_W(30);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[14]);
+        COMPUTE_W(31);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[15]);
+        COMPUTE_W(32);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[0]);
+        COMPUTE_W(33);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[1]);
+        COMPUTE_W(34);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[2]);
+        COMPUTE_W(35);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[3]);
+        COMPUTE_W(36);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[4]);
+        COMPUTE_W(37);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[5]);
+        COMPUTE_W(38);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[6]);
+        COMPUTE_W(39);
+        SHA1_ROUND_20_39(a, b, c, d, e, W[7]);
 
-        // Add initial hash values
+        // Rounds 40-59
+        COMPUTE_W(40);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[8]);
+        COMPUTE_W(41);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[9]);
+        COMPUTE_W(42);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[10]);
+        COMPUTE_W(43);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[11]);
+        COMPUTE_W(44);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[12]);
+        COMPUTE_W(45);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[13]);
+        COMPUTE_W(46);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[14]);
+        COMPUTE_W(47);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[15]);
+        COMPUTE_W(48);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[0]);
+        COMPUTE_W(49);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[1]);
+        COMPUTE_W(50);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[2]);
+        COMPUTE_W(51);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[3]);
+        COMPUTE_W(52);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[4]);
+        COMPUTE_W(53);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[5]);
+        COMPUTE_W(54);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[6]);
+        COMPUTE_W(55);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[7]);
+        COMPUTE_W(56);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[8]);
+        COMPUTE_W(57);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[9]);
+        COMPUTE_W(58);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[10]);
+        COMPUTE_W(59);
+        SHA1_ROUND_40_59(a, b, c, d, e, W[11]);
+
+        // Rounds 60-79
+        COMPUTE_W(60);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[12]);
+        COMPUTE_W(61);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[13]);
+        COMPUTE_W(62);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[14]);
+        COMPUTE_W(63);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[15]);
+        COMPUTE_W(64);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[0]);
+        COMPUTE_W(65);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[1]);
+        COMPUTE_W(66);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[2]);
+        COMPUTE_W(67);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[3]);
+        COMPUTE_W(68);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[4]);
+        COMPUTE_W(69);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[5]);
+        COMPUTE_W(70);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[6]);
+        COMPUTE_W(71);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[7]);
+        COMPUTE_W(72);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[8]);
+        COMPUTE_W(73);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[9]);
+        COMPUTE_W(74);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[10]);
+        COMPUTE_W(75);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[11]);
+        COMPUTE_W(76);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[12]);
+        COMPUTE_W(77);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[13]);
+        COMPUTE_W(78);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[14]);
+        COMPUTE_W(79);
+        SHA1_ROUND_60_79(a, b, c, d, e, W[15]);
+
+        // Final hash values
         uint32_t hash[5];
-        hash[0] = a + H0[0];
-        hash[1] = b + H0[1];
-        hash[2] = c + H0[2];
-        hash[3] = d + H0[3];
-        hash[4] = e + H0[4];
+        hash[0] = a + H0_0;
+        hash[1] = b + H0_1;
+        hash[2] = c + H0_2;
+        hash[3] = d + H0_3;
+        hash[4] = e + H0_4;
 
-        // Check difficulty
+        // Check difficulty using optimized function
         uint32_t matching_bits = count_leading_zeros_160bit(hash, target);
 
         if (matching_bits >= difficulty) {
@@ -197,6 +356,8 @@ __global__ void sha1_mining_kernel_nvidia(const uint8_t *__restrict__ base_messa
                 results[idx].matching_bits    = matching_bits;
                 results[idx].difficulty_score = matching_bits;
                 results[idx].job_version      = job_version;
+
+// Store hash
 #pragma unroll
                 for (int j = 0; j < 5; j++) {
                     results[idx].hash[j] = hash[j];
@@ -206,7 +367,7 @@ __global__ void sha1_mining_kernel_nvidia(const uint8_t *__restrict__ base_messa
     }
 }
 
-// Launcher
+// Launcher function
 void launch_mining_kernel_nvidia(const DeviceMiningJob &device_job, uint32_t difficulty, uint64_t nonce_offset,
                                  const ResultPool &pool, const KernelConfig &config, uint64_t job_version)
 {
@@ -223,6 +384,9 @@ void launch_mining_kernel_nvidia(const DeviceMiningJob &device_job, uint32_t dif
         return;
     }
 
+    // IMPORTANT: Ensure alignment in host code when allocating!
+    // The host code should use cudaMallocAligned or ensure proper alignment
+
     // Reset result count
     cudaError_t err = cudaMemsetAsync(pool.count, 0, sizeof(uint32_t), config.stream);
     if (err != cudaSuccess) {
@@ -233,7 +397,7 @@ void launch_mining_kernel_nvidia(const DeviceMiningJob &device_job, uint32_t dif
     // Clear previous errors
     cudaGetLastError();
 
-    // Launch kernel
+    // Launch kernel with optimal configuration for RTX 5090
     dim3 gridDim(config.blocks, 1, 1);
     dim3 blockDim(config.threads_per_block, 1, 1);
 
