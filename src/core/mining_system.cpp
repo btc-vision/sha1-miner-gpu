@@ -673,6 +673,9 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
         global_nonce_offset += nonce_stride;
     }
 
+    int launch_count      = 0;
+    const auto loop_start = std::chrono::high_resolution_clock::now();
+
     // Main mining loop
     while (!g_shutdown && !stop_mining_ && should_continue()) {
         // Check for completed kernels using events
@@ -692,7 +695,7 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
         }
 
         if (!found_completed) {
-            std::this_thread::sleep_for(std::chrono::microseconds(50));
+            std::this_thread::sleep_for(std::chrono::microseconds(80));
             continue;
         }
 
@@ -708,6 +711,16 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
 
         // Launch new work on this stream
         launchKernelOnStream(completed_stream, global_nonce_offset, job);
+
+        launch_count++;
+        if (launch_count % 100 == 0) {
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::high_resolution_clock::now() - loop_start)
+                                  .count();
+            printf("Launched %d kernels in %lld ms (%.1f launches/sec)\n", launch_count, elapsed_ms,
+                   (launch_count * 1000.0) / elapsed_ms);
+        }
+
         stream_data[completed_stream].nonce_offset = global_nonce_offset;
         stream_data[completed_stream].busy         = true;
         global_nonce_offset += nonce_stride;
