@@ -19,20 +19,39 @@ __device__ __forceinline__ uint32_t bswap32_ptx(uint32_t x)
 // Count leading zeros with PTX
 __device__ __forceinline__ uint32_t count_leading_zeros_160bit(const uint32_t hash[5], const uint32_t target[5])
 {
-    uint32_t total_bits = 0;
-#pragma unroll
-    for (int i = 0; i < 5; i++) {
-        uint32_t xor_val = hash[i] ^ target[i];
-        if (xor_val == 0) {
-            total_bits += 32;
-        } else {
-            uint32_t clz;
-            asm("clz.b32 %0, %1;" : "=r"(clz) : "r"(xor_val));
-            total_bits += clz;
-            break;
-        }
+    uint32_t xor_val;
+    uint32_t clz;
+
+    xor_val = hash[0] ^ target[0];
+    if (xor_val != 0) {
+        asm("clz.b32 %0, %1;" : "=r"(clz) : "r"(xor_val));
+        return clz;
     }
-    return total_bits;
+    xor_val = hash[1] ^ target[1];
+    if (xor_val != 0) {
+        asm("clz.b32 %0, %1;" : "=r"(clz) : "r"(xor_val));
+        return 32 + clz;
+    }
+
+    xor_val = hash[2] ^ target[2];
+    if (xor_val != 0) {
+        asm("clz.b32 %0, %1;" : "=r"(clz) : "r"(xor_val));
+        return 64 + clz;
+    }
+
+    xor_val = hash[3] ^ target[3];
+    if (xor_val != 0) {
+        asm("clz.b32 %0, %1;" : "=r"(clz) : "r"(xor_val));
+        return 96 + clz;
+    }
+
+    xor_val = hash[4] ^ target[4];
+    if (xor_val != 0) {
+        asm("clz.b32 %0, %1;" : "=r"(clz) : "r"(xor_val));
+        return 128 + clz;
+    }
+
+    return 160;
 }
 
 /**
@@ -188,10 +207,6 @@ __global__ void sha1_mining_kernel_nvidia(const uint8_t *__restrict__ base_messa
             }
         }
     }
-
-    // Update total nonces processed
-    atomicAdd(reinterpret_cast<unsigned long long *>(actual_nonces_processed),
-              static_cast<unsigned long long>(nonces_processed));
 }
 
 // Launcher
