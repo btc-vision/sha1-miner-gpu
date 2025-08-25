@@ -970,23 +970,37 @@ namespace MiningPool {
     {
         std::lock_guard lock(stats_mutex_);
 
+        // Calculate actual elapsed time
+        const auto now     = std::chrono::steady_clock::now();
+        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
         if (mining_system_) {
-            // Single GPU - get stats directly
+            // Single GPU - get total hashes, not the rate
             const auto mining_stats = mining_system_->getStats();
-            stats_.hashrate         = mining_stats.hash_rate;
             stats_.total_hashes     = mining_stats.hashes_computed;
+
+            // Calculate hashrate based on actual elapsed time
+            if (elapsed.count() > 0) {
+                stats_.hashrate = static_cast<double>(stats_.total_hashes) / elapsed.count();
+            } else {
+                stats_.hashrate = 0.0;
+            }
         } else if (multi_gpu_manager_) {
-            // Multi-GPU - use the corrected getTotalHashRate()
-            stats_.hashrate     = multi_gpu_manager_->getTotalHashRate();
+            // Multi-GPU - get total hashes
             stats_.total_hashes = multi_gpu_manager_->getTotalHashes();
+
+            // Calculate hashrate based on actual elapsed time
+            if (elapsed.count() > 0) {
+                stats_.hashrate = static_cast<double>(stats_.total_hashes) / elapsed.count();
+            } else {
+                stats_.hashrate = 0.0;
+            }
         }
 
         // Update current difficulty from the actual job
         stats_.current_difficulty = current_difficulty_.load();
 
-        // Calculate uptime
-        const auto now = std::chrono::steady_clock::now();
-        stats_.uptime  = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
+        // Update uptime
+        stats_.uptime = elapsed;
 
         // Calculate share success rate
         if (stats_.shares_submitted > 0) {

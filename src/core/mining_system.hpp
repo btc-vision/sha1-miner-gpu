@@ -258,7 +258,7 @@ private:
         uint64_t nonce_offset;
         bool busy;
         std::chrono::high_resolution_clock::time_point launch_time;
-        uint64_t last_nonces_processed;
+        //uint64_t last_nonces_processed;
     };
 
     std::atomic<uint64_t> current_job_version_{0};
