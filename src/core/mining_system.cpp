@@ -654,9 +654,7 @@ uint64_t MiningSystem::runMiningLoopInterruptibleWithOffset(const MiningJob &job
 
     for (int i = 0; i < config_.num_streams; i++) {
         gpuEventCreateWithFlags(&kernel_complete_events_[i], gpuEventDisableTiming);
-        // stream_data[i].last_nonces_processed = 0;
         stream_data[i].busy = false;
-        gpuMemsetAsync(gpu_pools_[i].nonces_processed, 0, sizeof(uint64_t), streams_[i]);
     }
 
     // Nonce distribution - START FROM PROVIDED OFFSET
@@ -1114,10 +1112,9 @@ bool MiningSystem::initializeMemoryPools()
         pool.capacity    = config_.result_buffer_size;
 
         // Initialize all pointers to nullptr first
-        pool.results          = nullptr;
-        pool.count            = nullptr;
-        pool.nonces_processed = nullptr;
-        pool.job_version      = nullptr;
+        pool.results     = nullptr;
+        pool.count       = nullptr;
+        pool.job_version = nullptr;
 
         // Check if stream is valid before using it
         if (!streams_[i]) {
@@ -1159,18 +1156,6 @@ bool MiningSystem::initializeMemoryPools()
         err = gpuMemsetAsync(pool.count, 0, sizeof(uint32_t), streams_[i]);
         if (err != gpuSuccess) {
             std::cerr << "Failed to clear count buffer: " << gpuGetErrorString(err) << "\n";
-            return false;
-        }
-
-        // Allocate nonces_processed
-        err = gpuMalloc(&pool.nonces_processed, sizeof(uint64_t));
-        if (err != gpuSuccess) {
-            std::cerr << "Failed to allocate nonce counter: " << gpuGetErrorString(err) << "\n";
-            return false;
-        }
-        err = gpuMemsetAsync(pool.nonces_processed, 0, sizeof(uint64_t), streams_[i]);
-        if (err != gpuSuccess) {
-            std::cerr << "Failed to clear nonce counter: " << gpuGetErrorString(err) << "\n";
             return false;
         }
 
@@ -1227,12 +1212,10 @@ bool MiningSystem::initializeMemoryPools()
 
     // Final validation
     for (int i = 0; i < config_.num_streams; i++) {
-        if (!gpu_pools_[i].count || !gpu_pools_[i].results || !gpu_pools_[i].nonces_processed ||
-            !gpu_pools_[i].job_version) {
+        if (!gpu_pools_[i].count || !gpu_pools_[i].results || !gpu_pools_[i].job_version) {
             std::cerr << "GPU pool " << i << " has null pointers after allocation\n";
             std::cerr << "  count: " << gpu_pools_[i].count << "\n";
             std::cerr << "  results: " << gpu_pools_[i].results << "\n";
-            std::cerr << "  nonces_processed: " << gpu_pools_[i].nonces_processed << "\n";
             std::cerr << "  job_version: " << gpu_pools_[i].job_version << "\n";
             return false;
         }
@@ -1273,8 +1256,6 @@ void MiningSystem::cleanup()
             gpuFree(pool.results);
         if (pool.count)
             gpuFree(pool.count);
-        if (pool.nonces_processed)
-            gpuFree(pool.nonces_processed);
         if (pool.job_version)
             gpuFree(pool.job_version);
     }
@@ -1425,9 +1406,6 @@ uint64_t MiningSystem::runSingleBatch(const MiningJob &job)
     kernel_config.stream             = streams_[0];  // Use first stream
     kernel_config.shared_memory_size = 0;
 
-    // Reset nonce counter - IMPORTANT!
-    gpuMemsetAsync(gpu_pools_[0].nonces_processed, 0, sizeof(uint64_t), streams_[0]);
-
     // Launch kernel
     launch_mining_kernel(device_jobs_[0], job.difficulty, job.nonce_offset, gpu_pools_[0], kernel_config,
                          current_job_version_);
@@ -1435,14 +1413,12 @@ uint64_t MiningSystem::runSingleBatch(const MiningJob &job)
     // Wait for completion
     gpuStreamSynchronize(streams_[0]);
 
-    // Get actual nonces processed
-    uint64_t actual_nonces = 0;
-    gpuMemcpy(&actual_nonces, gpu_pools_[0].nonces_processed, sizeof(uint64_t), gpuMemcpyDeviceToHost);
-
     // Process results
     processResultsOptimized(0);
 
     // Update total hashes with actual count
+    const uint64_t actual_nonces = getHashesPerKernel();
+
     total_hashes_ += actual_nonces;
 
     return actual_nonces;

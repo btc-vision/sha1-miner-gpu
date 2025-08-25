@@ -53,11 +53,10 @@ struct MiningResult
 // GPU memory pool for results
 struct ResultPool
 {
-    MiningResult *results;       // Array of results
-    uint32_t *count;             // Count of results found
-    uint32_t capacity;           // Maximum results
-    uint64_t *nonces_processed;  // Total nonces processed
-    uint64_t *job_version;       // Current job version (device memory)
+    MiningResult *results;  // Array of results
+    uint32_t *count;        // Count of results found
+    uint32_t capacity;      // Maximum results
+    uint64_t *job_version;  // Current job version (device memory)
 };
 
 // Mining statistics

@@ -54,14 +54,11 @@ __device__ __forceinline__ uint32_t count_leading_zeros_160bit(const uint32_t ha
     return 160;
 }
 
-/**
- * Optimized SHA-1 mining kernel with correct implementation
- */
 __global__ void sha1_mining_kernel_nvidia(const uint8_t *__restrict__ base_message,
                                           const uint32_t *__restrict__ target_hash, uint32_t difficulty,
                                           MiningResult *__restrict__ results, uint32_t *__restrict__ result_count,
                                           uint32_t result_capacity, uint64_t nonce_base, uint32_t nonces_per_thread,
-                                          uint64_t *__restrict__ actual_nonces_processed, uint64_t job_version)
+                                          uint64_t job_version)
 {
     const uint32_t tid               = blockIdx.x * blockDim.x + threadIdx.x;
     const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
@@ -221,9 +218,8 @@ void launch_mining_kernel_nvidia(const DeviceMiningJob &device_job, uint32_t dif
     }
 
     // Validate pool pointers
-    if (!pool.results || !pool.count || !pool.nonces_processed) {
-        fprintf(stderr, "ERROR: Invalid pool pointers - results=%p, count=%p, nonces=%p\n", pool.results, pool.count,
-                pool.nonces_processed);
+    if (!pool.results || !pool.count) {
+        fprintf(stderr, "ERROR: Invalid pool pointers - results=%p, count=%p\n", pool.results, pool.count);
         return;
     }
 
@@ -243,7 +239,7 @@ void launch_mining_kernel_nvidia(const DeviceMiningJob &device_job, uint32_t dif
 
     sha1_mining_kernel_nvidia<<<gridDim, blockDim, 0, config.stream>>>(
         device_job.base_message, device_job.target_hash, difficulty, pool.results, pool.count, pool.capacity,
-        nonce_offset, NONCES_PER_THREAD, pool.nonces_processed, job_version);
+        nonce_offset, NONCES_PER_THREAD, job_version);
 
     // Check for launch errors
     err = cudaGetLastError();
