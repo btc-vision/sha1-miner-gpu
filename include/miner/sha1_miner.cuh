@@ -28,9 +28,11 @@
     #define NONCES_PER_THREAD         8192
     #define DEFAULT_THREADS_PER_BLOCK 256
 #else
-    #define NONCES_PER_THREAD         512  // 32768 16384 131072
+    #define NONCES_PER_THREAD         16384  // 32768 16384 131072
     #define DEFAULT_THREADS_PER_BLOCK 256
 #endif
+
+extern __constant__ uint32_t d_base_message[8];  // Always extern in header
 
 struct alignas(256) MiningJob
 {
@@ -167,8 +169,8 @@ struct DeviceMiningJob
         }
 
         target_hash = reinterpret_cast<uint32_t *>(temp_ptr);
-        fprintf(stderr, "[DeviceMiningJob] Successfully allocated target_hash at %p (alignment: %llu bytes)\n",
-                target_hash, (uintptr_t)target_hash % alignment);
+        fprintf(stderr, "[DeviceMiningJob] Successfully allocated target_hash at %p (alignment: %zu bytes)\n",
+                target_hash, (size_t)((uintptr_t)target_hash % alignment));
 
         // Verify alignment for target_hash
         if ((uintptr_t)target_hash % 16 != 0) {
@@ -189,8 +191,8 @@ struct DeviceMiningJob
 
         // Final alignment verification
         fprintf(stderr, "[DeviceMiningJob] Allocation successful - Final alignment check:\n");
-        fprintf(stderr, "  target_hash: %p (mod 16: %llu, mod 256: %llu)\n", target_hash, (uintptr_t)target_hash % 16,
-                (uintptr_t)target_hash % 256);
+        fprintf(stderr, "  target_hash: %p (mod 16: %zu, mod 256: %zu)\n", target_hash,
+                (size_t)((uintptr_t)target_hash % 16), (size_t)((uintptr_t)target_hash % 256));
 
         return true;
     }

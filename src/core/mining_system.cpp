@@ -11,7 +11,11 @@
 #include "config.hpp"
 #include "utilities.hpp"
 
-extern __constant__ uint32_t d_base_message[8];
+#ifdef USE_HIP
+extern "C" void update_base_message_hip(const uint32_t *base_msg_words);
+#else
+extern "C" void update_base_message_cuda(const uint32_t *base_msg_words);
+#endif
 
 // Global system instance
 std::unique_ptr<MiningSystem> g_mining_system;
@@ -774,22 +778,14 @@ void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t non
     uint64_t last_version    = last_updated_job_version.load();
     uint64_t current_version = current_job_version_.load();
     if (current_version != last_version) {
-        // Convert job.base_message (uint8_t[32]) to uint32_t[8] for constant memory
         uint32_t base_msg_words[8];
         memcpy(base_msg_words, job.base_message, 32);
-        // Copy to constant memory using platform-agnostic call
+
+// Copy to constant memory using platform-specific wrapper
 #ifdef USE_HIP
-        hipError_t err = hipMemcpyToSymbol(d_base_message, base_msg_words, 32);
-        if (err != hipSuccess) {
-            LOG_ERROR("MINING", "Failed to copy base message to constant memory: ", hipGetErrorString(err));
-            throw std::runtime_error("Constant memory copy failed");
-        }
+        update_base_message_hip(base_msg_words);
 #else
-        cudaError_t err = cudaMemcpyToSymbol(d_base_message, base_msg_words, 32);
-        if (err != cudaSuccess) {
-            LOG_ERROR("MINING", "Failed to copy base message to constant memory: ", cudaGetErrorString(err));
-            throw std::runtime_error("Constant memory copy failed");
-        }
+        update_base_message_cuda(base_msg_words);
 #endif
 
         // Store the new version

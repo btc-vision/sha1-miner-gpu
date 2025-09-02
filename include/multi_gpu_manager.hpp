@@ -40,10 +40,14 @@ public:
     MultiGPUManager();
     ~MultiGPUManager();
 
+    mutable std::mutex job_mutex_;
+    MiningJob current_job_;
+    std::atomic<uint64_t> current_job_version_{0};
+
     void setUserConfig(const void *user_config) { user_config_ = user_config; }
 
     void resetHashCounter() const;
- /**
+    /**
      * Initialize mining on specified GPUs
      * @param gpu_ids List of GPU device IDs to use
      * @return true if at least one GPU was initialized successfully
@@ -87,7 +91,7 @@ public:
      * @param job New mining job
      * @param job_version Version identifier for the new job
      */
-    void updateJobLive(const MiningJob &job, uint64_t job_version) const;
+    void updateJobLive(const MiningJob &job, uint64_t job_version);
 
     /**
      * Get combined statistics from all GPUs

@@ -429,16 +429,16 @@ else ()
     # It replaces the old, problematic `target_compile_options` from your original file.
     # We will use set_property to pass the flags directly to the CUDA compiler.
     set_property(TARGET gpu_kernel APPEND PROPERTY
-        CUDA_FLAGS
-        $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
-        $<$<COMPILE_LANGUAGE:CUDA>:-maxrregcount=0>
-        $<$<COMPILE_LANGUAGE:CUDA>:--extra-device-vectorization>
-        $<$<CONFIG:Release>:$<COMPILE_LANGUAGE:CUDA>:-O3>
-        $<$<CONFIG:Release>:$<COMPILE_LANGUAGE:CUDA>:-Xptxas>
-        $<$<CONFIG:Release>:$<COMPILE_LANGUAGE:CUDA>:-O3,-dlcm=ca,-dscm=wt>
-        $<$<CONFIG:Debug>:$<COMPILE_LANGUAGE:CUDA>:-O0>
-        $<$<CONFIG:Debug>:$<COMPILE_LANGUAGE:CUDA>:-G>
-        $<$<CONFIG:Debug>:$<COMPILE_LANGUAGE:CUDA>:-lineinfo>
+            CUDA_FLAGS
+            $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+            $<$<COMPILE_LANGUAGE:CUDA>:-maxrregcount=0>
+            $<$<COMPILE_LANGUAGE:CUDA>:--extra-device-vectorization>
+            $<$<CONFIG:Release>:$<COMPILE_LANGUAGE:CUDA>:-O3>
+            $<$<CONFIG:Release>:$<COMPILE_LANGUAGE:CUDA>:-Xptxas>
+            $<$<CONFIG:Release>:$<COMPILE_LANGUAGE:CUDA>:-O3,-dlcm=ca,-dscm=wt>
+            $<$<CONFIG:Debug>:$<COMPILE_LANGUAGE:CUDA>:-O0>
+            $<$<CONFIG:Debug>:$<COMPILE_LANGUAGE:CUDA>:-G>
+            $<$<CONFIG:Debug>:$<COMPILE_LANGUAGE:CUDA>:-lineinfo>
     )
 
     set(GPU_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})

@@ -4,6 +4,18 @@
 
 #include "sha1_miner.cuh"
 
+// Define the constant memory variable
+__constant__ uint32_t d_base_message[8];
+
+// Add this wrapper function
+extern "C" void update_base_message_cuda(const uint32_t *base_msg_words)
+{
+    cudaError_t err = cudaMemcpyToSymbol(d_base_message, base_msg_words, 32);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "Failed to copy base message to constant memory: %s\n", cudaGetErrorString(err));
+    }
+}
+
 // SHA-1 constants
 #define K0 0x5A827999
 #define K1 0x6ED9EBA1
@@ -141,8 +153,6 @@ __device__ __forceinline__ uint32_t count_leading_zeros_160bit(const uint32_t ha
                                  W1[(t - 3) & 15] ^ W1[(t - 8) & 15] ^ W1[(t - 14) & 15] ^ W1[(t - 16) & 15], 1);      \
     W2[t & 15] = __funnelshift_l(W2[(t - 3) & 15] ^ W2[(t - 8) & 15] ^ W2[(t - 14) & 15] ^ W2[(t - 16) & 15],          \
                                  W2[(t - 3) & 15] ^ W2[(t - 8) & 15] ^ W2[(t - 14) & 15] ^ W2[(t - 16) & 15], 1)
-
-__constant__ uint32_t d_base_message[8];
 
 __global__ void sha1_mining_kernel_nvidia(const uint32_t *__restrict__ target_hash, uint32_t difficulty,
                                           MiningResult *__restrict__ results, uint32_t *__restrict__ result_count,
