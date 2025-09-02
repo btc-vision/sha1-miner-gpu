@@ -430,13 +430,6 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
     // Each GPU will grab nonce batches from the shared counter
     constexpr uint64_t gpu_batch_size = NONCE_BATCH_SIZE;
 
-    // Store initial job
-    {
-        std::lock_guard<std::mutex> lock(job_mutex_);
-        current_job_ = job;
-        // Don't reset job version here - it's managed by updateJobLive
-    }
-
     // Track last job version to detect updates
     uint64_t last_job_version = current_job_version_.load();
 
