@@ -5,6 +5,7 @@
 
 // Define the constant memory variable
 __constant__ uint32_t d_base_message[8];
+__constant__ uint32_t d_pre_swapped_base[8];
 
 // Add this wrapper function
 extern "C" void update_base_message_hip(const uint32_t* base_msg_words) {

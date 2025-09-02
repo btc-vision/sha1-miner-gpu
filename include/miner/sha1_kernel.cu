@@ -4,13 +4,36 @@
 
 #include "sha1_miner.cuh"
 
-// Define the constant memory variable
+// Define the constant memory variables
 __constant__ uint32_t d_base_message[8];
+__constant__ uint32_t d_pre_swapped_base[8];
 
-// Add this wrapper function
+// CPU-side byte swap function
+inline uint32_t bswap32_cpu(uint32_t x)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_bswap32(x);
+#elif defined(_MSC_VER)
+    #include <stdlib.h>
+    return _byteswap_ulong(x);
+#else
+    // Portable fallback
+    return ((x & 0xFF000000) >> 24) | ((x & 0x00FF0000) >> 8) | ((x & 0x0000FF00) << 8) | ((x & 0x000000FF) << 24);
+#endif
+}
+
 extern "C" void update_base_message_cuda(const uint32_t *base_msg_words)
 {
-    cudaError_t err = cudaMemcpyToSymbol(d_base_message, base_msg_words, 32);
+    uint32_t pre_swapped[8];
+    for (int j = 0; j < 8; j++) {
+        pre_swapped[j] = bswap32_cpu(base_msg_words[j]);
+    }
+    cudaError_t err = cudaMemcpyToSymbol(d_pre_swapped_base, pre_swapped, sizeof(pre_swapped));
+    if (err != cudaSuccess) {
+        fprintf(stderr, "Failed to copy pre-swapped base message to constant memory: %s\n", cudaGetErrorString(err));
+    }
+
+    err = cudaMemcpyToSymbol(d_base_message, base_msg_words, 32);
     if (err != cudaSuccess) {
         fprintf(stderr, "Failed to copy base message to constant memory: %s\n", cudaGetErrorString(err));
     }
@@ -148,11 +171,61 @@ __device__ __forceinline__ uint32_t count_leading_zeros_160bit(const uint32_t ha
         a2             = temp2;                                                                                        \
     } while (0)
 
+// Message schedule macro adapted for scalars (using if for each index to avoid branches; since t is constant per call,
+// compiler optimizes)
 #define COMPUTE_W_DUAL(t)                                                                                              \
-    W1[t & 15] = __funnelshift_l(W1[(t - 3) & 15] ^ W1[(t - 8) & 15] ^ W1[(t - 14) & 15] ^ W1[(t - 16) & 15],          \
-                                 W1[(t - 3) & 15] ^ W1[(t - 8) & 15] ^ W1[(t - 14) & 15] ^ W1[(t - 16) & 15], 1);      \
-    W2[t & 15] = __funnelshift_l(W2[(t - 3) & 15] ^ W2[(t - 8) & 15] ^ W2[(t - 14) & 15] ^ W2[(t - 16) & 15],          \
-                                 W2[(t - 3) & 15] ^ W2[(t - 8) & 15] ^ W2[(t - 14) & 15] ^ W2[(t - 16) & 15], 1)
+    do {                                                                                                               \
+        uint32_t idx = (t) & 15;                                                                                       \
+        if (idx == 0) {                                                                                                \
+            W1_0 = __funnelshift_l(W1_13 ^ W1_8 ^ W1_2 ^ W1_0, W1_13 ^ W1_8 ^ W1_2 ^ W1_0, 1);                         \
+            W2_0 = __funnelshift_l(W2_13 ^ W2_8 ^ W2_2 ^ W2_0, W2_13 ^ W2_8 ^ W2_2 ^ W2_0, 1);                         \
+        } else if (idx == 1) {                                                                                         \
+            W1_1 = __funnelshift_l(W1_14 ^ W1_9 ^ W1_3 ^ W1_1, W1_14 ^ W1_9 ^ W1_3 ^ W1_1, 1);                         \
+            W2_1 = __funnelshift_l(W2_14 ^ W2_9 ^ W2_3 ^ W2_1, W2_14 ^ W2_9 ^ W2_3 ^ W2_1, 1);                         \
+        } else if (idx == 2) {                                                                                         \
+            W1_2 = __funnelshift_l(W1_15 ^ W1_10 ^ W1_4 ^ W1_2, W1_15 ^ W1_10 ^ W1_4 ^ W1_2, 1);                       \
+            W2_2 = __funnelshift_l(W2_15 ^ W2_10 ^ W2_4 ^ W2_2, W2_15 ^ W2_10 ^ W2_4 ^ W2_2, 1);                       \
+        } else if (idx == 3) {                                                                                         \
+            W1_3 = __funnelshift_l(W1_0 ^ W1_11 ^ W1_5 ^ W1_3, W1_0 ^ W1_11 ^ W1_5 ^ W1_3, 1);                         \
+            W2_3 = __funnelshift_l(W2_0 ^ W2_11 ^ W2_5 ^ W2_3, W2_0 ^ W2_11 ^ W2_5 ^ W2_3, 1);                         \
+        } else if (idx == 4) {                                                                                         \
+            W1_4 = __funnelshift_l(W1_1 ^ W1_12 ^ W1_6 ^ W1_4, W1_1 ^ W1_12 ^ W1_6 ^ W1_4, 1);                         \
+            W2_4 = __funnelshift_l(W2_1 ^ W2_12 ^ W2_6 ^ W2_4, W2_1 ^ W2_12 ^ W2_6 ^ W2_4, 1);                         \
+        } else if (idx == 5) {                                                                                         \
+            W1_5 = __funnelshift_l(W1_2 ^ W1_13 ^ W1_7 ^ W1_5, W1_2 ^ W1_13 ^ W1_7 ^ W1_5, 1);                         \
+            W2_5 = __funnelshift_l(W2_2 ^ W2_13 ^ W2_7 ^ W2_5, W2_2 ^ W2_13 ^ W2_7 ^ W2_5, 1);                         \
+        } else if (idx == 6) {                                                                                         \
+            W1_6 = __funnelshift_l(W1_3 ^ W1_14 ^ W1_8 ^ W1_6, W1_3 ^ W1_14 ^ W1_8 ^ W1_6, 1);                         \
+            W2_6 = __funnelshift_l(W2_3 ^ W2_14 ^ W2_8 ^ W2_6, W2_3 ^ W2_14 ^ W2_8 ^ W2_6, 1);                         \
+        } else if (idx == 7) {                                                                                         \
+            W1_7 = __funnelshift_l(W1_4 ^ W1_15 ^ W1_9 ^ W1_7, W1_4 ^ W1_15 ^ W1_9 ^ W1_7, 1);                         \
+            W2_7 = __funnelshift_l(W2_4 ^ W2_15 ^ W2_9 ^ W2_7, W2_4 ^ W2_15 ^ W2_9 ^ W2_7, 1);                         \
+        } else if (idx == 8) {                                                                                         \
+            W1_8 = __funnelshift_l(W1_5 ^ W1_0 ^ W1_10 ^ W1_8, W1_5 ^ W1_0 ^ W1_10 ^ W1_8, 1);                         \
+            W2_8 = __funnelshift_l(W2_5 ^ W2_0 ^ W2_10 ^ W2_8, W2_5 ^ W2_0 ^ W2_10 ^ W2_8, 1);                         \
+        } else if (idx == 9) {                                                                                         \
+            W1_9 = __funnelshift_l(W1_6 ^ W1_1 ^ W1_11 ^ W1_9, W1_6 ^ W1_1 ^ W1_11 ^ W1_9, 1);                         \
+            W2_9 = __funnelshift_l(W2_6 ^ W2_1 ^ W2_11 ^ W2_9, W2_6 ^ W2_1 ^ W2_11 ^ W2_9, 1);                         \
+        } else if (idx == 10) {                                                                                        \
+            W1_10 = __funnelshift_l(W1_7 ^ W1_2 ^ W1_12 ^ W1_10, W1_7 ^ W1_2 ^ W1_12 ^ W1_10, 1);                      \
+            W2_10 = __funnelshift_l(W2_7 ^ W2_2 ^ W2_12 ^ W2_10, W2_7 ^ W2_2 ^ W2_12 ^ W2_10, 1);                      \
+        } else if (idx == 11) {                                                                                        \
+            W1_11 = __funnelshift_l(W1_8 ^ W1_3 ^ W1_13 ^ W1_11, W1_8 ^ W1_3 ^ W1_13 ^ W1_11, 1);                      \
+            W2_11 = __funnelshift_l(W2_8 ^ W2_3 ^ W2_13 ^ W2_11, W2_8 ^ W2_3 ^ W2_13 ^ W2_11, 1);                      \
+        } else if (idx == 12) {                                                                                        \
+            W1_12 = __funnelshift_l(W1_9 ^ W1_4 ^ W1_14 ^ W1_12, W1_9 ^ W1_4 ^ W1_14 ^ W1_12, 1);                      \
+            W2_12 = __funnelshift_l(W2_9 ^ W2_4 ^ W2_14 ^ W2_12, W2_9 ^ W2_4 ^ W2_14 ^ W2_12, 1);                      \
+        } else if (idx == 13) {                                                                                        \
+            W1_13 = __funnelshift_l(W1_10 ^ W1_5 ^ W1_15 ^ W1_13, W1_10 ^ W1_5 ^ W1_15 ^ W1_13, 1);                    \
+            W2_13 = __funnelshift_l(W2_10 ^ W2_5 ^ W2_15 ^ W2_13, W2_10 ^ W2_5 ^ W2_15 ^ W2_13, 1);                    \
+        } else if (idx == 14) {                                                                                        \
+            W1_14 = __funnelshift_l(W1_11 ^ W1_6 ^ W1_0 ^ W1_14, W1_11 ^ W1_6 ^ W1_0 ^ W1_14, 1);                      \
+            W2_14 = __funnelshift_l(W2_11 ^ W2_6 ^ W2_0 ^ W2_14, W2_11 ^ W2_6 ^ W2_0 ^ W2_14, 1);                      \
+        } else if (idx == 15) {                                                                                        \
+            W1_15 = __funnelshift_l(W1_12 ^ W1_7 ^ W1_1 ^ W1_15, W1_12 ^ W1_7 ^ W1_1 ^ W1_15, 1);                      \
+            W2_15 = __funnelshift_l(W2_12 ^ W2_7 ^ W2_1 ^ W2_15, W2_12 ^ W2_7 ^ W2_1 ^ W2_15, 1);                      \
+        }                                                                                                              \
+    } while (0)
 
 __global__ void sha1_mining_kernel_nvidia(const uint32_t *__restrict__ target_hash, uint32_t difficulty,
                                           MiningResult *__restrict__ results, uint32_t *__restrict__ result_count,
@@ -180,58 +253,52 @@ __global__ void sha1_mining_kernel_nvidia(const uint32_t *__restrict__ target_ha
         if (nonce2 == 0)
             nonce2 = thread_nonce_base + nonces_per_thread + 1;
 
-        // Create messages with both nonces
-        uint32_t msg_words1[8], msg_words2[8];
-#pragma unroll
-        for (int j = 0; j < 8; j++) {
-            msg_words1[j] = d_base_message[j];
-            msg_words2[j] = d_base_message[j];
-        }
+        // Scalar W variables for both hashes
+        uint32_t W1_0, W1_1, W1_2, W1_3, W1_4, W1_5, W1_6, W1_7, W1_8, W1_9, W1_10, W1_11, W1_12, W1_13, W1_14, W1_15;
+        uint32_t W2_0, W2_1, W2_2, W2_3, W2_4, W2_5, W2_6, W2_7, W2_8, W2_9, W2_10, W2_11, W2_12, W2_13, W2_14, W2_15;
 
-        // Apply nonces
-        msg_words1[6] ^= bswap32_ptx(nonce1 >> 32);
-        msg_words1[7] ^= bswap32_ptx(nonce1 & 0xFFFFFFFF);
-        msg_words2[6] ^= bswap32_ptx(nonce2 >> 32);
-        msg_words2[7] ^= bswap32_ptx(nonce2 & 0xFFFFFFFF);
+        // Set fixed pre-swapped parts for 0-5 (same for both)
+        W1_0 = d_pre_swapped_base[0];
+        W2_0 = d_pre_swapped_base[0];
+        W1_1 = d_pre_swapped_base[1];
+        W2_1 = d_pre_swapped_base[1];
+        W1_2 = d_pre_swapped_base[2];
+        W2_2 = d_pre_swapped_base[2];
+        W1_3 = d_pre_swapped_base[3];
+        W2_3 = d_pre_swapped_base[3];
+        W1_4 = d_pre_swapped_base[4];
+        W2_4 = d_pre_swapped_base[4];
+        W1_5 = d_pre_swapped_base[5];
+        W2_5 = d_pre_swapped_base[5];
 
-        // Prepare W arrays for both hashes
-        uint32_t W1[16], W2[16];
+        // Set varying parts for 6-7 using pre-swapped base and direct nonce XOR (no bswap needed due to precompute)
+        uint32_t nonce1_high = static_cast<uint32_t>(nonce1 >> 32);
+        uint32_t nonce1_low  = static_cast<uint32_t>(nonce1 & 0xFFFFFFFF);
+        W1_6                 = d_pre_swapped_base[6] ^ nonce1_high;
+        W1_7                 = d_pre_swapped_base[7] ^ nonce1_low;
 
-        // Unrolled byte swap for both
-        W1[0] = bswap32_ptx(msg_words1[0]);
-        W2[0] = bswap32_ptx(msg_words2[0]);
-        W1[1] = bswap32_ptx(msg_words1[1]);
-        W2[1] = bswap32_ptx(msg_words2[1]);
-        W1[2] = bswap32_ptx(msg_words1[2]);
-        W2[2] = bswap32_ptx(msg_words2[2]);
-        W1[3] = bswap32_ptx(msg_words1[3]);
-        W2[3] = bswap32_ptx(msg_words2[3]);
-        W1[4] = bswap32_ptx(msg_words1[4]);
-        W2[4] = bswap32_ptx(msg_words2[4]);
-        W1[5] = bswap32_ptx(msg_words1[5]);
-        W2[5] = bswap32_ptx(msg_words2[5]);
-        W1[6] = bswap32_ptx(msg_words1[6]);
-        W2[6] = bswap32_ptx(msg_words2[6]);
-        W1[7] = bswap32_ptx(msg_words1[7]);
-        W2[7] = bswap32_ptx(msg_words2[7]);
+        uint32_t nonce2_high = static_cast<uint32_t>(nonce2 >> 32);
+        uint32_t nonce2_low  = static_cast<uint32_t>(nonce2 & 0xFFFFFFFF);
+        W2_6                 = d_pre_swapped_base[6] ^ nonce2_high;
+        W2_7                 = d_pre_swapped_base[7] ^ nonce2_low;
 
         // Apply padding to both
-        W1[8]  = 0x80000000;
-        W2[8]  = 0x80000000;
-        W1[9]  = 0;
-        W2[9]  = 0;
-        W1[10] = 0;
-        W2[10] = 0;
-        W1[11] = 0;
-        W2[11] = 0;
-        W1[12] = 0;
-        W2[12] = 0;
-        W1[13] = 0;
-        W2[13] = 0;
-        W1[14] = 0;
-        W2[14] = 0;
-        W1[15] = 0x00000100;
-        W2[15] = 0x00000100;
+        W1_8  = 0x80000000;
+        W2_8  = 0x80000000;
+        W1_9  = 0;
+        W2_9  = 0;
+        W1_10 = 0;
+        W2_10 = 0;
+        W1_11 = 0;
+        W2_11 = 0;
+        W1_12 = 0;
+        W2_12 = 0;
+        W1_13 = 0;
+        W2_13 = 0;
+        W1_14 = 0;
+        W2_14 = 0;
+        W1_15 = 0x00000100;
+        W2_15 = 0x00000100;
 
         // Initialize working variables for both hashes
         uint32_t a1 = H0_0, a2 = H0_0;
@@ -242,158 +309,158 @@ __global__ void sha1_mining_kernel_nvidia(const uint32_t *__restrict__ target_ha
 
         // FULLY UNROLLED DUAL SHA-1 rounds
         // Rounds 0-15 (no message schedule needed)
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[0], a2, b2, c2, d2, e2, W2[0]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[1], a2, b2, c2, d2, e2, W2[1]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[2], a2, b2, c2, d2, e2, W2[2]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[3], a2, b2, c2, d2, e2, W2[3]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[4], a2, b2, c2, d2, e2, W2[4]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[5], a2, b2, c2, d2, e2, W2[5]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[6], a2, b2, c2, d2, e2, W2[6]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[7], a2, b2, c2, d2, e2, W2[7]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[8], a2, b2, c2, d2, e2, W2[8]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[9], a2, b2, c2, d2, e2, W2[9]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[10], a2, b2, c2, d2, e2, W2[10]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[11], a2, b2, c2, d2, e2, W2[11]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[12], a2, b2, c2, d2, e2, W2[12]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[13], a2, b2, c2, d2, e2, W2[13]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[14], a2, b2, c2, d2, e2, W2[14]);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[15], a2, b2, c2, d2, e2, W2[15]);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_0, a2, b2, c2, d2, e2, W2_0);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_1, a2, b2, c2, d2, e2, W2_1);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_2, a2, b2, c2, d2, e2, W2_2);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_3, a2, b2, c2, d2, e2, W2_3);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_4, a2, b2, c2, d2, e2, W2_4);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_5, a2, b2, c2, d2, e2, W2_5);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_6, a2, b2, c2, d2, e2, W2_6);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_7, a2, b2, c2, d2, e2, W2_7);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_8, a2, b2, c2, d2, e2, W2_8);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_9, a2, b2, c2, d2, e2, W2_9);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_10, a2, b2, c2, d2, e2, W2_10);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_11, a2, b2, c2, d2, e2, W2_11);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_12, a2, b2, c2, d2, e2, W2_12);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_13, a2, b2, c2, d2, e2, W2_13);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_14, a2, b2, c2, d2, e2, W2_14);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_15, a2, b2, c2, d2, e2, W2_15);
 
         // Rounds 16-19 with message schedule
         COMPUTE_W_DUAL(16);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[0], a2, b2, c2, d2, e2, W2[0]);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_0, a2, b2, c2, d2, e2, W2_0);
         COMPUTE_W_DUAL(17);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[1], a2, b2, c2, d2, e2, W2[1]);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_1, a2, b2, c2, d2, e2, W2_1);
         COMPUTE_W_DUAL(18);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[2], a2, b2, c2, d2, e2, W2[2]);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_2, a2, b2, c2, d2, e2, W2_2);
         COMPUTE_W_DUAL(19);
-        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1[3], a2, b2, c2, d2, e2, W2[3]);
+        SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_3, a2, b2, c2, d2, e2, W2_3);
 
         // Rounds 20-39
         COMPUTE_W_DUAL(20);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[4], a2, b2, c2, d2, e2, W2[4]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_4, a2, b2, c2, d2, e2, W2_4);
         COMPUTE_W_DUAL(21);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[5], a2, b2, c2, d2, e2, W2[5]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_5, a2, b2, c2, d2, e2, W2_5);
         COMPUTE_W_DUAL(22);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[6], a2, b2, c2, d2, e2, W2[6]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_6, a2, b2, c2, d2, e2, W2_6);
         COMPUTE_W_DUAL(23);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[7], a2, b2, c2, d2, e2, W2[7]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_7, a2, b2, c2, d2, e2, W2_7);
         COMPUTE_W_DUAL(24);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[8], a2, b2, c2, d2, e2, W2[8]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_8, a2, b2, c2, d2, e2, W2_8);
         COMPUTE_W_DUAL(25);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[9], a2, b2, c2, d2, e2, W2[9]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_9, a2, b2, c2, d2, e2, W2_9);
         COMPUTE_W_DUAL(26);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[10], a2, b2, c2, d2, e2, W2[10]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_10, a2, b2, c2, d2, e2, W2_10);
         COMPUTE_W_DUAL(27);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[11], a2, b2, c2, d2, e2, W2[11]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_11, a2, b2, c2, d2, e2, W2_11);
         COMPUTE_W_DUAL(28);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[12], a2, b2, c2, d2, e2, W2[12]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_12, a2, b2, c2, d2, e2, W2_12);
         COMPUTE_W_DUAL(29);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[13], a2, b2, c2, d2, e2, W2[13]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_13, a2, b2, c2, d2, e2, W2_13);
         COMPUTE_W_DUAL(30);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[14], a2, b2, c2, d2, e2, W2[14]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_14, a2, b2, c2, d2, e2, W2_14);
         COMPUTE_W_DUAL(31);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[15], a2, b2, c2, d2, e2, W2[15]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_15, a2, b2, c2, d2, e2, W2_15);
         COMPUTE_W_DUAL(32);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[0], a2, b2, c2, d2, e2, W2[0]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_0, a2, b2, c2, d2, e2, W2_0);
         COMPUTE_W_DUAL(33);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[1], a2, b2, c2, d2, e2, W2[1]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_1, a2, b2, c2, d2, e2, W2_1);
         COMPUTE_W_DUAL(34);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[2], a2, b2, c2, d2, e2, W2[2]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_2, a2, b2, c2, d2, e2, W2_2);
         COMPUTE_W_DUAL(35);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[3], a2, b2, c2, d2, e2, W2[3]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_3, a2, b2, c2, d2, e2, W2_3);
         COMPUTE_W_DUAL(36);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[4], a2, b2, c2, d2, e2, W2[4]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_4, a2, b2, c2, d2, e2, W2_4);
         COMPUTE_W_DUAL(37);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[5], a2, b2, c2, d2, e2, W2[5]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_5, a2, b2, c2, d2, e2, W2_5);
         COMPUTE_W_DUAL(38);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[6], a2, b2, c2, d2, e2, W2[6]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_6, a2, b2, c2, d2, e2, W2_6);
         COMPUTE_W_DUAL(39);
-        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1[7], a2, b2, c2, d2, e2, W2[7]);
+        SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_7, a2, b2, c2, d2, e2, W2_7);
 
         // Rounds 40-59
         COMPUTE_W_DUAL(40);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[8], a2, b2, c2, d2, e2, W2[8]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_8, a2, b2, c2, d2, e2, W2_8);
         COMPUTE_W_DUAL(41);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[9], a2, b2, c2, d2, e2, W2[9]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_9, a2, b2, c2, d2, e2, W2_9);
         COMPUTE_W_DUAL(42);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[10], a2, b2, c2, d2, e2, W2[10]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_10, a2, b2, c2, d2, e2, W2_10);
         COMPUTE_W_DUAL(43);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[11], a2, b2, c2, d2, e2, W2[11]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_11, a2, b2, c2, d2, e2, W2_11);
         COMPUTE_W_DUAL(44);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[12], a2, b2, c2, d2, e2, W2[12]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_12, a2, b2, c2, d2, e2, W2_12);
         COMPUTE_W_DUAL(45);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[13], a2, b2, c2, d2, e2, W2[13]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_13, a2, b2, c2, d2, e2, W2_13);
         COMPUTE_W_DUAL(46);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[14], a2, b2, c2, d2, e2, W2[14]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_14, a2, b2, c2, d2, e2, W2_14);
         COMPUTE_W_DUAL(47);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[15], a2, b2, c2, d2, e2, W2[15]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_15, a2, b2, c2, d2, e2, W2_15);
         COMPUTE_W_DUAL(48);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[0], a2, b2, c2, d2, e2, W2[0]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_0, a2, b2, c2, d2, e2, W2_0);
         COMPUTE_W_DUAL(49);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[1], a2, b2, c2, d2, e2, W2[1]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_1, a2, b2, c2, d2, e2, W2_1);
         COMPUTE_W_DUAL(50);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[2], a2, b2, c2, d2, e2, W2[2]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_2, a2, b2, c2, d2, e2, W2_2);
         COMPUTE_W_DUAL(51);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[3], a2, b2, c2, d2, e2, W2[3]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_3, a2, b2, c2, d2, e2, W2_3);
         COMPUTE_W_DUAL(52);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[4], a2, b2, c2, d2, e2, W2[4]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_4, a2, b2, c2, d2, e2, W2_4);
         COMPUTE_W_DUAL(53);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[5], a2, b2, c2, d2, e2, W2[5]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_5, a2, b2, c2, d2, e2, W2_5);
         COMPUTE_W_DUAL(54);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[6], a2, b2, c2, d2, e2, W2[6]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_6, a2, b2, c2, d2, e2, W2_6);
         COMPUTE_W_DUAL(55);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[7], a2, b2, c2, d2, e2, W2[7]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_7, a2, b2, c2, d2, e2, W2_7);
         COMPUTE_W_DUAL(56);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[8], a2, b2, c2, d2, e2, W2[8]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_8, a2, b2, c2, d2, e2, W2_8);
         COMPUTE_W_DUAL(57);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[9], a2, b2, c2, d2, e2, W2[9]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_9, a2, b2, c2, d2, e2, W2_9);
         COMPUTE_W_DUAL(58);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[10], a2, b2, c2, d2, e2, W2[10]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_10, a2, b2, c2, d2, e2, W2_10);
         COMPUTE_W_DUAL(59);
-        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1[11], a2, b2, c2, d2, e2, W2[11]);
+        SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_11, a2, b2, c2, d2, e2, W2_11);
 
         // Rounds 60-79
         COMPUTE_W_DUAL(60);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[12], a2, b2, c2, d2, e2, W2[12]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_12, a2, b2, c2, d2, e2, W2_12);
         COMPUTE_W_DUAL(61);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[13], a2, b2, c2, d2, e2, W2[13]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_13, a2, b2, c2, d2, e2, W2_13);
         COMPUTE_W_DUAL(62);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[14], a2, b2, c2, d2, e2, W2[14]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_14, a2, b2, c2, d2, e2, W2_14);
         COMPUTE_W_DUAL(63);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[15], a2, b2, c2, d2, e2, W2[15]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_15, a2, b2, c2, d2, e2, W2_15);
         COMPUTE_W_DUAL(64);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[0], a2, b2, c2, d2, e2, W2[0]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_0, a2, b2, c2, d2, e2, W2_0);
         COMPUTE_W_DUAL(65);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[1], a2, b2, c2, d2, e2, W2[1]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_1, a2, b2, c2, d2, e2, W2_1);
         COMPUTE_W_DUAL(66);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[2], a2, b2, c2, d2, e2, W2[2]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_2, a2, b2, c2, d2, e2, W2_2);
         COMPUTE_W_DUAL(67);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[3], a2, b2, c2, d2, e2, W2[3]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_3, a2, b2, c2, d2, e2, W2_3);
         COMPUTE_W_DUAL(68);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[4], a2, b2, c2, d2, e2, W2[4]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_4, a2, b2, c2, d2, e2, W2_4);
         COMPUTE_W_DUAL(69);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[5], a2, b2, c2, d2, e2, W2[5]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_5, a2, b2, c2, d2, e2, W2_5);
         COMPUTE_W_DUAL(70);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[6], a2, b2, c2, d2, e2, W2[6]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_6, a2, b2, c2, d2, e2, W2_6);
         COMPUTE_W_DUAL(71);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[7], a2, b2, c2, d2, e2, W2[7]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_7, a2, b2, c2, d2, e2, W2_7);
         COMPUTE_W_DUAL(72);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[8], a2, b2, c2, d2, e2, W2[8]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_8, a2, b2, c2, d2, e2, W2_8);
         COMPUTE_W_DUAL(73);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[9], a2, b2, c2, d2, e2, W2[9]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_9, a2, b2, c2, d2, e2, W2_9);
         COMPUTE_W_DUAL(74);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[10], a2, b2, c2, d2, e2, W2[10]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_10, a2, b2, c2, d2, e2, W2_10);
         COMPUTE_W_DUAL(75);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[11], a2, b2, c2, d2, e2, W2[11]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_11, a2, b2, c2, d2, e2, W2_11);
         COMPUTE_W_DUAL(76);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[12], a2, b2, c2, d2, e2, W2[12]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_12, a2, b2, c2, d2, e2, W2_12);
         COMPUTE_W_DUAL(77);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[13], a2, b2, c2, d2, e2, W2[13]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_13, a2, b2, c2, d2, e2, W2_13);
         COMPUTE_W_DUAL(78);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[14], a2, b2, c2, d2, e2, W2[14]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_14, a2, b2, c2, d2, e2, W2_14);
         COMPUTE_W_DUAL(79);
-        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1[15], a2, b2, c2, d2, e2, W2[15]);
+        SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_15, a2, b2, c2, d2, e2, W2_15);
 
         // Final hash values for both
         uint32_t hash1[5], hash2[5];

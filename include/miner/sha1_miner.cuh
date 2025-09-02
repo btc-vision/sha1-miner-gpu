@@ -32,7 +32,8 @@
     #define DEFAULT_THREADS_PER_BLOCK 256
 #endif
 
-extern __constant__ uint32_t d_base_message[8];  // Always extern in header
+extern __constant__ uint32_t d_base_message[8];
+extern __constant__ uint32_t d_pre_swapped_base[8];
 
 struct alignas(256) MiningJob
 {
