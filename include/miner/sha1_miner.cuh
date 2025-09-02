@@ -28,11 +28,13 @@
     #define NONCES_PER_THREAD         8192
     #define DEFAULT_THREADS_PER_BLOCK 256
 #else
-    #define NONCES_PER_THREAD         16384
+    #define NONCES_PER_THREAD         16384  // 32768 16384 131072
     #define DEFAULT_THREADS_PER_BLOCK 256
 #endif
 
-struct MiningJob
+extern __constant__ uint32_t d_base_message[8];  // Always extern in header
+
+struct alignas(256) MiningJob
 {
     uint8_t base_message[32];  // Base message to modify
     uint32_t target_hash[5];   // Target hash we're trying to match
@@ -41,13 +43,14 @@ struct MiningJob
 };
 
 // Result structure for found candidates
-struct MiningResult
+struct alignas(16) MiningResult
 {
-    uint64_t nonce;             // The nonce that produced this result
-    uint32_t hash[5];           // The resulting hash
-    uint32_t matching_bits;     // Number of bits matching the target
-    uint32_t difficulty_score;  // Additional difficulty metric
-    uint64_t job_version;       // Job version for this result
+    uint64_t nonce;
+    uint32_t hash[5];
+    uint32_t matching_bits;
+    uint32_t difficulty_score;
+    uint64_t job_version;
+    uint32_t padding[1];
 };
 
 // GPU memory pool for results
@@ -82,10 +85,9 @@ struct KernelConfig
 
 struct DeviceMiningJob
 {
-    uint8_t *base_message;
     uint32_t *target_hash;
 
-    DeviceMiningJob() : base_message(nullptr), target_hash(nullptr) {}
+    DeviceMiningJob() : target_hash(nullptr) {}
 
     ~DeviceMiningJob() { free(); }
 
@@ -112,13 +114,20 @@ struct DeviceMiningJob
                     free_mem / (1024 * 1024), total_mem / (1024 * 1024));
         }
 
-        // Allocate base_message (32 bytes)
-        fprintf(stderr, "[DeviceMiningJob] Allocating 32 bytes for base_message...\n");
-        err = gpuMalloc(&base_message, 32);
+        // Define alignment requirements
+        constexpr size_t alignment = 256;
+
+        // Allocate base_message with proper alignment
+        // Round up to alignment boundary
+        constexpr size_t base_msg_aligned_size = ((32 + alignment - 1) / alignment) * alignment;
+        fprintf(stderr, "[DeviceMiningJob] Allocating %zu bytes (aligned from 32) for base_message...\n",
+                base_msg_aligned_size);
+
+        void *temp_ptr = nullptr;
+        err            = gpuMalloc(&temp_ptr, base_msg_aligned_size);
         if (err != gpuSuccess) {
             fprintf(stderr, "[DeviceMiningJob] ERROR: Failed to allocate base_message: %s (error code: %d)\n",
                     gpuGetErrorString(err), err);
-            base_message = nullptr;
 
             // Try to understand why allocation failed
 #ifdef USE_HIP
@@ -144,54 +153,52 @@ struct DeviceMiningJob
 #endif
             return false;
         }
-        fprintf(stderr, "[DeviceMiningJob] Successfully allocated base_message at %p\n", base_message);
+        // Allocate target_hash with proper alignment
+        size_t target_size         = 5 * sizeof(uint32_t);  // 20 bytes
+        size_t target_aligned_size = ((target_size + alignment - 1) / alignment) * alignment;
+        fprintf(stderr, "[DeviceMiningJob] Allocating %zu bytes (aligned from %zu) for target_hash...\n",
+                target_aligned_size, target_size);
 
-        // Allocate target_hash (20 bytes = 5 * sizeof(uint32_t))
-        size_t target_size = 5 * sizeof(uint32_t);
-        fprintf(stderr, "[DeviceMiningJob] Allocating %zu bytes for target_hash...\n", target_size);
-        err = gpuMalloc(&target_hash, target_size);
+        temp_ptr = nullptr;
+        err      = gpuMalloc(&temp_ptr, target_aligned_size);
         if (err != gpuSuccess) {
             fprintf(stderr, "[DeviceMiningJob] ERROR: Failed to allocate target_hash: %s (error code: %d)\n",
                     gpuGetErrorString(err), err);
-            // Free the successfully allocated base_message
-            gpuFree(base_message);
-            base_message = nullptr;
-            target_hash  = nullptr;
+            target_hash = nullptr;
             return false;
         }
-        fprintf(stderr, "[DeviceMiningJob] Successfully allocated target_hash at %p\n", target_hash);
+
+        target_hash = reinterpret_cast<uint32_t *>(temp_ptr);
+        fprintf(stderr, "[DeviceMiningJob] Successfully allocated target_hash at %p (alignment: %zu bytes)\n",
+                target_hash, (size_t)((uintptr_t)target_hash % alignment));
+
+        // Verify alignment for target_hash
+        if ((uintptr_t)target_hash % 16 != 0) {
+            fprintf(stderr, "[DeviceMiningJob] WARNING: target_hash not 16-byte aligned for uint4 access!\n");
+        }
 
         // Verify allocations
-        if (!base_message || !target_hash) {
+        if (!target_hash) {
             fprintf(stderr, "[DeviceMiningJob] ERROR: Pointers are null after allocation\n");
             free();
             return false;
         }
 
-        // Clear the allocated memory
-        err = gpuMemset(base_message, 0, 32);
-        if (err != gpuSuccess) {
-            fprintf(stderr, "[DeviceMiningJob] Warning: Failed to clear base_message: %s\n", gpuGetErrorString(err));
-        }
-
-        err = gpuMemset(target_hash, 0, target_size);
+        err = gpuMemset(target_hash, 0, target_aligned_size);
         if (err != gpuSuccess) {
             fprintf(stderr, "[DeviceMiningJob] Warning: Failed to clear target_hash: %s\n", gpuGetErrorString(err));
         }
 
-        fprintf(stderr, "[DeviceMiningJob] Allocation successful\n");
+        // Final alignment verification
+        fprintf(stderr, "[DeviceMiningJob] Allocation successful - Final alignment check:\n");
+        fprintf(stderr, "  target_hash: %p (mod 16: %zu, mod 256: %zu)\n", target_hash,
+                (size_t)((uintptr_t)target_hash % 16), (size_t)((uintptr_t)target_hash % 256));
+
         return true;
     }
 
     void free()
     {
-        if (base_message) {
-            gpuError_t err = gpuFree(base_message);
-            if (err != gpuSuccess) {
-                fprintf(stderr, "[DeviceMiningJob] Warning: Failed to free base_message: %s\n", gpuGetErrorString(err));
-            }
-            base_message = nullptr;
-        }
         if (target_hash) {
             gpuError_t err = gpuFree(target_hash);
             if (err != gpuSuccess) {
@@ -203,16 +210,12 @@ struct DeviceMiningJob
 
     void copyFromHost(const MiningJob &job) const
     {
-        if (!base_message || !target_hash) {
-            fprintf(stderr, "[DeviceMiningJob] Error: Not allocated (base_message=%p, target_hash=%p)\n", base_message,
-                    target_hash);
+        if (!target_hash) {
+            fprintf(stderr, "[DeviceMiningJob] Error: Not allocated (target_hash=%p)\n", target_hash);
             return;
         }
-        gpuError_t err = gpuMemcpy(base_message, job.base_message, 32, gpuMemcpyHostToDevice);
-        if (err != gpuSuccess) {
-            fprintf(stderr, "[DeviceMiningJob] Failed to copy base_message: %s\n", gpuGetErrorString(err));
-        }
-        err = gpuMemcpy(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice);
+
+        gpuError_t err = gpuMemcpy(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice);
         if (err != gpuSuccess) {
             fprintf(stderr, "[DeviceMiningJob] Failed to copy target_hash: %s\n", gpuGetErrorString(err));
         }
@@ -220,15 +223,13 @@ struct DeviceMiningJob
 
     void copyFromHostAsync(const MiningJob &job, gpuStream_t stream) const
     {
-        if (!base_message || !target_hash) {
+        if (!target_hash) {
             fprintf(stderr, "[DeviceMiningJob] Error: Not allocated\n");
             return;
         }
-        gpuError_t err = gpuMemcpyAsync(base_message, job.base_message, 32, gpuMemcpyHostToDevice, stream);
-        if (err != gpuSuccess) {
-            fprintf(stderr, "[DeviceMiningJob] Failed to async copy base_message: %s\n", gpuGetErrorString(err));
-        }
-        err = gpuMemcpyAsync(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice, stream);
+
+        gpuError_t err =
+            gpuMemcpyAsync(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice, stream);
         if (err != gpuSuccess) {
             fprintf(stderr, "[DeviceMiningJob] Failed to async copy target_hash: %s\n", gpuGetErrorString(err));
         }
@@ -236,7 +237,7 @@ struct DeviceMiningJob
 
     void updateFromHost(const MiningJob &job) const { copyFromHost(job); }
 
-    bool isAllocated() const { return base_message != nullptr && target_hash != nullptr; }
+    bool isAllocated() const { return target_hash != nullptr; }
 };
 
 // API functions - Host side
@@ -249,7 +250,7 @@ extern "C"
 
     void cleanup_mining_system();
 
-    void run_mining_loop(MiningJob job);
+    void run_mining_loop(const MiningJob &job);
 
 #ifdef __cplusplus
 }

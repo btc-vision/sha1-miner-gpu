@@ -93,6 +93,8 @@ public:
 
     bool validateStreams() const;
 
+    void resetHashCounter();
+
     /**
      * Stop all mining operations
      */
@@ -213,6 +215,9 @@ public:
     void updateJobLive(const MiningJob &job, uint64_t job_version);
 
 private:
+    std::atomic<uint64_t> hashes_since_reset_{0};
+    std::chrono::steady_clock::time_point hashrate_start_time_;
+
     const void *user_config_ = nullptr;
 
     struct UserSpecifiedFlags
@@ -258,7 +263,6 @@ private:
         uint64_t nonce_offset;
         bool busy;
         std::chrono::high_resolution_clock::time_point launch_time;
-        //uint64_t last_nonces_processed;
     };
 
     std::atomic<uint64_t> current_job_version_{0};

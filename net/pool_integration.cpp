@@ -970,37 +970,26 @@ namespace MiningPool {
     {
         std::lock_guard lock(stats_mutex_);
 
-        // Calculate actual elapsed time
-        const auto now     = std::chrono::steady_clock::now();
-        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
+        const auto now = std::chrono::steady_clock::now();
+
         if (mining_system_) {
-            // Single GPU - get total hashes, not the rate
+            // Single GPU - get stats directly from mining system
             const auto mining_stats = mining_system_->getStats();
             stats_.total_hashes     = mining_stats.hashes_computed;
-
-            // Calculate hashrate based on actual elapsed time
-            if (elapsed.count() > 0) {
-                stats_.hashrate = static_cast<double>(stats_.total_hashes) / elapsed.count();
-            } else {
-                stats_.hashrate = 0.0;
-            }
+            stats_.hashrate         = mining_stats.hash_rate;  // Use the mining system's calculated rate directly
         } else if (multi_gpu_manager_) {
-            // Multi-GPU - get total hashes
+            // Multi-GPU - get aggregated stats
             stats_.total_hashes = multi_gpu_manager_->getTotalHashes();
-
-            // Calculate hashrate based on actual elapsed time
-            if (elapsed.count() > 0) {
-                stats_.hashrate = static_cast<double>(stats_.total_hashes) / elapsed.count();
-            } else {
-                stats_.hashrate = 0.0;
-            }
+            stats_.hashrate     = multi_gpu_manager_->getTotalHashRate();  // Use the manager's calculated rate
         }
 
         // Update current difficulty from the actual job
         stats_.current_difficulty = current_difficulty_.load();
+        stats_.current_bits       = current_difficulty_.load();  // Same value, just for clarity
 
         // Update uptime
-        stats_.uptime = elapsed;
+        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
+        stats_.uptime      = elapsed;
 
         // Calculate share success rate
         if (stats_.shares_submitted > 0) {
@@ -1011,8 +1000,8 @@ namespace MiningPool {
 
         // Log nonce progress periodically
         static uint64_t last_logged_nonce = 0;
-        if (const uint64_t current_nonce = global_nonce_offset_.load();
-            current_nonce - last_logged_nonce > 1000000000) {
+        const uint64_t current_nonce      = global_nonce_offset_.load();
+        if (current_nonce - last_logged_nonce > 1000000000) {
             // Log every billion nonces
             LOG_DEBUG("POOL", "Nonce progress: ", current_nonce, " (", (current_nonce / 1000000000.0), " billion)");
             last_logged_nonce = current_nonce;
@@ -1142,12 +1131,14 @@ namespace MiningPool {
             if (multi_gpu_manager_) {
                 multi_gpu_manager_->stopMining();
                 multi_gpu_manager_->sync();
+                multi_gpu_manager_->resetHashCounter();
                 // Ensure all workers have the new job version
                 MiningJob temp_job{};
                 multi_gpu_manager_->updateJobLive(temp_job, new_version);
             } else if (mining_system_) {
                 mining_system_->stopMining();
                 mining_system_->sync();
+                mining_system_->resetHashCounter();
                 // Ensure the system has the new job version
                 MiningJob temp_job{};
                 mining_system_->updateJobLive(temp_job, new_version);

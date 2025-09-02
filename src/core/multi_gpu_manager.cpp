@@ -430,6 +430,9 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
     // Each GPU will grab nonce batches from the shared counter
     constexpr uint64_t gpu_batch_size = NONCE_BATCH_SIZE;
 
+    // Track last job version to detect updates
+    uint64_t last_job_version = current_job_version_.load();
+
     // Run until shutdown OR should_continue returns false
     while (!shutdown_.load(std::memory_order_relaxed) && consecutive_errors < max_consecutive_errors &&
            should_continue()) {
@@ -449,20 +452,42 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
                 }
             }
 
+            // Get current job (check for updates)
+            MiningJob batch_job;
+            uint64_t job_version;
+            {
+                std::lock_guard<std::mutex> lock(job_mutex_);
+                batch_job   = current_job_;
+                job_version = current_job_version_.load();
+            }
+
+            // If job version changed, log it and reset the mining system's state if needed
+            if (job_version != last_job_version) {
+                LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Detected job update from version ",
+                         last_job_version, " to ", job_version);
+                last_job_version = job_version;
+                // Reset hash counter for new job
+                worker->mining_system->resetHashCounter();
+                worker->hashes_computed  = 0;
+                worker->candidates_found = 0;
+                worker->best_match_bits  = 0;
+            }
+
             // Get next nonce batch atomically
             const uint64_t batch_start = shared_nonce_counter.fetch_add(gpu_batch_size);
             const uint64_t batch_end   = batch_start + gpu_batch_size;
 
-            LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Processing batch: ", batch_start, " to ", batch_end,
-                     " (", gpu_batch_size, " nonces)");
+            LOG_DEBUG("MULTI_GPU", "GPU ", worker->device_id, " - Processing batch: ", batch_start, " to ", batch_end,
+                      " (", gpu_batch_size, " nonces) for job version ", job_version);
 
-            // Create job for this batch
-            MiningJob batch_job    = job;
+            // Set the nonce offset for this batch
             batch_job.nonce_offset = batch_start;
 
             // Create continuation function for this batch
-            auto batch_continue = [&should_continue, &shutdown = this->shutdown_]() -> bool {
-                return should_continue() && !shutdown.load();
+            auto batch_continue = [&should_continue, &shutdown = this->shutdown_, job_version,
+                                   &current_version = this->current_job_version_]() -> bool {
+                // Continue if no shutdown, external continue is true, and job version hasn't changed
+                return should_continue() && !shutdown.load() && (current_version.load() == job_version);
             };
 
             // Run the entire batch
@@ -482,11 +507,20 @@ void MultiGPUManager::workerThreadInterruptibleWithOffset(GPUWorker *worker, con
                 }
             }
 
-            LOG_INFO("MULTI_GPU", "GPU ", worker->device_id, " - Batch complete. Processed ", nonces_processed,
-                     " nonces");
+            LOG_DEBUG("MULTI_GPU", "GPU ", worker->device_id, " - Batch complete. Processed ", nonces_processed,
+                      " nonces for job version ", job_version);
+
+            // Update worker stats
+            worker->hashes_computed += nonces_processed;
 
             // Reset error counter on success
             consecutive_errors = 0;
+
+            // Check if job was updated while we were processing
+            if (current_job_version_.load() != job_version) {
+                LOG_INFO("MULTI_GPU", "GPU ", worker->device_id,
+                         " - Job updated during batch processing, will use new job next iteration");
+            }
 
         } catch (const std::exception &e) {
             LOG_ERROR("MULTI_GPU", "GPU ", worker->device_id, " - Error: ", e.what());
@@ -549,6 +583,12 @@ void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job,
                                                        const std::function<bool()> &should_continue,
                                                        std::atomic<uint64_t> &global_nonce_offset)
 {
+    {
+        std::lock_guard<std::mutex> lock(job_mutex_);
+        current_job_         = job;
+        current_job_version_ = 0;
+    }
+
     current_difficulty_ = job.difficulty;
     shutdown_           = false;
     start_time_         = std::chrono::steady_clock::now();
@@ -619,6 +659,22 @@ void MultiGPUManager::runMiningInterruptibleWithOffset(const MiningJob &job,
     }
 }
 
+void MultiGPUManager::resetHashCounter() const
+{
+    // Reset each GPU's hash counter
+    for (const auto &worker : workers_) {
+        if (worker->mining_system) {
+            worker->mining_system->resetHashCounter();
+        }
+    }
+
+    // Reset manager's start time for accurate hashrate calculation
+    start_time_ = std::chrono::steady_clock::now();
+
+    // Reset global best tracker if needed
+    global_best_tracker_.reset();
+}
+
 void MultiGPUManager::sync() const
 {
     for (const auto &worker : workers_) {
@@ -628,9 +684,15 @@ void MultiGPUManager::sync() const
     }
 }
 
-void MultiGPUManager::updateJobLive(const MiningJob &job, uint64_t job_version) const
+void MultiGPUManager::updateJobLive(const MiningJob &job, uint64_t job_version)
 {
     LOG_INFO("MULTI_GPU", "Updating job to version ", job_version, " on all GPUs");
+    // Update the shared job
+    {
+        std::lock_guard<std::mutex> lock(job_mutex_);
+        current_job_         = job;
+        current_job_version_ = job_version;
+    }
 
     // Update job on all active GPUs
     for (const auto &worker : workers_) {
@@ -639,9 +701,7 @@ void MultiGPUManager::updateJobLive(const MiningJob &job, uint64_t job_version) 
         }
     }
 
-    // Ensure all GPUs have completed the update
     sync();
-
     LOG_INFO("MULTI_GPU", "Job update to version ", job_version, " completed on all active GPUs");
 }
 
