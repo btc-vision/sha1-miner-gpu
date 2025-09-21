@@ -32,8 +32,10 @@
     #define DEFAULT_THREADS_PER_BLOCK 256
 #endif
 
+#if defined(USE_CUDA) || defined(USE_HIP)
 extern __constant__ uint32_t d_base_message[8];
 extern __constant__ uint32_t d_pre_swapped_base[8];
+#endif
 
 struct alignas(256) MiningJob
 {
@@ -141,7 +143,7 @@ struct DeviceMiningJob
             } else if (err == hipErrorNoDevice) {
                 fprintf(stderr, "[DeviceMiningJob] No GPU device available\n");
             }
-#else
+#elif defined(USE_CUDA)
             if (err == cudaErrorMemoryAllocation) {
                 fprintf(stderr, "[DeviceMiningJob] Out of GPU memory\n");
             } else if (err == cudaErrorInvalidValue) {
@@ -151,6 +153,9 @@ struct DeviceMiningJob
             } else if (err == cudaErrorNoDevice) {
                 fprintf(stderr, "[DeviceMiningJob] No CUDA device available\n");
             }
+#elif defined(USE_SYCL)
+            // SYCL error handling - generic message for now
+            fprintf(stderr, "[DeviceMiningJob] SYCL allocation error\n");
 #endif
             return false;
         }

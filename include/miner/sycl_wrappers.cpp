@@ -388,4 +388,35 @@ extern "C" void cleanup_sycl_wrappers() {
     g_intel_device.reset();
 }
 
+// Additional functions for missing API compatibility
+gpuError_t gpuDeviceReset(void) {
+    // SYCL doesn't have an equivalent, but we can cleanup and reinitialize
+    cleanup_sycl_runtime();
+    return initialize_sycl_runtime() ? SYCL_SUCCESS : SYCL_ERROR_NOT_INITIALIZED;
+}
+
+gpuError_t gpuDeviceSetLimit(int limit, size_t value) {
+    // SYCL doesn't have direct equivalent for device limits
+    // Return success to maintain compatibility
+    return SYCL_SUCCESS;
+}
+
+gpuError_t gpuEventCreateWithFlags(gpuEvent_t* event, unsigned int flags) {
+    // For compatibility, just create a regular event
+    return gpuEventCreate(event);
+}
+
+gpuError_t gpuDeviceGetStreamPriorityRange(int* leastPriority, int* greatestPriority) {
+    // SYCL doesn't have stream priorities like CUDA
+    // Return default values for compatibility
+    if (leastPriority) *leastPriority = 0;
+    if (greatestPriority) *greatestPriority = 0;
+    return SYCL_SUCCESS;
+}
+
+gpuError_t gpuStreamCreateWithPriority(gpuStream_t* stream, unsigned int flags, int priority) {
+    // SYCL doesn't have stream priorities, just create a regular stream
+    return gpuStreamCreateWithFlags(stream, flags);
+}
+
 #endif // USE_SYCL

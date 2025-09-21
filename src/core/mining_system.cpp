@@ -1235,7 +1235,7 @@ bool MiningSystem::initializeMemoryPools()
         size_t result_size  = sizeof(MiningResult) * pool.capacity;
         size_t aligned_size = ((result_size + alignment - 1) / alignment) * alignment;
 
-        gpuError_t err = gpuMalloc(&pool.results, aligned_size);
+        gpuError_t err = gpuMalloc(reinterpret_cast<void**>(&pool.results), aligned_size);
         if (err != gpuSuccess) {
             std::cerr << "Failed to allocate GPU results buffer for stream " << i << ": " << gpuGetErrorString(err)
                       << "\n";
@@ -1250,7 +1250,7 @@ bool MiningSystem::initializeMemoryPools()
         }
 
         // Allocate count with alignment
-        err = gpuMalloc(&pool.count, sizeof(uint32_t));
+        err = gpuMalloc(reinterpret_cast<void**>(&pool.count), sizeof(uint32_t));
         if (err != gpuSuccess) {
             std::cerr << "Failed to allocate count buffer: " << gpuGetErrorString(err) << "\n";
             return false;
@@ -1269,7 +1269,7 @@ bool MiningSystem::initializeMemoryPools()
         }
 
         // Allocate job_version
-        err = gpuMalloc(&pool.job_version, sizeof(uint64_t));
+        err = gpuMalloc(reinterpret_cast<void**>(&pool.job_version), sizeof(uint64_t));
         if (err != gpuSuccess) {
             std::cerr << "Failed to allocate job version: " << gpuGetErrorString(err) << "\n";
             return false;
@@ -1283,7 +1283,7 @@ bool MiningSystem::initializeMemoryPools()
 
         // Allocate pinned host memory
         if (config_.use_pinned_memory) {
-            err = gpuHostAlloc(&pinned_results_[i], result_size, gpuHostAllocMapped | gpuHostAllocWriteCombined);
+            err = gpuHostAlloc(reinterpret_cast<void**>(&pinned_results_[i]), result_size, gpuHostAllocMapped | gpuHostAllocWriteCombined);
             if (err != gpuSuccess) {
                 std::cerr << "Warning: Failed to allocate pinned memory, using regular memory\n";
                 pinned_results_[i]        = new MiningResult[pool.capacity];

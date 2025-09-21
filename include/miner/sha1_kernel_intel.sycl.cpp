@@ -2,7 +2,7 @@
 #include <sycl/backend.hpp>
 #include <cstdio>
 #include <cstring>
-#include "sha1_miner.cuh"
+#include "sha1_miner_sycl.hpp"
 
 using namespace sycl;
 
@@ -139,6 +139,7 @@ inline uint32_t count_leading_zeros_160bit_intel(const uint32_t hash[5], const u
 void sha1_mining_kernel_intel(
     queue& q,
     const uint32_t* target_hash,
+    const uint32_t* pre_swapped_base,
     uint32_t difficulty,
     MiningResult* results,
     uint32_t* result_count,
@@ -176,20 +177,20 @@ void sha1_mining_kernel_intel(
 
             // Set fixed pre-swapped parts for both hashes (0-5)
             for (int j = 0; j < 6; j++) {
-                W1[j] = d_pre_swapped_base_sycl[j];
-                W2[j] = d_pre_swapped_base_sycl[j];
+                W1[j] = pre_swapped_base[j];
+                W2[j] = pre_swapped_base[j];
             }
 
             // Set varying parts for 6-7 using pre-swapped base and nonce XOR
             uint32_t nonce1_high = static_cast<uint32_t>(nonce1 >> 32);
             uint32_t nonce1_low = static_cast<uint32_t>(nonce1 & 0xFFFFFFFF);
-            W1[6] = d_pre_swapped_base_sycl[6] ^ nonce1_high;
-            W1[7] = d_pre_swapped_base_sycl[7] ^ nonce1_low;
+            W1[6] = pre_swapped_base[6] ^ nonce1_high;
+            W1[7] = pre_swapped_base[7] ^ nonce1_low;
 
             uint32_t nonce2_high = static_cast<uint32_t>(nonce2 >> 32);
             uint32_t nonce2_low = static_cast<uint32_t>(nonce2 & 0xFFFFFFFF);
-            W2[6] = d_pre_swapped_base_sycl[6] ^ nonce2_high;
-            W2[7] = d_pre_swapped_base_sycl[7] ^ nonce2_low;
+            W2[6] = pre_swapped_base[6] ^ nonce2_high;
+            W2[7] = pre_swapped_base[7] ^ nonce2_low;
 
             // Apply padding to both
             W1[8] = 0x80000000; W2[8] = 0x80000000;
@@ -451,6 +452,7 @@ extern "C" void launch_mining_kernel_intel(
         sha1_mining_kernel_intel(
             *g_sycl_queue,
             device_job.target_hash,
+            d_pre_swapped_base_sycl,
             difficulty,
             pool.results,
             pool.count,

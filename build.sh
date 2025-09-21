@@ -325,16 +325,17 @@ if [ "$GPU_TYPE" = "SYCL" ]; then
         if command -v sycl-ls &> /dev/null; then
             GPU_INFO=$(sycl-ls 2>/dev/null | grep -i "Intel.*Graphics")
 
+            # Battlemage series (B580, B570, etc.)
             if echo "$GPU_INFO" | grep -qi "Arc.*B[0-9][0-9]0"; then
-                # Battlemage series (B580, B570, etc.)
-                INTEL_GPU_TARGET="intel_gpu_dg2"
+                # Battlemage uses Xe2 architecture
+                INTEL_GPU_TARGET="intel_gpu_bmg_g21"
                 print_info "Detected Intel Arc B-series (Battlemage)"
             elif echo "$GPU_INFO" | grep -qi "Arc.*A[0-9][0-9]0"; then
                 # Alchemist series (A770, A750, A380)
-                INTEL_GPU_TARGET="intel_gpu_dg2"
+                INTEL_GPU_TARGET="intel_gpu_acm_g10,intel_gpu_acm_g11"
                 print_info "Detected Intel Arc A-series (Alchemist)"
             elif echo "$GPU_INFO" | grep -qi "Xe.*Max"; then
-                # Xe Max
+                # Xe Max (DG1)
                 INTEL_GPU_TARGET="intel_gpu_dg1"
                 print_info "Detected Intel Xe Max"
             elif echo "$GPU_INFO" | grep -qi "Data Center GPU Max"; then
@@ -342,15 +343,15 @@ if [ "$GPU_TYPE" = "SYCL" ]; then
                 INTEL_GPU_TARGET="intel_gpu_pvc"
                 print_info "Detected Intel Data Center GPU Max (Ponte Vecchio)"
             else
-                # Default to broad compatibility
-                INTEL_GPU_TARGET="intel_gpu_dg2,intel_gpu_acm_g10"
+                # Use SPIR-V for compatibility when unknown
+                INTEL_GPU_TARGET="spir64_gen"
                 print_warning "Could not identify specific Intel GPU model"
-                print_info "Using default targets for broad compatibility"
+                print_info "Using SPIR-V target for compatibility"
             fi
         else
-            # Fallback to default
-            INTEL_GPU_TARGET="intel_gpu_dg2,intel_gpu_acm_g10"
-            print_warning "sycl-ls not found - using default GPU targets"
+            # Fallback when sycl-ls not found
+            INTEL_GPU_TARGET="spir64_gen"
+            print_warning "sycl-ls not found - using SPIR-V target"
         fi
 
         print_info "Intel GPU targets: $INTEL_GPU_TARGET"

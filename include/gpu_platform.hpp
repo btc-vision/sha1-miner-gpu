@@ -11,6 +11,42 @@
     using gpuEvent_t = void*;   // Will hold SYCL event pointer
     using gpuMemcpyKind = int;
 
+    // Error codes for SYCL
+    #define gpuSuccess 0
+    #define gpuErrorMemoryAllocation 1
+    #define gpuErrorInvalidValue 2
+    #define gpuErrorInvalidDevice 3
+    #define gpuErrorNoDevice 4
+
+    // Additional CUDA error codes for compatibility
+    #define cudaErrorInvalidDevice gpuErrorInvalidDevice
+    #define cudaErrorNoDevice gpuErrorNoDevice
+
+    // CUDA function compatibility defines
+    #define cudaDeviceReset gpuDeviceReset
+
+    // Memory copy kinds
+    #define gpuMemcpyHostToDevice 1
+    #define gpuMemcpyDeviceToHost 2
+    #define gpuMemcpyDeviceToDevice 3
+    #define gpuMemcpyHostToHost 4
+
+    // Stream flags
+    #define gpuStreamDefault 0
+    #define gpuStreamNonBlocking 1
+
+    // Event flags
+    #define gpuEventDefault 0
+    #define gpuEventDisableTiming 1
+
+    // Host allocation flags
+    #define gpuHostAllocDefault 0
+    #define gpuHostAllocMapped 1
+    #define gpuHostAllocWriteCombined 2
+
+    // Device limit types
+    #define gpuLimitPersistingL2CacheSize 1
+
     // Custom device properties structure for SYCL
     struct gpuDeviceProp {
         char name[256];
@@ -24,6 +60,8 @@
         size_t sharedMemPerBlock;
         int warpSize;
         int clockRate;
+        size_t l2CacheSize;  // Added missing field
+        int maxThreadsPerMultiProcessor;  // Added missing field
     };
 
     // Function declarations for SYCL wrappers
@@ -56,6 +94,13 @@
         gpuError_t gpuHostAlloc(void** ptr, size_t size, unsigned int flags);
         gpuError_t gpuFreeHost(void* ptr);
 
+        // Additional SYCL function declarations for missing APIs
+        gpuError_t gpuDeviceReset(void);
+        gpuError_t gpuDeviceSetLimit(int limit, size_t value);
+        gpuError_t gpuEventCreateWithFlags(gpuEvent_t* event, unsigned int flags);
+        gpuError_t gpuDeviceGetStreamPriorityRange(int* leastPriority, int* greatestPriority);
+        gpuError_t gpuStreamCreateWithPriority(gpuStream_t* stream, unsigned int flags, int priority);
+
         // SYCL initialization functions
         bool initialize_sycl_runtime(void);
         void cleanup_sycl_runtime(void);
@@ -69,9 +114,6 @@
     #define gpuMemcpyDeviceToDevice 3
     #define gpuStreamNonBlocking 1
     #define gpuStreamDefault 0
-    #define gpuEventDisableTiming 2
-    #define gpuHostAllocMapped 4
-    #define gpuHostAllocWriteCombined 8
     #define gpuErrorNotReady 1
 
     // Device function qualifiers (not used in SYCL but kept for compatibility)
