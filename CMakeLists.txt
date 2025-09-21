@@ -1,3 +1,10 @@
+if (NOT DEFINED CMAKE_CUDA_FLAGS)
+    set(CMAKE_CUDA_FLAGS "-D_DISABLE_MATHCALLS_LEGACY" CACHE STRING "CUDA compiler flags" FORCE)
+endif ()
+
+# Also add to the environment for the compiler detection
+set(ENV{CUDAFLAGS} "-D_DISABLE_MATHCALLS_LEGACY")
+
 cmake_minimum_required(VERSION 3.16)
 
 # Detect if we should use HIP, SYCL, or CUDA
