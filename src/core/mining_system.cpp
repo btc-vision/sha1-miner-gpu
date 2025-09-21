@@ -208,6 +208,44 @@ MiningSystem::OptimalConfig MiningSystem::getAMDOptimalConfig()
 MiningSystem::OptimalConfig MiningSystem::getNVIDIAOptimalConfig() const
 {
     OptimalConfig config;
+#ifdef USE_SYCL
+    // Intel GPU-specific optimizations
+    auto device_name = std::string(device_props_.name);
+    if (device_name.find("Arc") != std::string::npos) {
+        if (device_name.find("B5") != std::string::npos || device_name.find("B6") != std::string::npos) {
+            // Battlemage (Arc B-series) - Xe2 architecture
+            config.blocks_per_sm = 32;  // High parallelism
+            config.threads       = 256;
+            config.streams       = 16;  // Many concurrent streams
+            config.buffer_size   = 1024;
+        } else if (device_name.find("A7") != std::string::npos || device_name.find("A5") != std::string::npos) {
+            // Alchemist high-end (A770, A750) - Xe HPG
+            config.blocks_per_sm = 24;
+            config.threads       = 256;
+            config.streams       = 12;
+            config.buffer_size   = 768;
+        } else {
+            // Alchemist low-end (A380, A310) - Xe HPG
+            config.blocks_per_sm = 16;
+            config.threads       = 256;
+            config.streams       = 8;
+            config.buffer_size   = 512;
+        }
+    } else if (device_name.find("Data Center GPU Max") != std::string::npos) {
+        // Ponte Vecchio - Very high-end compute
+        config.blocks_per_sm = 64;
+        config.threads       = 512;
+        config.streams       = 32;
+        config.buffer_size   = 2048;
+    } else {
+        // Generic Intel GPU (Iris Xe, etc.)
+        config.blocks_per_sm = 8;
+        config.threads       = 256;
+        config.streams       = 4;
+        config.buffer_size   = 256;
+    }
+#else
+    // CUDA/HIP GPU optimizations
     if (device_props_.major >= 8) {
         // Ampere and newer (RTX 30xx, 40xx, A100, etc.)
         config.blocks_per_sm = 16;
@@ -241,6 +279,7 @@ MiningSystem::OptimalConfig MiningSystem::getNVIDIAOptimalConfig() const
         config.streams       = 4;
         config.buffer_size   = 128;
     }
+#endif
     return config;
 }
 
@@ -627,17 +666,27 @@ bool MiningSystem::initialize()
 #endif
 
     // Check compute capability
+#ifdef USE_SYCL
+    // Intel GPUs don't use compute capability, so skip this check
+#else
     if (device_props_.major < 3) {
         std::cerr << "GPU compute capability " << device_props_.major << "." << device_props_.minor
                   << " is too old. Minimum required: 3.0\n";
         return false;
     }
+#endif
 
     // Print device info
     std::cout << "SHA-1 OP_NET Miner (" << getGPUPlatformName() << ")\n";
     std::cout << "=====================================\n";
     std::cout << "Device: " << device_props_.name << "\n";
+#ifdef USE_SYCL
+    std::cout << "Intel GPU Architecture: " << (std::string(device_props_.name).find("Arc") != std::string::npos ?
+        (std::string(device_props_.name).find("B5") != std::string::npos || std::string(device_props_.name).find("B6") != std::string::npos ? "Xe2 (Battlemage)" : "Xe HPG (Alchemist)") :
+        "Intel Graphics") << "\n";
+#else
     std::cout << "Compute Capability: " << device_props_.major << "." << device_props_.minor << "\n";
+#endif
     std::cout << "SMs/CUs: " << device_props_.multiProcessorCount << "\n";
     std::cout << "Warp/Wavefront Size: " << device_props_.warpSize << "\n";
     std::cout << "Max Threads per Block: " << device_props_.maxThreadsPerBlock << "\n";
@@ -673,7 +722,9 @@ bool MiningSystem::initialize()
     }
 
     // Set up L2 cache persistence for newer architectures
-#ifdef USE_HIP
+#ifdef USE_SYCL
+    // Intel GPUs handle cache management automatically
+#elif defined(USE_HIP)
     // AMD doesn't have the same L2 persistence API
 #else
     if (device_props_.major >= 8) {

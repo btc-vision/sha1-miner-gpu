@@ -183,7 +183,13 @@ gpuError_t gpuGetDeviceProperties(gpuDeviceProp* prop, int device) {
             prop->maxGridSize[i] = 65536; // Reasonable default
         }
 
-        prop->sharedMemPerBlock = 65536; // Estimate
+        // Get actual shared/local memory size
+        try {
+            auto local_mem_size = g_intel_device->get_info<info::device::local_mem_size>();
+            prop->sharedMemPerBlock = local_mem_size;
+        } catch (...) {
+            prop->sharedMemPerBlock = 65536; // Fallback estimate
+        }
 
         // Try to get subgroup size, use fallback if not available
         try {
@@ -208,13 +214,8 @@ gpuError_t gpuGetDeviceProperties(gpuDeviceProp* prop, int device) {
             prop->clockRate = 1000000; // Fallback
         }
 
-        // Try to get actual L2 cache size
-        try {
-            auto local_mem_size = g_intel_device->get_info<info::device::local_mem_size>();
-            prop->l2CacheSize = local_mem_size;
-        } catch (...) {
-            prop->l2CacheSize = 0; // Unknown
-        }
+        // Try to get actual L2 cache size - Intel doesn't expose this directly
+        prop->l2CacheSize = 0; // Intel GPU L2 cache size not exposed via SYCL
 
         // Set max threads per multiprocessor
         prop->maxThreadsPerMultiProcessor = static_cast<int>(max_work_group_size);
