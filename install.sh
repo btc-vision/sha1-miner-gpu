@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # SHA-1 OP_NET Miner - Linux Dependencies Installer
-# This script only installs dependencies (system packages)
+# This script installs dependencies (system packages) including Intel oneAPI support
 #
 
 set -e
@@ -15,6 +15,9 @@ NC='\033[0m' # No Color
 
 # Default installation directory
 INSTALL_DIR="${1:-$PWD}"
+
+# Intel mode flag (can be set via environment variable or command line)
+INTEL_MODE="${INTEL_MODE:-false}"
 
 # Print colored output
 print_info() {
@@ -31,6 +34,35 @@ print_error() {
 
 print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+# Parse command line arguments
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --intel)
+                INTEL_MODE=true
+                shift
+                ;;
+            --help|-h)
+                echo "Usage: $0 [OPTIONS] [INSTALL_DIR]"
+                echo ""
+                echo "Options:"
+                echo "  --intel    Install Intel oneAPI DPC++ compiler for Intel GPU support"
+                echo "  --help     Show this help message"
+                echo ""
+                echo "Environment variables:"
+                echo "  INTEL_MODE=true    Enable Intel oneAPI installation"
+                exit 0
+                ;;
+            *)
+                if [ -z "$INSTALL_DIR" ] || [ "$INSTALL_DIR" = "$PWD" ]; then
+                    INSTALL_DIR="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
 }
 
 # Detect Linux distribution
@@ -69,6 +101,113 @@ check_sudo() {
     fi
 }
 
+# Install Intel oneAPI for Debian/Ubuntu
+install_intel_debian() {
+    print_info "Installing Intel oneAPI DPC++ compiler for Ubuntu/Debian..."
+
+    # Install prerequisites
+    $SUDO apt-get update
+    $SUDO apt-get install -y wget gpg
+
+    # Add Intel's GPG key
+    wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | \
+        $SUDO gpg --dearmor --output /usr/share/keyrings/oneapi-archive-keyring.gpg
+
+    # Add the repository
+    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | \
+        $SUDO tee /etc/apt/sources.list.d/oneAPI.list
+
+    # Update and install the compiler
+    $SUDO apt-get update
+    $SUDO apt-get install -y intel-oneapi-compiler-dpcpp-cpp
+
+    print_success "Intel oneAPI DPC++ compiler installed successfully"
+}
+
+# Install Intel oneAPI for Fedora/RHEL
+install_intel_fedora() {
+    print_info "Installing Intel oneAPI DPC++ compiler for Fedora/RHEL/CentOS..."
+
+    # Create YUM repository file
+    cat << EOF | $SUDO tee /etc/yum.repos.d/oneAPI.repo
+[oneAPI]
+name=Intel® oneAPI repository
+baseurl=https://yum.repos.intel.com/oneapi
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://yum.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
+EOF
+
+    # Install the compiler
+    $SUDO dnf install -y intel-oneapi-compiler-dpcpp-cpp
+
+    print_success "Intel oneAPI DPC++ compiler installed successfully"
+}
+
+# Install Intel oneAPI for openSUSE
+install_intel_opensuse() {
+    print_info "Installing Intel oneAPI DPC++ compiler for openSUSE..."
+
+    # Add repository
+    $SUDO zypper addrepo https://yum.repos.intel.com/oneapi oneAPI
+
+    # Import GPG key
+    rpm --import https://yum.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
+
+    # Install the compiler
+    $SUDO zypper install -y intel-oneapi-compiler-dpcpp-cpp
+
+    print_success "Intel oneAPI DPC++ compiler installed successfully"
+}
+
+# Install Intel oneAPI for Arch
+install_intel_arch() {
+    print_info "Installing Intel oneAPI DPC++ compiler for Arch Linux..."
+    print_warning "Intel oneAPI is not officially supported on Arch Linux."
+    print_info "You can try installing from AUR or use the generic installer:"
+    print_info "  yay -S intel-oneapi-basekit"
+    print_info "Or download from: https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html"
+}
+
+# Setup Intel oneAPI environment
+setup_intel_env() {
+    print_info "Setting up Intel oneAPI environment..."
+
+    if [ -f /opt/intel/oneapi/setvars.sh ]; then
+        print_info "Sourcing Intel oneAPI environment..."
+        source /opt/intel/oneapi/setvars.sh
+
+        # Test installation
+        if command -v icpx &> /dev/null; then
+            print_success "Intel DPC++ compiler (icpx) is available"
+            icpx --version
+        else
+            print_warning "icpx not found in PATH after sourcing setvars.sh"
+        fi
+
+        if command -v sycl-ls &> /dev/null; then
+            print_success "SYCL devices list:"
+            sycl-ls
+        else
+            print_warning "sycl-ls not found"
+        fi
+
+        # Add to bashrc for persistent setup
+        if [ -f ~/.bashrc ]; then
+            if ! grep -q "oneapi/setvars.sh" ~/.bashrc; then
+                echo "" >> ~/.bashrc
+                echo "# Intel oneAPI environment" >> ~/.bashrc
+                echo "[ -f /opt/intel/oneapi/setvars.sh ] && source /opt/intel/oneapi/setvars.sh" >> ~/.bashrc
+                print_info "Added oneAPI environment setup to ~/.bashrc"
+            fi
+        fi
+    else
+        print_warning "Intel oneAPI setvars.sh not found at /opt/intel/oneapi/setvars.sh"
+        print_warning "You may need to manually source the environment setup script"
+    fi
+}
+
 # Install dependencies for Ubuntu/Debian
 install_deps_debian() {
     print_info "Installing dependencies for Ubuntu/Debian..."
@@ -86,6 +225,11 @@ install_deps_debian() {
         wget \
         curl \
         ninja-build
+
+    # Install Intel oneAPI if requested
+    if [ "$INTEL_MODE" = true ]; then
+        install_intel_debian
+    fi
 }
 
 # Install dependencies for Fedora/RHEL/CentOS
@@ -104,6 +248,11 @@ install_deps_fedora() {
         wget \
         curl \
         ninja-build
+
+    # Install Intel oneAPI if requested
+    if [ "$INTEL_MODE" = true ]; then
+        install_intel_fedora
+    fi
 }
 
 # Install dependencies for Arch Linux
@@ -122,6 +271,11 @@ install_deps_arch() {
         wget \
         curl \
         ninja
+
+    # Install Intel oneAPI if requested
+    if [ "$INTEL_MODE" = true ]; then
+        install_intel_arch
+    fi
 }
 
 # Install dependencies for openSUSE
@@ -140,6 +294,11 @@ install_deps_opensuse() {
         wget \
         curl \
         ninja
+
+    # Install Intel oneAPI if requested
+    if [ "$INTEL_MODE" = true ]; then
+        install_intel_opensuse
+    fi
 }
 
 # Install dependencies for Alpine
@@ -158,28 +317,56 @@ install_deps_alpine() {
         wget \
         curl \
         ninja
+
+    if [ "$INTEL_MODE" = true ]; then
+        print_warning "Intel oneAPI is not officially supported on Alpine Linux"
+        print_info "Consider using a different distribution for Intel GPU support"
+    fi
 }
 
 # Check GPU support
 check_gpu() {
     print_info "Checking GPU support..."
 
+    local gpu_found=false
+
     # Check for NVIDIA
     if command -v nvidia-smi &> /dev/null; then
         print_success "NVIDIA GPU detected"
+        gpu_found=true
         if ! command -v nvcc &> /dev/null; then
             print_warning "CUDA toolkit not found. You'll need to install CUDA for GPU mining."
             print_warning "Visit: https://developer.nvidia.com/cuda-downloads"
         fi
+    fi
+
     # Check for AMD
-    elif [ -d /opt/rocm ] || command -v rocm-smi &> /dev/null; then
+    if [ -d /opt/rocm ] || command -v rocm-smi &> /dev/null; then
         print_success "AMD GPU detected"
+        gpu_found=true
         if [ ! -d /opt/rocm ]; then
             print_warning "ROCm not found. You'll need to install ROCm for GPU mining."
             print_warning "Visit: https://rocm.docs.amd.com/en/latest/deploy/linux/index.html"
         fi
-    else
-        print_warning "No supported GPU detected. You'll need CUDA (NVIDIA) or ROCm (AMD) for GPU mining."
+    fi
+
+    # Check for Intel
+    if lspci 2>/dev/null | grep -qi "intel.*graphics\|intel.*gpu\|intel.*arc\|intel.*xe"; then
+        print_success "Intel GPU detected"
+        gpu_found=true
+        if [ "$INTEL_MODE" = true ]; then
+            print_info "Intel oneAPI will be installed for Intel GPU support"
+        else
+            print_warning "Intel GPU detected but --intel flag not set"
+            print_info "Run with --intel flag to install Intel oneAPI DPC++ compiler"
+        fi
+    fi
+
+    if [ "$gpu_found" = false ]; then
+        print_warning "No supported GPU detected. You'll need:"
+        print_warning "  - CUDA (NVIDIA GPUs)"
+        print_warning "  - ROCm (AMD GPUs)"
+        print_warning "  - Intel oneAPI DPC++ (Intel GPUs)"
     fi
 }
 
@@ -190,7 +377,14 @@ main() {
     echo "SHA-1 Miner - Linux Dependencies Installer"
     echo "====================================="
     echo
+
+    # Parse arguments
+    parse_args "$@"
+
     echo "Working directory: $INSTALL_DIR"
+    if [ "$INTEL_MODE" = true ]; then
+        echo -e "${GREEN}Intel mode: ENABLED${NC}"
+    fi
     echo
 
     # Check sudo access
@@ -235,9 +429,18 @@ main() {
             print_info "  - libuv1-dev/libuv-devel"
             print_info "  - pkg-config"
             print_info "  - ninja-build (optional but recommended)"
+            if [ "$INTEL_MODE" = true ]; then
+                print_info "  - Intel oneAPI DPC++ compiler"
+                print_info "    Visit: https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html"
+            fi
             exit 1
             ;;
     esac
+
+    # Setup Intel environment if installed
+    if [ "$INTEL_MODE" = true ]; then
+        setup_intel_env
+    fi
 
     echo
     print_success "Dependencies installation complete!"
@@ -248,17 +451,39 @@ main() {
     echo "  - nlohmann-json (JSON parsing)"
     echo "  - zlib (compression)"
     echo "  - libuv (async I/O)"
+
+    if [ "$INTEL_MODE" = true ] && [ -f /opt/intel/oneapi/setvars.sh ]; then
+        echo "  - Intel oneAPI DPC++ compiler (Intel GPU support)"
+    fi
+
     echo
     echo "To build your project:"
     echo "  1. Make sure your source files are in place"
-    echo "  2. Create build directory: mkdir -p build && cd build"
-    echo "  3. Configure: cmake .. -DCMAKE_BUILD_TYPE=Release"
-    echo "  4. Build: make -j\$(nproc)"
+
+    if [ "$INTEL_MODE" = true ]; then
+        echo "  2. Source Intel environment: source /opt/intel/oneapi/setvars.sh"
+        echo "  3. Create build directory: mkdir -p build && cd build"
+        echo "  4. Configure with Intel compiler: cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=icpx"
+        echo "  5. Build: make -j\$(nproc)"
+    else
+        echo "  2. Create build directory: mkdir -p build && cd build"
+        echo "  3. Configure: cmake .. -DCMAKE_BUILD_TYPE=Release"
+        echo "  4. Build: make -j\$(nproc)"
+    fi
     echo
 
     if [ ! -f "$INSTALL_DIR/CMakeLists.txt" ]; then
         print_warning "No CMakeLists.txt found in current directory."
         print_warning "Make sure you're running this from your project root."
+    fi
+
+    if [ "$INTEL_MODE" = true ]; then
+        echo
+        print_info "Intel oneAPI Notes:"
+        print_info "  - Environment setup has been added to ~/.bashrc"
+        print_info "  - Run 'source ~/.bashrc' or start a new terminal to load the environment"
+        print_info "  - Use 'icpx --version' to verify the compiler is available"
+        print_info "  - Use 'sycl-ls' to list available SYCL devices"
     fi
 }
 
