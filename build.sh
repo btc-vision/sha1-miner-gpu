@@ -453,6 +453,10 @@ fi
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
+export CC=/usr/bin/gcc-13
+export CXX=/usr/bin/g++-13
+CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_C_COMPILER=/usr/bin/gcc-13 -DCMAKE_CXX_COMPILER=/usr/bin/g++-13"
+
 # Configure with CMake
 if [ "$GPU_TYPE" = "SYCL" ]; then
     print_info "Configuring for Intel GPUs..."
