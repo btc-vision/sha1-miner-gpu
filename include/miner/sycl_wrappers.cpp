@@ -1,6 +1,14 @@
 #ifdef USE_SYCL
 
-#include <sycl/sycl.hpp>
+// Use more specific SYCL includes to avoid deprecated headers
+#include <sycl/queue.hpp>
+#include <sycl/device.hpp>
+#include <sycl/context.hpp>
+#include <sycl/platform.hpp>
+#include <sycl/usm.hpp>
+#include <sycl/property_list.hpp>
+#include <sycl/properties/queue_properties.hpp>
+#include <sycl/aspects.hpp>
 #include <memory>
 #include <vector>
 #include <string>
@@ -176,8 +184,40 @@ gpuError_t gpuGetDeviceProperties(gpuDeviceProp* prop, int device) {
         }
 
         prop->sharedMemPerBlock = 65536; // Estimate
-        prop->warpSize = 32; // Intel GPU subgroup size varies, but 32 is common
-        prop->clockRate = 1000000; // 1 GHz estimate
+
+        // Try to get subgroup size, use fallback if not available
+        try {
+            auto sub_group_sizes = g_intel_device->get_info<info::device::sub_group_sizes>();
+            if (!sub_group_sizes.empty()) {
+                prop->warpSize = static_cast<int>(sub_group_sizes[0]);
+            } else {
+                prop->warpSize = 32; // Fallback
+            }
+        } catch (...) {
+            prop->warpSize = 32; // Fallback if sub_group_sizes not supported
+        }
+
+        // Try to get actual clock rate and cache info
+        try {
+            if (g_intel_device->has(aspect::ext_intel_memory_clock_rate)) {
+                prop->clockRate = g_intel_device->get_info<ext::intel::info::device::memory_clock_rate>() * 1000; // Convert to Hz
+            } else {
+                prop->clockRate = 1000000; // Fallback
+            }
+        } catch (...) {
+            prop->clockRate = 1000000; // Fallback
+        }
+
+        // Try to get actual L2 cache size
+        try {
+            auto local_mem_size = g_intel_device->get_info<info::device::local_mem_size>();
+            prop->l2CacheSize = local_mem_size;
+        } catch (...) {
+            prop->l2CacheSize = 0; // Unknown
+        }
+
+        // Set max threads per multiprocessor
+        prop->maxThreadsPerMultiProcessor = static_cast<int>(max_work_group_size);
 
         return SYCL_SUCCESS;
     } catch (const sycl::exception& e) {
@@ -324,11 +364,12 @@ extern "C" bool initialize_sycl_wrappers() {
                     auto vendor = device.get_info<info::device::vendor>();
                     auto name = device.get_info<info::device::name>();
 
-                    // Check for Intel GPU
-                    if (vendor.find("Intel") != std::string::npos ||
-                        name.find("Intel") != std::string::npos ||
-                        name.find("Arc") != std::string::npos ||
-                        name.find("Iris") != std::string::npos) {
+                    // Check for Intel GPU and basic compute capability
+                    if ((vendor.find("Intel") != std::string::npos ||
+                         name.find("Intel") != std::string::npos ||
+                         name.find("Arc") != std::string::npos ||
+                         name.find("Iris") != std::string::npos) &&
+                        device.has(aspect::usm_device_allocations)) {
                         selected_device = device;
                         found_intel_gpu = true;
                         printf("Found Intel GPU: %s (Vendor: %s)\n", name.c_str(), vendor.c_str());
@@ -352,10 +393,16 @@ extern "C" bool initialize_sycl_wrappers() {
             }
         }
 
-        // Create SYCL context and queue
+        // Create SYCL context and queue with modern API
         g_intel_device = std::make_unique<device>(selected_device);
         g_sycl_context = std::make_unique<context>(*g_intel_device);
-        g_sycl_queue = std::make_unique<queue>(*g_sycl_context, *g_intel_device);
+
+        // Create queue with explicit device and enable profiling if supported
+        property_list props;
+        if (selected_device.has(aspect::queue_profiling)) {
+            props = {property::queue::enable_profiling()};
+        }
+        g_sycl_queue = std::make_unique<queue>(*g_sycl_context, *g_intel_device, props);
 
         printf("SYCL wrappers initialized successfully\n");
         return true;

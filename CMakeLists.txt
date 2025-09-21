@@ -709,6 +709,7 @@ endif ()
 if (GPU_BACKEND STREQUAL "SYCL")
     add_dependencies(sha1_miner sycl_kernel_target)
 
+
     # Compile SYCL wrapper with DPC++ compiler
     set(SYCL_WRAPPER_SOURCE ${MINER_DIR}/sycl_wrappers.cpp)
     set(SYCL_WRAPPER_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/sycl_wrappers.o)
