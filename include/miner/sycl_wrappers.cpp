@@ -214,8 +214,6 @@ gpuError_t gpuGetDeviceProperties(gpuDeviceProp* prop, int device) {
             prop->clockRate = 1000000; // Fallback
         }
 
-        // Try to get actual L2 cache size - Intel doesn't expose this directly
-        prop->l2CacheSize = 0; // Intel GPU L2 cache size not exposed via SYCL
 
         // Set max threads per multiprocessor
         prop->maxThreadsPerMultiProcessor = static_cast<int>(max_work_group_size);
