@@ -111,7 +111,7 @@ install_intel_debian() {
 
     # Add Intel's GPG key
     wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | \
-        $SUDO gpg --dearmor --output /usr/share/keyrings/oneapi-archive-keyring.gpg
+        $SUDO gpg --dearmor | $SUDO tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null
 
     # Add the repository
     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | \
