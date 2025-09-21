@@ -60,7 +60,7 @@ private:
 /**
  * GPU vendor enumeration
  */
-enum class GPUVendor { NVIDIA, AMD, UNKNOWN };
+enum class GPUVendor { NVIDIA, AMD, INTEL, UNKNOWN };
 
 /**
  * Enhanced mining system with proper resource management
@@ -240,6 +240,7 @@ private:
     OptimalConfig determineOptimalConfig();
     OptimalConfig getAMDOptimalConfig();
     OptimalConfig getNVIDIAOptimalConfig() const;
+    OptimalConfig getIntelOptimalConfig() const;
 
     void applyUserSpecifiedValues(const UserSpecifiedFlags &user_flags, const OptimalConfig &optimal);
     void validateConfiguration();

@@ -11,7 +11,13 @@
 #include "config.hpp"
 #include "utilities.hpp"
 
-#ifdef USE_HIP
+#ifdef USE_SYCL
+extern "C" void update_base_message_sycl(const uint32_t *base_msg_words);
+extern "C" bool initialize_sycl_runtime(void);
+extern "C" void cleanup_sycl_runtime(void);
+extern "C" bool initialize_sycl_wrappers(void);
+extern "C" void cleanup_sycl_wrappers(void);
+#elif USE_HIP
 extern "C" void update_base_message_hip(const uint32_t *base_msg_words);
 #else
 extern "C" void update_base_message_cuda(const uint32_t *base_msg_words);
@@ -95,6 +101,12 @@ GPUVendor MiningSystem::detectGPUVendor() const
         device_name.find("navi") != std::string::npos || device_name.find("rdna") != std::string::npos ||
         device_name.find("gfx") != std::string::npos) {
         return GPUVendor::AMD;
+    }
+    // Check for Intel GPUs
+    if (device_name.find("intel") != std::string::npos || device_name.find("arc") != std::string::npos ||
+        device_name.find("iris") != std::string::npos || device_name.find("uhd") != std::string::npos ||
+        device_name.find("xe") != std::string::npos || device_name.find("dg") != std::string::npos) {
+        return GPUVendor::INTEL;
     }
     return GPUVendor::UNKNOWN;
 }
@@ -232,6 +244,35 @@ MiningSystem::OptimalConfig MiningSystem::getNVIDIAOptimalConfig() const
     return config;
 }
 
+MiningSystem::OptimalConfig MiningSystem::getIntelOptimalConfig() const
+{
+    OptimalConfig config;
+
+    // Intel GPU configuration optimized for Arc and Xe architectures
+    // Intel Arc GPUs have different characteristics compared to NVIDIA/AMD
+    if (device_props_.multiProcessorCount >= 32) {
+        // High-end Intel Arc (A770, A750) or data center GPUs
+        config.blocks_per_sm = 8;
+        config.threads       = 256;
+        config.streams       = 6;
+        config.buffer_size   = 384;
+    } else if (device_props_.multiProcessorCount >= 16) {
+        // Mid-range Intel Arc (A580, A380)
+        config.blocks_per_sm = 6;
+        config.threads       = 256;
+        config.streams       = 4;
+        config.buffer_size   = 256;
+    } else {
+        // Lower-end Intel GPUs (integrated graphics)
+        config.blocks_per_sm = 4;
+        config.threads       = 128;
+        config.streams       = 2;
+        config.buffer_size   = 128;
+    }
+
+    return config;
+}
+
 MiningSystem::OptimalConfig MiningSystem::determineOptimalConfig()
 {
     // Detect GPU vendor
@@ -239,12 +280,15 @@ MiningSystem::OptimalConfig MiningSystem::determineOptimalConfig()
     LOG_INFO("AUTOTUNE", "Detected GPU vendor: ",
              gpu_vendor_ == GPUVendor::NVIDIA ? "NVIDIA"
              : gpu_vendor_ == GPUVendor::AMD  ? "AMD"
+             : gpu_vendor_ == GPUVendor::INTEL ? "INTEL"
                                               : "Unknown");
     OptimalConfig config{};
     if (gpu_vendor_ == GPUVendor::AMD) {
         config = getAMDOptimalConfig();
     } else if (gpu_vendor_ == GPUVendor::NVIDIA) {
         config = getNVIDIAOptimalConfig();
+    } else if (gpu_vendor_ == GPUVendor::INTEL) {
+        config = getIntelOptimalConfig();
     } else {
         // Unknown vendor - use conservative defaults
         config.blocks_per_sm = 2;
@@ -479,6 +523,22 @@ void MiningSystem::autoTuneParameters()
 bool MiningSystem::initialize()
 {
     std::lock_guard lock(system_mutex_);
+
+#ifdef USE_SYCL
+    // Initialize SYCL runtime and wrappers
+    if (!initialize_sycl_wrappers()) {
+        std::cerr << "Failed to initialize SYCL wrappers\n";
+        return false;
+    }
+
+    if (!initialize_sycl_runtime()) {
+        std::cerr << "Failed to initialize SYCL runtime\n";
+        cleanup_sycl_wrappers();
+        return false;
+    }
+
+    std::cout << "SYCL runtime initialized for Intel GPU mining\n";
+#endif
 
     // First, check if any GPU is available
     int device_count = 0;
@@ -782,7 +842,9 @@ void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t non
         memcpy(base_msg_words, job.base_message, 32);
 
 // Copy to constant memory using platform-specific wrapper
-#ifdef USE_HIP
+#ifdef USE_SYCL
+        update_base_message_sycl(base_msg_words);
+#elif USE_HIP
         update_base_message_hip(base_msg_words);
 #else
         update_base_message_cuda(base_msg_words);
@@ -1321,6 +1383,12 @@ void MiningSystem::cleanup()
             }
         }
     }
+
+#ifdef USE_SYCL
+    // Cleanup SYCL resources
+    cleanup_sycl_runtime();
+    cleanup_sycl_wrappers();
+#endif
 }
 
 void MiningSystem::performanceMonitor() const

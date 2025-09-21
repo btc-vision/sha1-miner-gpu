@@ -1,6 +1,92 @@
 #pragma once
 
-#ifdef USE_HIP
+#ifdef USE_SYCL
+    // SYCL/oneAPI/Intel GPU support
+    #include <sycl/sycl.hpp>
+    #include <memory>
+
+    // SYCL doesn't have direct equivalents, so we'll create wrapper types
+    using gpuError_t = int;
+    using gpuStream_t = void*;  // Will hold SYCL queue pointer
+    using gpuEvent_t = void*;   // Will hold SYCL event pointer
+    using gpuMemcpyKind = int;
+
+    // Custom device properties structure for SYCL
+    struct gpuDeviceProp {
+        char name[256];
+        size_t totalGlobalMem;
+        int major;
+        int minor;
+        int multiProcessorCount;
+        int maxThreadsPerBlock;
+        int maxThreadsDim[3];
+        int maxGridSize[3];
+        size_t sharedMemPerBlock;
+        int warpSize;
+        int clockRate;
+    };
+
+    // Function declarations for SYCL wrappers
+    extern "C" {
+        gpuError_t gpuMalloc(void** ptr, size_t size);
+        gpuError_t gpuFree(void* ptr);
+        gpuError_t gpuMemcpy(void* dst, const void* src, size_t count, gpuMemcpyKind kind);
+        gpuError_t gpuMemcpyAsync(void* dst, const void* src, size_t count, gpuMemcpyKind kind, gpuStream_t stream);
+        gpuError_t gpuMemset(void* ptr, int value, size_t count);
+        gpuError_t gpuMemsetAsync(void* ptr, int value, size_t count, gpuStream_t stream);
+        gpuError_t gpuMemGetInfo(size_t* free, size_t* total);
+        gpuError_t gpuSetDevice(int device);
+        gpuError_t gpuGetDevice(int* device);
+        gpuError_t gpuGetDeviceCount(int* count);
+        gpuError_t gpuGetDeviceProperties(gpuDeviceProp* prop, int device);
+        gpuError_t gpuStreamCreate(gpuStream_t* stream);
+        gpuError_t gpuStreamCreateWithFlags(gpuStream_t* stream, unsigned int flags);
+        gpuError_t gpuStreamDestroy(gpuStream_t stream);
+        gpuError_t gpuStreamSynchronize(gpuStream_t stream);
+        gpuError_t gpuStreamQuery(gpuStream_t stream);
+        gpuError_t gpuEventCreate(gpuEvent_t* event);
+        gpuError_t gpuEventDestroy(gpuEvent_t event);
+        gpuError_t gpuEventRecord(gpuEvent_t event, gpuStream_t stream);
+        gpuError_t gpuEventSynchronize(gpuEvent_t event);
+        gpuError_t gpuEventElapsedTime(float* ms, gpuEvent_t start, gpuEvent_t end);
+        gpuError_t gpuEventQuery(gpuEvent_t event);
+        gpuError_t gpuGetLastError(void);
+        const char* gpuGetErrorString(gpuError_t error);
+        gpuError_t gpuDeviceSynchronize(void);
+        gpuError_t gpuHostAlloc(void** ptr, size_t size, unsigned int flags);
+        gpuError_t gpuFreeHost(void* ptr);
+
+        // SYCL initialization functions
+        bool initialize_sycl_runtime(void);
+        void cleanup_sycl_runtime(void);
+        void update_base_message_sycl(const uint32_t* base_msg_words);
+    }
+
+    // Constants
+    #define gpuSuccess 0
+    #define gpuMemcpyHostToDevice 1
+    #define gpuMemcpyDeviceToHost 2
+    #define gpuMemcpyDeviceToDevice 3
+    #define gpuStreamNonBlocking 1
+    #define gpuStreamDefault 0
+    #define gpuEventDisableTiming 2
+    #define gpuHostAllocMapped 4
+    #define gpuHostAllocWriteCombined 8
+    #define gpuErrorNotReady 1
+
+    // Device function qualifiers (not used in SYCL but kept for compatibility)
+    #define __gpu_device__
+    #define __gpu_global__
+    #define __gpu_host__
+    #define __gpu_forceinline__ inline
+    #define __gpu_shared__
+    #define __gpu_constant__
+
+    // Built-in functions
+    #define __gpu_popc __builtin_popcount
+    #define __gpu_clz __builtin_clz
+
+#elif USE_HIP
     // HIP/AMD GPU support
     #include <hip/hip_runtime.h>
     #include <hip/hip_runtime_api.h>

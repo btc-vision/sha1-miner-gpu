@@ -622,6 +622,9 @@ add_executable(sha1_miner
 
         # GPU kernel launcher
         ${MINER_DIR}/kernel_launcher.cpp
+
+        # SYCL wrappers (when using SYCL)
+        $<$<BOOL:${USE_SYCL}>:${MINER_DIR}/sycl_wrappers.cpp>
 )
 
 set_target_properties(sha1_miner PROPERTIES
@@ -690,6 +693,12 @@ endif ()
 
 if (GPU_BACKEND STREQUAL "SYCL")
     add_dependencies(sha1_miner sycl_kernel_target)
+
+    # Set SYCL compiler flags for SYCL source files
+    set_source_files_properties(${MINER_DIR}/sycl_wrappers.cpp PROPERTIES
+        COMPILE_FLAGS "${SYCL_FLAGS}"
+    )
+
     target_link_libraries(sha1_miner PRIVATE
             ${KERNEL_OBJECT}
             ${GPU_LIBRARIES}
