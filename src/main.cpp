@@ -85,17 +85,6 @@ std::vector<int> determine_gpu_ids(const MiningConfig &config, const int device_
 // Main program
 int main(const int argc, char *argv[])
 {
-#ifdef USE_SYCL
-    // TEST SYCL FIRST BEFORE ANY OTHER INITIALIZATION
-    std::cout << "IMMEDIATE SYCL TEST: ";
-    try {
-        auto devices = sycl::device::get_devices(sycl::info::device_type::gpu);
-        std::cout << "Found " << devices.size() << " devices immediately" << std::endl;
-    } catch (const std::exception &e) {
-        std::cout << "Exception immediately: " << e.what() << std::endl;
-    }
-#endif
-
     // Set up UTF-8 encoding for console output
     setup_console_encoding();
 
