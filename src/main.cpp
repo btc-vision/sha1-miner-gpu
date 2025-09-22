@@ -6,9 +6,14 @@
 #include "../logging/logger.hpp"
 #include "configs/config.hpp"
 #include "core/pool_mining.hpp"
-#include "core/solo_mining.hpp"
 #include "utils/platform_utils.hpp"
 #include "utils/test_utils.hpp"
+
+#ifdef USE_SYCL
+    #include <sycl/sycl.hpp>
+
+extern "C" bool initialize_sycl_wrappers(void);
+#endif
 
 void show_help_menu(const char *program_name)
 {
@@ -80,6 +85,17 @@ std::vector<int> determine_gpu_ids(const MiningConfig &config, const int device_
 // Main program
 int main(const int argc, char *argv[])
 {
+#ifdef USE_SYCL
+    // TEST SYCL FIRST BEFORE ANY OTHER INITIALIZATION
+    std::cout << "IMMEDIATE SYCL TEST: ";
+    try {
+        auto devices = sycl::device::get_devices(sycl::info::device_type::gpu);
+        std::cout << "Found " << devices.size() << " devices immediately" << std::endl;
+    } catch (const std::exception &e) {
+        std::cout << "Exception immediately: " << e.what() << std::endl;
+    }
+#endif
+
     // Set up UTF-8 encoding for console output
     setup_console_encoding();
 
@@ -126,18 +142,45 @@ int main(const int argc, char *argv[])
     }
     LOG_INFO("MAIN", Color::GREEN, "SHA-1 implementation verified.", Color::RESET);
 
-    // Check GPU availability
+    // Check GPU availability directly
+#ifdef USE_SYCL
+    int device_count = 0;
+    try {
+        std::cout << "DEBUG: Testing direct SYCL enumeration in main.cpp..." << std::endl;
+        auto devices = sycl::device::get_devices(sycl::info::device_type::gpu);
+        std::cout << "DEBUG: Direct call found " << devices.size() << " devices" << std::endl;
+        device_count = static_cast<int>(devices.size());
+        if (device_count > 0) {
+            LOG_INFO("MAIN", "Found %d Intel/SYCL GPU device(s)", device_count);
+            for (size_t i = 0; i < devices.size(); ++i) {
+                auto name = devices[i].get_info<sycl::info::device::name>();
+                LOG_INFO("MAIN", "  GPU %zu: %s", i, name.c_str());
+            }
+        }
+    } catch (const std::exception &e) {
+        std::cout << "DEBUG: Exception in direct call: " << e.what() << std::endl;
+        LOG_ERROR("MAIN", "SYCL device enumeration failed: %s", e.what());
+        device_count = 0;
+    }
+
+    if (device_count == 0) {
+        LOG_ERROR("MAIN", "No Intel/SYCL devices found!");
+        return 1;
+    }
+#else
+    // Check GPU availability using wrapper
     int device_count;
     gpuGetDeviceCount(&device_count);
 
     if (device_count == 0) {
-#ifdef USE_HIP
+    #ifdef USE_HIP
         LOG_ERROR("MAIN", "No AMD/HIP devices found!");
-#else
+    #else
         LOG_ERROR("MAIN", "No CUDA devices found!");
-#endif
+    #endif
         return 1;
     }
+#endif
 
     // Determine which GPUs to use
     const std::vector<int> gpu_ids_to_use = determine_gpu_ids(config, device_count);
@@ -163,5 +206,4 @@ int main(const int argc, char *argv[])
 
     // Default to solo mining
     return 0;
-    // return run_solo_mining(config, gpu_ids_to_use);
 }

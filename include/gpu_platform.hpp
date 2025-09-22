@@ -1,11 +1,8 @@
 #pragma once
 
 #ifdef USE_SYCL
-    // SYCL/oneAPI/Intel GPU support - use specific includes to avoid deprecated headers
-    #include <sycl/queue.hpp>
-    #include <sycl/device.hpp>
-    #include <sycl/context.hpp>
-    #include <sycl/usm.hpp>
+    // SYCL/oneAPI/Intel GPU support - use full header like working code
+    #include <sycl/sycl.hpp>
     #include <memory>
 
     // SYCL doesn't have direct equivalents, so we'll create wrapper types

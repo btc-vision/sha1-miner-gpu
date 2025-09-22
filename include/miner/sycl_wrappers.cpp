@@ -1,14 +1,7 @@
 #ifdef USE_SYCL
 
-// Use more specific SYCL includes to avoid deprecated headers
-#include <sycl/queue.hpp>
-#include <sycl/device.hpp>
-#include <sycl/context.hpp>
-#include <sycl/platform.hpp>
-#include <sycl/usm.hpp>
-#include <sycl/property_list.hpp>
-#include <sycl/properties/queue_properties.hpp>
-#include <sycl/aspects.hpp>
+// Use the full SYCL header like in main.cpp - this is proven to work
+#include <sycl/sycl.hpp>
 #include <memory>
 #include <vector>
 #include <string>
@@ -148,8 +141,14 @@ gpuError_t gpuGetDevice(int* device) {
 
 gpuError_t gpuGetDeviceCount(int* count) {
     try {
-        auto devices = device::get_devices(info::device_type::gpu);
-        *count = static_cast<int>(devices.size());
+        // First check if SYCL runtime is initialized
+        if (!g_intel_device || !g_sycl_queue) {
+            *count = 0;
+            return SYCL_ERROR_NOT_INITIALIZED;
+        }
+
+        // If runtime is initialized, we have at least 1 device
+        *count = 1;
         return SYCL_SUCCESS;
     } catch (const sycl::exception& e) {
         *count = 0;
