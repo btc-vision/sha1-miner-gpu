@@ -328,12 +328,12 @@ if (GPU_BACKEND STREQUAL "SYCL")
     if (WIN32)
         set(GPU_LIBRARIES
                 ${ONEAPI_ROOT}/compiler/latest/lib/sycl.lib
-                ${ONEAPI_ROOT}/compiler/latest/lib/OpenCL.lib
+                # Note: OpenCL.lib removed - SYCL handles device management
         )
     else ()
         set(GPU_LIBRARIES
                 ${ONEAPI_ROOT}/compiler/latest/lib/libsycl.so
-                ${ONEAPI_ROOT}/compiler/latest/lib/libOpenCL.so
+                # Note: libOpenCL.so removed - SYCL handles device management
         )
     endif ()
 
