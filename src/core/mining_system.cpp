@@ -208,44 +208,7 @@ MiningSystem::OptimalConfig MiningSystem::getAMDOptimalConfig()
 MiningSystem::OptimalConfig MiningSystem::getNVIDIAOptimalConfig() const
 {
     OptimalConfig config;
-#ifdef USE_SYCL
-    // Intel GPU-specific optimizations
-    auto device_name = std::string(device_props_.name);
-    if (device_name.find("Arc") != std::string::npos) {
-        if (device_name.find("B5") != std::string::npos || device_name.find("B6") != std::string::npos) {
-            // Battlemage (Arc B-series) - Xe2 architecture
-            config.blocks_per_sm = 32;  // High parallelism
-            config.threads       = 256;
-            config.streams       = 16;  // Many concurrent streams
-            config.buffer_size   = 1024;
-        } else if (device_name.find("A7") != std::string::npos || device_name.find("A5") != std::string::npos) {
-            // Alchemist high-end (A770, A750) - Xe HPG
-            config.blocks_per_sm = 24;
-            config.threads       = 256;
-            config.streams       = 12;
-            config.buffer_size   = 768;
-        } else {
-            // Alchemist low-end (A380, A310) - Xe HPG
-            config.blocks_per_sm = 16;
-            config.threads       = 256;
-            config.streams       = 8;
-            config.buffer_size   = 512;
-        }
-    } else if (device_name.find("Data Center GPU Max") != std::string::npos) {
-        // Ponte Vecchio - Very high-end compute
-        config.blocks_per_sm = 64;
-        config.threads       = 512;
-        config.streams       = 32;
-        config.buffer_size   = 2048;
-    } else {
-        // Generic Intel GPU (Iris Xe, etc.)
-        config.blocks_per_sm = 8;
-        config.threads       = 256;
-        config.streams       = 4;
-        config.buffer_size   = 256;
-    }
-#else
-    // CUDA/HIP GPU optimizations
+    // NVIDIA GPU optimizations (CUDA only)
     if (device_props_.major >= 8) {
         // Ampere and newer (RTX 30xx, 40xx, A100, etc.)
         config.blocks_per_sm = 16;
@@ -279,7 +242,6 @@ MiningSystem::OptimalConfig MiningSystem::getNVIDIAOptimalConfig() const
         config.streams       = 4;
         config.buffer_size   = 128;
     }
-#endif
     return config;
 }
 
@@ -287,23 +249,38 @@ MiningSystem::OptimalConfig MiningSystem::getIntelOptimalConfig() const
 {
     OptimalConfig config;
 
-    // Intel GPU configuration optimized for Arc and Xe architectures
-    // Intel Arc GPUs have different characteristics compared to NVIDIA/AMD
-    if (device_props_.multiProcessorCount >= 32) {
-        // High-end Intel Arc (A770, A750) or data center GPUs
+    // Intel GPU-specific optimizations based on device name and EU count
+    auto device_name = std::string(device_props_.name);
+
+    if (device_name.find("Arc") != std::string::npos) {
+        if (device_name.find("B5") != std::string::npos || device_name.find("B6") != std::string::npos) {
+            // Battlemage (Arc B-series) - Xe2 architecture
+            config.blocks_per_sm = 4;   // Conservative for Intel architecture
+            config.threads       = 256;
+            config.streams       = 8;   // Moderate concurrent streams
+            config.buffer_size   = 512;
+        } else if (device_name.find("A7") != std::string::npos || device_name.find("A5") != std::string::npos) {
+            // Alchemist high-end (A770, A750) - Xe HPG
+            config.blocks_per_sm = 4;
+            config.threads       = 256;
+            config.streams       = 6;
+            config.buffer_size   = 384;
+        } else {
+            // Alchemist low-end (A380, A310) - Xe HPG
+            config.blocks_per_sm = 3;
+            config.threads       = 256;
+            config.streams       = 4;
+            config.buffer_size   = 256;
+        }
+    } else if (device_name.find("Data Center GPU Max") != std::string::npos || device_name.find("Ponte Vecchio") != std::string::npos) {
+        // Ponte Vecchio - Very high-end compute
         config.blocks_per_sm = 8;
-        config.threads       = 256;
-        config.streams       = 6;
-        config.buffer_size   = 384;
-    } else if (device_props_.multiProcessorCount >= 16) {
-        // Mid-range Intel Arc (A580, A380)
-        config.blocks_per_sm = 6;
-        config.threads       = 256;
-        config.streams       = 4;
-        config.buffer_size   = 256;
+        config.threads       = 512;
+        config.streams       = 16;
+        config.buffer_size   = 1024;
     } else {
-        // Lower-end Intel GPUs (integrated graphics)
-        config.blocks_per_sm = 4;
+        // Generic Intel GPU (Iris Xe, UHD Graphics, etc.) - conservative settings
+        config.blocks_per_sm = 2;
         config.threads       = 128;
         config.streams       = 2;
         config.buffer_size   = 128;
@@ -414,6 +391,14 @@ void MiningSystem::validateConfiguration()
         if (config_.blocks_per_stream > max_blocks) {
             config_.blocks_per_stream = max_blocks;
         }
+    } else if (gpu_vendor_ == GPUVendor::INTEL) {
+        // Intel GPU-specific limits - more conservative than NVIDIA
+        int max_blocks = 1024;
+        if (config_.blocks_per_stream > max_blocks) {
+            LOG_WARN("AUTOTUNE", "Capping blocks per stream from ", config_.blocks_per_stream, " to ",
+                     max_blocks, " for Intel GPU");
+            config_.blocks_per_stream = max_blocks;
+        }
     }
     // Ensure minimum configuration
     if (config_.num_streams < 1)
@@ -497,6 +482,23 @@ void MiningSystem::logFinalConfiguration(const UserSpecifiedFlags &user_flags)
 #ifdef USE_HIP
         LOG_INFO("AUTOTUNE", "Architecture: ", AMDGPUDetector::getArchitectureName(detected_arch_));
 #endif
+    } else if (gpu_vendor_ == GPUVendor::INTEL) {
+        LOG_INFO("AUTOTUNE", "Blocks per EU group: ", (config_.blocks_per_stream / device_props_.multiProcessorCount));
+        // Detect Intel architecture
+        std::string device_name = device_props_.name;
+        if (device_name.find("Arc") != std::string::npos) {
+            if (device_name.find("B5") != std::string::npos || device_name.find("B6") != std::string::npos) {
+                LOG_INFO("AUTOTUNE", "Architecture: Xe2 (Battlemage)");
+            } else {
+                LOG_INFO("AUTOTUNE", "Architecture: Xe HPG (Alchemist)");
+            }
+        } else if (device_name.find("Data Center GPU Max") != std::string::npos) {
+            LOG_INFO("AUTOTUNE", "Architecture: Xe HPC (Ponte Vecchio)");
+        } else if (device_name.find("Iris") != std::string::npos || device_name.find("UHD") != std::string::npos) {
+            LOG_INFO("AUTOTUNE", "Architecture: Xe LP (Integrated)");
+        } else {
+            LOG_INFO("AUTOTUNE", "Architecture: Intel GPU");
+        }
     }
     LOG_INFO("AUTOTUNE", "-------------------------------------");
     LOG_INFO("AUTOTUNE", "Performance Settings:");
@@ -575,6 +577,7 @@ bool MiningSystem::initialize()
         cleanup_sycl_wrappers();
         return false;
     }
+
 
     std::cout << "SYCL runtime initialized for Intel GPU mining\n";
 #endif

@@ -300,9 +300,8 @@ if (GPU_BACKEND STREQUAL "SYCL")
         message(STATUS "Using default Intel GPU target: ${INTEL_GPU_TARGET}")
     endif ()
 
-    # Set SYCL compilation strategy - use SPIR-V for compatibility
-    # Note: Architecture detection is kept for informational purposes
-    set(SYCL_FLAGS "${SYCL_FLAGS} -fsycl-targets=spir64_gen")
+    # Set SYCL compilation strategy - force device code generation
+    set(SYCL_FLAGS "${SYCL_FLAGS} -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel")
 
     if (INTEL_GPU_TARGET MATCHES "intel_gpu_bmg_g21")
         message(STATUS "Detected Battlemage GPU - using SPIR-V for compatibility")
@@ -316,8 +315,8 @@ if (GPU_BACKEND STREQUAL "SYCL")
         message(STATUS "Using generic SPIR-V target for Intel GPU")
     endif()
 
-    # Additional optimizations for Intel GPUs
-    set(SYCL_FLAGS "${SYCL_FLAGS} -ffast-math -O3")
+    # Additional optimizations for Intel GPUs - ensure device code is embedded
+    set(SYCL_FLAGS "${SYCL_FLAGS} -ffast-math -O3 -fsycl-embed-ir")
 
     # Set includes and libraries
     set(GPU_INCLUDES
@@ -339,28 +338,10 @@ if (GPU_BACKEND STREQUAL "SYCL")
 
     set(GPU_DEFINES -DUSE_SYCL)
 
-    # Compile SYCL kernel
-    set(SYCL_KERNEL_SOURCE ${MINER_DIR}/sha1_kernel_intel.sycl.cpp)
-    set(SYCL_KERNEL_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/sycl_kernel.o)
-
     # Convert SYCL_FLAGS to separate arguments
     separate_arguments(SYCL_FLAGS_LIST UNIX_COMMAND "${SYCL_FLAGS}")
 
-    add_custom_command(
-            OUTPUT ${SYCL_KERNEL_OBJECT}
-            COMMAND ${DPCPP_COMPILER}
-            ARGS ${SYCL_FLAGS_LIST}
-            -I${INCLUDE_DIR} -I${MINER_DIR} -I${OPENSSL_INCLUDE_DIR}
-            -DUSE_SYCL
-            -c ${SYCL_KERNEL_SOURCE}
-            -o ${SYCL_KERNEL_OBJECT}
-            DEPENDS ${SYCL_KERNEL_SOURCE}
-            COMMENT "Compiling SYCL kernel for Intel GPUs"
-            VERBATIM
-    )
-
-    add_custom_target(sycl_kernel_target ALL DEPENDS ${SYCL_KERNEL_OBJECT})
-    set(KERNEL_OBJECT ${SYCL_KERNEL_OBJECT})
+    # No separate kernel compilation - include kernel in wrapper
 
     message(STATUS "Building with SYCL/oneAPI for Intel GPUs")
     message(STATUS "  oneAPI root: ${ONEAPI_ROOT}")
@@ -706,12 +687,13 @@ if (NOT MSVC)
 endif ()
 
 if (GPU_BACKEND STREQUAL "SYCL")
-    add_dependencies(sha1_miner sycl_kernel_target)
 
 
-    # Compile SYCL wrapper with DPC++ compiler
+    # Compile SYCL wrapper and kernel with DPC++ compiler
     set(SYCL_WRAPPER_SOURCE ${MINER_DIR}/sycl_wrappers.cpp)
+    set(SYCL_KERNEL_SOURCE ${MINER_DIR}/sha1_kernel_intel.sycl.cpp)
     set(SYCL_WRAPPER_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/sycl_wrappers.o)
+    set(SYCL_KERNEL_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/sycl_kernel.o)
 
     add_custom_command(
             OUTPUT ${SYCL_WRAPPER_OBJECT}
@@ -728,12 +710,27 @@ if (GPU_BACKEND STREQUAL "SYCL")
             VERBATIM
     )
 
-    add_custom_target(sycl_wrapper_target ALL DEPENDS ${SYCL_WRAPPER_OBJECT})
+    add_custom_command(
+            OUTPUT ${SYCL_KERNEL_OBJECT}
+            COMMAND ${DPCPP_COMPILER}
+            ARGS ${SYCL_FLAGS_LIST}
+            -I${INCLUDE_DIR} -I${MINER_DIR} -I${NET_DIR} -I${SRC_DIR} -I${SRC_DIR}/configs -I${SRC_DIR}/core -I${SRC_DIR}/utils
+            -I${Boost_INCLUDE_DIRS} -I${ZLIB_INCLUDE_DIRS} -I${OPENSSL_INCLUDE_DIR}
+            -DUSE_SYCL -DBOOST_BIND_GLOBAL_PLACEHOLDERS -DBOOST_BEAST_USE_STD_STRING_VIEW -DBOOST_ALL_NO_LIB
+            -std=c++20 -O3 -fPIC
+            -c ${SYCL_KERNEL_SOURCE}
+            -o ${SYCL_KERNEL_OBJECT}
+            DEPENDS ${SYCL_KERNEL_SOURCE}
+            COMMENT "Compiling SYCL kernel with DPC++ compiler"
+            VERBATIM
+    )
+
+    add_custom_target(sycl_wrapper_target ALL DEPENDS ${SYCL_WRAPPER_OBJECT} ${SYCL_KERNEL_OBJECT})
     add_dependencies(sha1_miner sycl_wrapper_target)
 
     target_link_libraries(sha1_miner PRIVATE
-            ${KERNEL_OBJECT}
             ${SYCL_WRAPPER_OBJECT}
+            ${SYCL_KERNEL_OBJECT}
             ${GPU_LIBRARIES}
             ${Boost_LIBRARIES}
             ZLIB::ZLIB

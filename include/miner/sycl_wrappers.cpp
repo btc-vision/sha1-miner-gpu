@@ -7,14 +7,133 @@
 #include <string>
 #include <cstring>
 #include "gpu_platform.hpp"
+#include "sha1_miner_sycl.hpp"
 
 using namespace sycl;
 
-// Global SYCL state
-static std::unique_ptr<queue> g_sycl_queue = nullptr;
-static std::unique_ptr<context> g_sycl_context = nullptr;
-static std::unique_ptr<device> g_intel_device = nullptr;
+// Global SYCL state - declared early so they can be used
+queue *g_sycl_queue = nullptr;
+context *g_sycl_context = nullptr;
+device *g_intel_device = nullptr;
 static std::vector<void*> g_allocated_ptrs;
+
+// SHA-1 constants
+constexpr uint32_t K0 = 0x5A827999;
+constexpr uint32_t K1 = 0x6ED9EBA1;
+constexpr uint32_t K2 = 0x8F1BBCDC;
+constexpr uint32_t K3 = 0xCA62C1D6;
+
+constexpr uint32_t H0_0 = 0x67452301;
+constexpr uint32_t H0_1 = 0xEFCDAB89;
+constexpr uint32_t H0_2 = 0x98BADCFE;
+constexpr uint32_t H0_3 = 0x10325476;
+constexpr uint32_t H0_4 = 0xC3D2E1F0;
+
+// Intel GPU optimized byte swap using SYCL
+inline uint32_t intel_bswap32(uint32_t x) {
+    return ((x & 0xFF000000) >> 24) |
+           ((x & 0x00FF0000) >> 8) |
+           ((x & 0x0000FF00) << 8) |
+           ((x & 0x000000FF) << 24);
+}
+
+// Intel GPU optimized rotation
+inline uint32_t intel_rotl32(uint32_t x, uint32_t n) {
+    return (x << n) | (x >> (32 - n));
+}
+
+// Intel GPU optimized count leading zeros
+inline uint32_t intel_clz(uint32_t x) {
+    if (x == 0) return 32;
+    uint32_t count = 0;
+    if ((x & 0xFFFF0000) == 0) { count += 16; x <<= 16; }
+    if ((x & 0xFF000000) == 0) { count += 8; x <<= 8; }
+    if ((x & 0xF0000000) == 0) { count += 4; x <<= 4; }
+    if ((x & 0xC0000000) == 0) { count += 2; x <<= 2; }
+    if ((x & 0x80000000) == 0) { count += 1; }
+    return count;
+}
+
+// Count leading zeros for 160-bit comparison
+inline uint32_t count_leading_zeros_160bit_intel(const uint32_t hash[5], const uint32_t target[5]) {
+    uint32_t xor_val;
+    uint32_t clz;
+
+    xor_val = hash[0] ^ target[0];
+    if (xor_val != 0) {
+        clz = intel_clz(xor_val);
+        return clz;
+    }
+
+    xor_val = hash[1] ^ target[1];
+    if (xor_val != 0) {
+        clz = intel_clz(xor_val);
+        return 32 + clz;
+    }
+
+    xor_val = hash[2] ^ target[2];
+    if (xor_val != 0) {
+        clz = intel_clz(xor_val);
+        return 64 + clz;
+    }
+
+    xor_val = hash[3] ^ target[3];
+    if (xor_val != 0) {
+        clz = intel_clz(xor_val);
+        return 96 + clz;
+    }
+
+    xor_val = hash[4] ^ target[4];
+    if (xor_val != 0) {
+        clz = intel_clz(xor_val);
+        return 128 + clz;
+    }
+
+    return 160;
+}
+
+// SYCL-optimized SHA-1 round macros for Intel GPU
+#define SHA1_ROUND_0_19_INTEL(a, b, c, d, e, W_val) \
+    do { \
+        uint32_t f = (b & c) | (~b & d); \
+        uint32_t temp = intel_rotl32(a, 5) + f + e + K0 + W_val; \
+        e = d; d = c; c = intel_rotl32(b, 30); b = a; a = temp; \
+    } while(0)
+
+#define SHA1_ROUND_20_39_INTEL(a, b, c, d, e, W_val) \
+    do { \
+        uint32_t f = b ^ c ^ d; \
+        uint32_t temp = intel_rotl32(a, 5) + f + e + K1 + W_val; \
+        e = d; d = c; c = intel_rotl32(b, 30); b = a; a = temp; \
+    } while(0)
+
+#define SHA1_ROUND_40_59_INTEL(a, b, c, d, e, W_val) \
+    do { \
+        uint32_t f = (b & c) | (b & d) | (c & d); \
+        uint32_t temp = intel_rotl32(a, 5) + f + e + K2 + W_val; \
+        e = d; d = c; c = intel_rotl32(b, 30); b = a; a = temp; \
+    } while(0)
+
+#define SHA1_ROUND_60_79_INTEL(a, b, c, d, e, W_val) \
+    do { \
+        uint32_t f = b ^ c ^ d; \
+        uint32_t temp = intel_rotl32(a, 5) + f + e + K3 + W_val; \
+        e = d; d = c; c = intel_rotl32(b, 30); b = a; a = temp; \
+    } while(0)
+
+// Forward declare functions from sha1_kernel_intel.sycl.cpp
+extern "C" bool initialize_sycl_runtime();
+extern "C" void cleanup_sycl_runtime();
+extern "C" void update_base_message_sycl(const uint32_t *base_msg_words);
+extern "C" void launch_mining_kernel_intel(
+    const DeviceMiningJob &device_job,
+    uint32_t difficulty,
+    uint64_t nonce_offset,
+    const ResultPool &pool,
+    const KernelConfig &config,
+    uint64_t job_version
+);
+
 
 // Error codes
 #define SYCL_SUCCESS 0
@@ -225,7 +344,7 @@ gpuError_t gpuGetDeviceProperties(gpuDeviceProp* prop, int device) {
 
 gpuError_t gpuStreamCreate(gpuStream_t* stream) {
     // For simplicity, return the global queue
-    *stream = g_sycl_queue.get();
+    *stream = g_sycl_queue;
     return SYCL_SUCCESS;
 }
 
@@ -347,72 +466,6 @@ gpuError_t gpuFreeHost(void* ptr) {
 
 } // extern "C"
 
-// Initialize the SYCL wrapper system
-extern "C" bool initialize_sycl_wrappers() {
-    try {
-        // Find Intel GPU device
-        auto platforms = platform::get_platforms();
-        device selected_device;
-        bool found_intel_gpu = false;
-
-        for (const auto& platform : platforms) {
-            auto devices = platform.get_devices();
-            for (const auto& device : devices) {
-                if (device.is_gpu()) {
-                    auto vendor = device.get_info<info::device::vendor>();
-                    auto name = device.get_info<info::device::name>();
-
-                    // Check for Intel GPU and basic compute capability
-                    if ((vendor.find("Intel") != std::string::npos ||
-                         name.find("Intel") != std::string::npos ||
-                         name.find("Arc") != std::string::npos ||
-                         name.find("Iris") != std::string::npos) &&
-                        device.has(aspect::usm_device_allocations)) {
-                        selected_device = device;
-                        found_intel_gpu = true;
-                        printf("Found Intel GPU: %s (Vendor: %s)\n", name.c_str(), vendor.c_str());
-                        break;
-                    }
-                }
-            }
-            if (found_intel_gpu) break;
-        }
-
-        if (!found_intel_gpu) {
-            printf("No Intel GPU found, falling back to any available GPU\n");
-            auto devices = device::get_devices(info::device_type::gpu);
-            if (!devices.empty()) {
-                selected_device = devices[0];
-                auto name = selected_device.get_info<info::device::name>();
-                printf("Using GPU: %s\n", name.c_str());
-            } else {
-                printf("No GPU devices found\n");
-                return false;
-            }
-        }
-
-        // Create SYCL context and queue with modern API
-        g_intel_device = std::make_unique<device>(selected_device);
-        g_sycl_context = std::make_unique<context>(*g_intel_device);
-
-        // Create queue with explicit device and enable profiling if supported
-        property_list props;
-        if (selected_device.has(aspect::queue_profiling)) {
-            props = {property::queue::enable_profiling()};
-        }
-        g_sycl_queue = std::make_unique<queue>(*g_sycl_context, *g_intel_device, props);
-
-        printf("SYCL wrappers initialized successfully\n");
-        return true;
-
-    } catch (const sycl::exception& e) {
-        printf("SYCL exception during wrapper initialization: %s\n", e.what());
-        return false;
-    } catch (const std::exception& e) {
-        printf("Standard exception during SYCL wrapper initialization: %s\n", e.what());
-        return false;
-    }
-}
 
 // Cleanup SYCL wrappers
 extern "C" void cleanup_sycl_wrappers() {
@@ -428,10 +481,10 @@ extern "C" void cleanup_sycl_wrappers() {
     }
     g_allocated_ptrs.clear();
 
-    g_sycl_queue.reset();
-    g_sycl_context.reset();
-    g_intel_device.reset();
+    // Call the actual cleanup function from the kernel file
+    cleanup_sycl_runtime();
 }
+
 
 // Additional functions for missing API compatibility
 gpuError_t gpuDeviceReset(void) {
@@ -462,6 +515,17 @@ gpuError_t gpuDeviceGetStreamPriorityRange(int* leastPriority, int* greatestPrio
 gpuError_t gpuStreamCreateWithPriority(gpuStream_t* stream, unsigned int flags, int priority) {
     // SYCL doesn't have stream priorities, just create a regular stream
     return gpuStreamCreateWithFlags(stream, flags);
+}
+
+// Initialize the SYCL wrapper system
+extern "C" bool initialize_sycl_wrappers() {
+    // Call the actual initialization from the kernel file first
+    if (!initialize_sycl_runtime()) {
+        return false;
+    }
+
+    printf("SYCL wrappers initialized successfully\n");
+    return true;
 }
 
 #endif // USE_SYCL
