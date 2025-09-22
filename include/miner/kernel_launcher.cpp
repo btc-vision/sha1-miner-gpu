@@ -15,16 +15,8 @@ extern void launch_mining_kernel_nvidia(const DeviceMiningJob &device_job, uint3
 void launch_mining_kernel(const DeviceMiningJob &device_job, uint32_t difficulty, uint64_t nonce_offset,
                           const ResultPool &pool, const KernelConfig &config, uint64_t job_version)
 {
-    printf("[DEBUG LAUNCHER] Entering unified launch_mining_kernel\n");
-    printf("[DEBUG LAUNCHER] Config: blocks=%d, threads_per_block=%d\n", config.blocks, config.threads_per_block);
-    fflush(stdout);
-
 #ifdef USE_SYCL
-    printf("[DEBUG LAUNCHER] Calling Intel kernel\n");
-    fflush(stdout);
     launch_mining_kernel_intel(device_job, difficulty, nonce_offset, pool, config, job_version);
-    printf("[DEBUG LAUNCHER] Intel kernel returned\n");
-    fflush(stdout);
 #elif USE_HIP
     launch_mining_kernel_amd(device_job, difficulty, nonce_offset, pool, config, job_version);
 #else

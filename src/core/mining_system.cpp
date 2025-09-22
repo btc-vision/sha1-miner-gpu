@@ -207,7 +207,7 @@ MiningSystem::OptimalConfig MiningSystem::getAMDOptimalConfig()
 
 MiningSystem::OptimalConfig MiningSystem::getNVIDIAOptimalConfig() const
 {
-    OptimalConfig config;
+    OptimalConfig config{};
     // NVIDIA GPU optimizations (CUDA only)
     if (device_props_.major >= 8) {
         // Ampere and newer (RTX 30xx, 40xx, A100, etc.)
@@ -707,7 +707,28 @@ bool MiningSystem::initialize()
     }
     std::cout << "\n";
 
-    autoTuneParameters();
+    // Only auto-tune if enabled and no user config or auto_tune is true
+    bool should_auto_tune = true;
+    if (user_config_) {
+        const auto *mining_config = static_cast<const MiningConfig *>(user_config_);
+        should_auto_tune = mining_config->auto_tune;
+    }
+
+    if (should_auto_tune) {
+        autoTuneParameters();
+    } else {
+        LOG_INFO("MAIN", "Skipping auto-tune - using user-specified parameters");
+        // Still need to detect and log user-specified values even without auto-tune
+        UserSpecifiedFlags user_flags = detectUserSpecifiedValues();
+
+        // Even when auto-tune is disabled, we need to set the buffer size if it's 0
+        if (config_.result_buffer_size == 0) {
+            OptimalConfig optimal = determineOptimalConfig();
+            config_.result_buffer_size = optimal.buffer_size;
+        }
+
+        logFinalConfiguration(user_flags);
+    }
 
     // Validate thread configuration
     if (config_.threads_per_block % device_props_.warpSize != 0 ||
