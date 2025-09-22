@@ -11,115 +11,30 @@
 
 using namespace sycl;
 
-// Global SYCL state - externally defined in sha1_kernel_intel.sycl.cpp
+// External declarations for kernel functions
 extern queue *g_sycl_queue;
 extern context *g_sycl_context;
 extern device *g_intel_device;
+
+// Forward declarations
+extern void sha1_mining_kernel_intel(
+    queue& q,
+    const uint32_t* target_hash,
+    const uint32_t* pre_swapped_base,
+    uint32_t difficulty,
+    MiningResult* results,
+    uint32_t* result_count,
+    uint32_t result_capacity,
+    uint64_t nonce_base,
+    uint32_t nonces_per_thread,
+    uint64_t job_version,
+    int total_threads
+);
+
+// Local state for wrapper functions
 static std::vector<void*> g_allocated_ptrs;
 
-// SHA-1 constants
-constexpr uint32_t K0 = 0x5A827999;
-constexpr uint32_t K1 = 0x6ED9EBA1;
-constexpr uint32_t K2 = 0x8F1BBCDC;
-constexpr uint32_t K3 = 0xCA62C1D6;
-
-constexpr uint32_t H0_0 = 0x67452301;
-constexpr uint32_t H0_1 = 0xEFCDAB89;
-constexpr uint32_t H0_2 = 0x98BADCFE;
-constexpr uint32_t H0_3 = 0x10325476;
-constexpr uint32_t H0_4 = 0xC3D2E1F0;
-
-// Intel GPU optimized byte swap using SYCL
-inline uint32_t intel_bswap32(uint32_t x) {
-    return ((x & 0xFF000000) >> 24) |
-           ((x & 0x00FF0000) >> 8) |
-           ((x & 0x0000FF00) << 8) |
-           ((x & 0x000000FF) << 24);
-}
-
-// Intel GPU optimized rotation
-inline uint32_t intel_rotl32(uint32_t x, uint32_t n) {
-    return (x << n) | (x >> (32 - n));
-}
-
-// Intel GPU optimized count leading zeros
-inline uint32_t intel_clz(uint32_t x) {
-    if (x == 0) return 32;
-    uint32_t count = 0;
-    if ((x & 0xFFFF0000) == 0) { count += 16; x <<= 16; }
-    if ((x & 0xFF000000) == 0) { count += 8; x <<= 8; }
-    if ((x & 0xF0000000) == 0) { count += 4; x <<= 4; }
-    if ((x & 0xC0000000) == 0) { count += 2; x <<= 2; }
-    if ((x & 0x80000000) == 0) { count += 1; }
-    return count;
-}
-
-// Count leading zeros for 160-bit comparison
-inline uint32_t count_leading_zeros_160bit_intel(const uint32_t hash[5], const uint32_t target[5]) {
-    uint32_t xor_val;
-    uint32_t clz;
-
-    xor_val = hash[0] ^ target[0];
-    if (xor_val != 0) {
-        clz = intel_clz(xor_val);
-        return clz;
-    }
-
-    xor_val = hash[1] ^ target[1];
-    if (xor_val != 0) {
-        clz = intel_clz(xor_val);
-        return 32 + clz;
-    }
-
-    xor_val = hash[2] ^ target[2];
-    if (xor_val != 0) {
-        clz = intel_clz(xor_val);
-        return 64 + clz;
-    }
-
-    xor_val = hash[3] ^ target[3];
-    if (xor_val != 0) {
-        clz = intel_clz(xor_val);
-        return 96 + clz;
-    }
-
-    xor_val = hash[4] ^ target[4];
-    if (xor_val != 0) {
-        clz = intel_clz(xor_val);
-        return 128 + clz;
-    }
-
-    return 160;
-}
-
-// SYCL-optimized SHA-1 round macros for Intel GPU
-#define SHA1_ROUND_0_19_INTEL(a, b, c, d, e, W_val) \
-    do { \
-        uint32_t f = (b & c) | (~b & d); \
-        uint32_t temp = intel_rotl32(a, 5) + f + e + K0 + W_val; \
-        e = d; d = c; c = intel_rotl32(b, 30); b = a; a = temp; \
-    } while(0)
-
-#define SHA1_ROUND_20_39_INTEL(a, b, c, d, e, W_val) \
-    do { \
-        uint32_t f = b ^ c ^ d; \
-        uint32_t temp = intel_rotl32(a, 5) + f + e + K1 + W_val; \
-        e = d; d = c; c = intel_rotl32(b, 30); b = a; a = temp; \
-    } while(0)
-
-#define SHA1_ROUND_40_59_INTEL(a, b, c, d, e, W_val) \
-    do { \
-        uint32_t f = (b & c) | (b & d) | (c & d); \
-        uint32_t temp = intel_rotl32(a, 5) + f + e + K2 + W_val; \
-        e = d; d = c; c = intel_rotl32(b, 30); b = a; a = temp; \
-    } while(0)
-
-#define SHA1_ROUND_60_79_INTEL(a, b, c, d, e, W_val) \
-    do { \
-        uint32_t f = b ^ c ^ d; \
-        uint32_t temp = intel_rotl32(a, 5) + f + e + K3 + W_val; \
-        e = d; d = c; c = intel_rotl32(b, 30); b = a; a = temp; \
-    } while(0)
+// Macros and functions are now defined in the included kernel file
 
 // Forward declare functions from sha1_kernel_intel.sycl.cpp
 extern "C" bool initialize_sycl_runtime();

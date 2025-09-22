@@ -290,18 +290,13 @@ if (GPU_BACKEND STREQUAL "SYCL")
     # Set compiler for SYCL
     set(CMAKE_CXX_COMPILER ${DPCPP_COMPILER})
 
-    # SYCL compilation flags
+    # SYCL compilation flags - use JIT compilation for B580 compatibility
     set(SYCL_FLAGS "-fsycl")
 
-    # Intel GPU target selection with fallback
-    if (NOT INTEL_GPU_TARGET)
-        # Default to SPIR-V for broad compatibility
-        set(INTEL_GPU_TARGET "spir64_gen")
-        message(STATUS "Using default Intel GPU target: ${INTEL_GPU_TARGET}")
-    endif ()
+    # Add optimizations but no specific targets (let runtime JIT compile)
+    set(SYCL_FLAGS "${SYCL_FLAGS} -O3 -ffast-math")
 
-    # Set SYCL compilation strategy - force device code generation
-    set(SYCL_FLAGS "${SYCL_FLAGS} -fsycl-targets=spir64 -fsycl-device-code-split=per_kernel")
+    message(STATUS "Using JIT compilation for B580 Battlemage compatibility")
 
     if (INTEL_GPU_TARGET MATCHES "intel_gpu_bmg_g21")
         message(STATUS "Detected Battlemage GPU - using SPIR-V for compatibility")
@@ -315,8 +310,7 @@ if (GPU_BACKEND STREQUAL "SYCL")
         message(STATUS "Using generic SPIR-V target for Intel GPU")
     endif()
 
-    # Additional optimizations for Intel GPUs - ensure device code is embedded
-    set(SYCL_FLAGS "${SYCL_FLAGS} -ffast-math -O3 -fsycl-embed-ir")
+    # JIT compilation will handle device optimization automatically
 
     # Set includes and libraries
     set(GPU_INCLUDES
@@ -689,48 +683,20 @@ endif ()
 if (GPU_BACKEND STREQUAL "SYCL")
 
 
-    # Compile SYCL wrapper and kernel with DPC++ compiler
-    set(SYCL_WRAPPER_SOURCE ${MINER_DIR}/sycl_wrappers.cpp)
-    set(SYCL_KERNEL_SOURCE ${MINER_DIR}/sha1_kernel_intel.sycl.cpp)
-    set(SYCL_WRAPPER_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/sycl_wrappers.o)
-    set(SYCL_KERNEL_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/sycl_kernel.o)
+    # Add SYCL files directly to executable and use DPC++ for everything
+    message(STATUS "Adding SYCL sources directly to main executable")
 
-    add_custom_command(
-            OUTPUT ${SYCL_WRAPPER_OBJECT}
-            COMMAND ${DPCPP_COMPILER}
-            ARGS ${SYCL_FLAGS_LIST}
-            -I${INCLUDE_DIR} -I${MINER_DIR} -I${NET_DIR} -I${SRC_DIR} -I${SRC_DIR}/configs -I${SRC_DIR}/core -I${SRC_DIR}/utils
-            -I${Boost_INCLUDE_DIRS} -I${ZLIB_INCLUDE_DIRS} -I${OPENSSL_INCLUDE_DIR}
-            -DUSE_SYCL -DBOOST_BIND_GLOBAL_PLACEHOLDERS -DBOOST_BEAST_USE_STD_STRING_VIEW -DBOOST_ALL_NO_LIB
-            -std=c++20 -O3 -fPIC
-            -c ${SYCL_WRAPPER_SOURCE}
-            -o ${SYCL_WRAPPER_OBJECT}
-            DEPENDS ${SYCL_WRAPPER_SOURCE}
-            COMMENT "Compiling SYCL wrapper with DPC++ compiler"
-            VERBATIM
+    # No separate compilation - add SYCL sources to main target
+    target_sources(sha1_miner PRIVATE
+        ${MINER_DIR}/sycl_wrappers.cpp
+        ${MINER_DIR}/sha1_kernel_intel.sycl.cpp
     )
 
-    add_custom_command(
-            OUTPUT ${SYCL_KERNEL_OBJECT}
-            COMMAND ${DPCPP_COMPILER}
-            ARGS ${SYCL_FLAGS_LIST}
-            -I${INCLUDE_DIR} -I${MINER_DIR} -I${NET_DIR} -I${SRC_DIR} -I${SRC_DIR}/configs -I${SRC_DIR}/core -I${SRC_DIR}/utils
-            -I${Boost_INCLUDE_DIRS} -I${ZLIB_INCLUDE_DIRS} -I${OPENSSL_INCLUDE_DIR}
-            -DUSE_SYCL -DBOOST_BIND_GLOBAL_PLACEHOLDERS -DBOOST_BEAST_USE_STD_STRING_VIEW -DBOOST_ALL_NO_LIB
-            -std=c++20 -O3 -fPIC
-            -c ${SYCL_KERNEL_SOURCE}
-            -o ${SYCL_KERNEL_OBJECT}
-            DEPENDS ${SYCL_KERNEL_SOURCE}
-            COMMENT "Compiling SYCL kernel with DPC++ compiler"
-            VERBATIM
-    )
-
-    add_custom_target(sycl_wrapper_target ALL DEPENDS ${SYCL_WRAPPER_OBJECT} ${SYCL_KERNEL_OBJECT})
-    add_dependencies(sha1_miner sycl_wrapper_target)
+    # SYCL compilation and linking flags
+    target_compile_options(sha1_miner PRIVATE ${SYCL_FLAGS_LIST})
+    target_link_options(sha1_miner PRIVATE ${SYCL_FLAGS_LIST})
 
     target_link_libraries(sha1_miner PRIVATE
-            ${SYCL_WRAPPER_OBJECT}
-            ${SYCL_KERNEL_OBJECT}
             ${GPU_LIBRARIES}
             ${Boost_LIBRARIES}
             ZLIB::ZLIB
