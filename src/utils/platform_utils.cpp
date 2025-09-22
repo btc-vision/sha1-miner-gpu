@@ -22,12 +22,12 @@ void setup_console_encoding() {
     SetConsoleOutputCP(CP_UTF8);
 
     // Enable UTF-8 for C++ streams
-    std::locale::global(std::locale(""));
+    std::locale::global(std::locale("C"));
 }
 #else
 void setup_console_encoding() {
     // Unix systems usually handle UTF-8 properly by default
-    std::locale::global(std::locale(""));
+    std::locale::global(std::locale("C"));
 }
 #endif
 

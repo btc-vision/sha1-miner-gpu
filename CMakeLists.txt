@@ -619,7 +619,6 @@ add_executable(sha1_miner
         ${SRC_DIR}/core/mining_system.cpp
         ${SRC_DIR}/core/multi_gpu_manager.cpp
         ${SRC_DIR}/core/pool_mining.cpp
-        ${SRC_DIR}/core/solo_mining.cpp
 
         # Utility components (in src/utils)
         ${SRC_DIR}/utils/platform_utils.cpp
