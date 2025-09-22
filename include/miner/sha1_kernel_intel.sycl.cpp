@@ -6,10 +6,10 @@
 
 using namespace sycl;
 
-// Global SYCL queue and context for Intel GPU mining
-static queue *g_sycl_queue = nullptr;
-static context *g_sycl_context = nullptr;
-static device *g_intel_device = nullptr;
+// Global SYCL queue and context for Intel GPU mining - externally accessible
+queue *g_sycl_queue = nullptr;
+context *g_sycl_context = nullptr;
+device *g_intel_device = nullptr;
 
 // Global constant memory for base message (SYCL equivalent)
 static uint32_t *d_base_message_sycl = nullptr;

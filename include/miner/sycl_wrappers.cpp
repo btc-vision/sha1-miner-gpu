@@ -11,10 +11,10 @@
 
 using namespace sycl;
 
-// Global SYCL state - declared early so they can be used
-queue *g_sycl_queue = nullptr;
-context *g_sycl_context = nullptr;
-device *g_intel_device = nullptr;
+// Global SYCL state - externally defined in sha1_kernel_intel.sycl.cpp
+extern queue *g_sycl_queue;
+extern context *g_sycl_context;
+extern device *g_intel_device;
 static std::vector<void*> g_allocated_ptrs;
 
 // SHA-1 constants
