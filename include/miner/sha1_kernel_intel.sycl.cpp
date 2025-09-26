@@ -465,24 +465,57 @@ sycl::event sha1_mining_kernel_intel(
                 total_results += thread_counts[i];
             }
 
+            printf("SYCL Compact: Total results found across all threads: %u\n", total_results);
+
             // Limit to result buffer capacity
+            uint32_t original_total = total_results;
             total_results = sycl::min(total_results, result_capacity);
+            if (original_total > result_capacity) {
+                printf("SYCL Compact: WARNING - Limiting results from %u to capacity %u\n",
+                       original_total, result_capacity);
+            }
 
             // Copy results to final buffer in thread order (deterministic)
             uint32_t write_idx = 0;
+            printf("SYCL Compact: Starting result compaction...\n");
+
             for (int tid = 0; tid < total_threads && write_idx < total_results; tid++) {
                 if (thread_counts[tid] > 0) {
+                    printf("SYCL Compact: Thread %d has %u results\n", tid, thread_counts[tid]);
+
                     uint32_t base_idx = tid * MAX_RESULTS_PER_THREAD;
                     uint32_t count = sycl::min(thread_counts[tid], total_results - write_idx);
 
+                    printf("SYCL Compact: Copying %u results from thread %d (base_idx=%u)\n",
+                           count, tid, base_idx);
+
                     for (uint32_t i = 0; i < count && write_idx < result_capacity; i++) {
-                        results[write_idx++] = temp_results[base_idx + i];
+                        results[write_idx] = temp_results[base_idx + i];
+
+                        // Log each result being written
+                        printf("SYCL Compact: [Result %u] Thread %d, Local idx %u -> Global idx %u\n",
+                               write_idx, tid, i, write_idx);
+                        printf("  - Nonce: 0x%016llX\n",
+                               (unsigned long long)results[write_idx].nonce);
+                        printf("  - Hash: %08X %08X %08X %08X %08X\n",
+                               results[write_idx].hash[0], results[write_idx].hash[1],
+                               results[write_idx].hash[2], results[write_idx].hash[3],
+                               results[write_idx].hash[4]);
+                        printf("  - Matching bits: %u (difficulty: %u)\n",
+                               results[write_idx].matching_bits, difficulty);
+                        printf("  - Job version: %llu\n",
+                               (unsigned long long)results[write_idx].job_version);
+
+                        write_idx++;
                     }
                 }
             }
 
+            printf("SYCL Compact: Compaction complete. Total results written: %u\n", write_idx);
+
             // Update final count atomically
             *result_count = write_idx;
+            printf("SYCL Compact: Result count updated to: %u\n", write_idx);
         });
     });
 
