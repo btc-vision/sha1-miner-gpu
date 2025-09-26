@@ -36,9 +36,9 @@ inline uint32_t intel_bswap32(uint32_t x) {
            ((x & 0x000000FF) << 24);
 }
 
-// Intel GPU optimized rotation using SYCL built-in
+// Intel GPU optimized rotation - manual implementation for compatibility
 inline uint32_t intel_rotl32(uint32_t x, uint32_t n) {
-    return sycl::rotate(x, n);
+    return (x << n) | (x >> (32 - n));
 }
 
 // Intel GPU optimized count leading zeros using SYCL built-in
