@@ -14,6 +14,7 @@
 #ifdef USE_SYCL
 extern "C" void update_base_message_sycl(const uint32_t *base_msg_words);
 extern "C" void update_target_hash_sycl(const uint32_t *target_hash);
+extern "C" void update_complete_job_sycl(const uint32_t *base_msg_words, const uint32_t *target_hash, uint64_t job_version);
 extern "C" bool initialize_sycl_runtime(void);
 extern "C" void cleanup_sycl_runtime(void);
 extern "C" bool initialize_sycl_wrappers(void);
@@ -1038,10 +1039,16 @@ void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version)
     current_job_version_ = job_version;
     LOG_INFO("MINING", "Updating job from version ", old_version, " to ", job_version);
 
-    // CRITICAL FIX: Update Intel GPU global constant memory for target hash
+    // CRITICAL FIX: Update Intel GPU ALL global constant memory parameters
 #ifdef USE_SYCL
-    LOG_INFO("MINING", "Updating Intel SYCL target hash globally");
-    update_target_hash_sycl(job.target_hash);
+    LOG_INFO("MINING", "Updating Intel SYCL complete job globally - ALL PARAMETERS");
+
+    // Convert base message to uint32_t array for Intel
+    uint32_t base_msg_words[8];
+    memcpy(base_msg_words, job.base_message, 32);
+
+    // Call the complete job update function
+    update_complete_job_sycl(base_msg_words, job.target_hash, job_version);
 #endif
 
     // Update the device jobs with new data
