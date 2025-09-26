@@ -212,7 +212,7 @@ inline uint32_t count_leading_zeros_160bit_intel(const uint32_t hash[5], const u
         } \
     } while (0)
 
-// Intel GPU SHA-1 kernel using SYCL - matching NVIDIA structure
+// Intel GPU SHA-1 kernel using SYCL with per-thread result collection to prevent corruption
 sycl::event sha1_mining_kernel_intel(
     queue& q,
     const uint32_t* target_hash_device,
@@ -226,11 +226,30 @@ sycl::event sha1_mining_kernel_intel(
     uint64_t job_ver,
     int total_threads
 ) {
-    // Submit work to queue - use USM throughout, no buffers
-    auto event = q.submit([=](handler& h) {
+    // Allocate temporary buffer for thread-local results to avoid race conditions
+    constexpr int MAX_RESULTS_PER_THREAD = 8;
+    MiningResult* temp_results = malloc_device<MiningResult>(total_threads * MAX_RESULTS_PER_THREAD, q);
+    uint32_t* thread_counts = malloc_device<uint32_t>(total_threads, q);
+
+    if (!temp_results || !thread_counts) {
+        if (temp_results) free(temp_results, q);
+        if (thread_counts) free(thread_counts, q);
+        return q.submit([=](handler& h) { h.single_task([=]() {}); }); // Return empty event
+    }
+
+    // Clear thread counts AND temporary results buffer
+    q.memset(thread_counts, 0, total_threads * sizeof(uint32_t)).wait();
+    q.memset(temp_results, 0, total_threads * MAX_RESULTS_PER_THREAD * sizeof(MiningResult)).wait();
+
+    // Launch main kernel with per-thread collection
+    auto kernel_event = q.submit([=](handler& h) {
         h.parallel_for(range<1>(total_threads), [=](id<1> idx) {
             const uint32_t tid = idx[0];
             const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
+
+            // Thread-local result buffer (no race conditions here!)
+            MiningResult thread_results[MAX_RESULTS_PER_THREAD];
+            uint32_t thread_result_count = 0;
 
             // Load target hash into registers from USM pointer
             uint32_t target[5];
@@ -239,8 +258,8 @@ sycl::event sha1_mining_kernel_intel(
                 target[i] = target_hash_device[i];
             }
 
-        // Process nonces in pairs - adjust loop to handle 2 at a time
-        for (uint32_t i = 0; i < nonces_per_thread; i += 2) {
+        // Process nonces in pairs - but stop if thread buffer is full
+        for (uint32_t i = 0; i < nonces_per_thread && thread_result_count < MAX_RESULTS_PER_THREAD; i += 2) {
             uint64_t nonce1 = thread_nonce_base + i;
             uint64_t nonce2 = thread_nonce_base + i + 1;
 
@@ -393,54 +412,88 @@ sycl::event sha1_mining_kernel_intel(
             hash2[3] = d2 + H0_3;
             hash2[4] = e2 + H0_4;
 
-            // Check difficulty for first hash
+            // Check difficulty for first hash - store in thread-local buffer
             uint32_t matching_bits1 = count_leading_zeros_160bit_intel(hash1, target);
-            if (matching_bits1 >= difficulty) {
-                // Use USM atomic operations
-                auto atomic_ref = sycl::atomic_ref<uint32_t,
-                                                   sycl::memory_order::relaxed,
-                                                   sycl::memory_scope::device,
-                                                   sycl::access::address_space::global_space>(*result_count);
-                uint32_t idx = atomic_ref.fetch_add(1);
-
-                if (idx < result_capacity) {
-                    results[idx].nonce = nonce1;
-                    results[idx].matching_bits = matching_bits1;
-                    results[idx].job_version = job_ver;
-                    #pragma unroll
-                    for (int j = 0; j < 5; j++) {
-                        results[idx].hash[j] = hash1[j];
-                    }
+            if (matching_bits1 >= difficulty && thread_result_count < MAX_RESULTS_PER_THREAD) {
+                thread_results[thread_result_count].nonce = nonce1;
+                thread_results[thread_result_count].matching_bits = matching_bits1;
+                thread_results[thread_result_count].job_version = job_ver;
+                #pragma unroll
+                for (int j = 0; j < 5; j++) {
+                    thread_results[thread_result_count].hash[j] = hash1[j];
                 }
+                thread_result_count++;
             }
 
             // Check difficulty for second hash
-            if (i + 1 < nonces_per_thread) {  // Make sure we're within bounds
+            if (i + 1 < nonces_per_thread && thread_result_count < MAX_RESULTS_PER_THREAD) {
                 uint32_t matching_bits2 = count_leading_zeros_160bit_intel(hash2, target);
                 if (matching_bits2 >= difficulty) {
-                    // Use USM atomic operations
-                    auto atomic_ref = sycl::atomic_ref<uint32_t,
-                                                       sycl::memory_order::relaxed,
-                                                       sycl::memory_scope::device,
-                                                       sycl::access::address_space::global_space>(*result_count);
-                    uint32_t idx = atomic_ref.fetch_add(1);
-
-                    if (idx < result_capacity) {
-                        results[idx].nonce = nonce2;
-                        results[idx].matching_bits = matching_bits2;
-                        results[idx].job_version = job_ver;
-                        #pragma unroll
-                        for (int j = 0; j < 5; j++) {
-                            results[idx].hash[j] = hash2[j];
-                        }
+                    thread_results[thread_result_count].nonce = nonce2;
+                    thread_results[thread_result_count].matching_bits = matching_bits2;
+                    thread_results[thread_result_count].job_version = job_ver;
+                    #pragma unroll
+                    for (int j = 0; j < 5; j++) {
+                        thread_results[thread_result_count].hash[j] = hash2[j];
                     }
+                    thread_result_count++;
                 }
             }
+        }
+
+        // Store thread results in temporary buffer - no race conditions!
+        if (thread_result_count > 0) {
+            uint32_t base_idx = tid * MAX_RESULTS_PER_THREAD;
+            for (uint32_t i = 0; i < thread_result_count; i++) {
+                temp_results[base_idx + i] = thread_results[i];
             }
+            thread_counts[tid] = thread_result_count;
+        }
         });
     });
 
-    return event;
+    // Wait for main kernel to complete
+    kernel_event.wait();
+
+    // Second phase: compact all thread results into final buffer atomically
+    auto compact_event = q.submit([=](handler& h) {
+        h.single_task([=]() {
+            uint32_t total_results = 0;
+
+            // Count total results across all threads
+            for (int i = 0; i < total_threads; i++) {
+                total_results += thread_counts[i];
+            }
+
+            // Limit to result buffer capacity
+            total_results = sycl::min(total_results, result_capacity);
+
+            // Copy results to final buffer in thread order (deterministic)
+            uint32_t write_idx = 0;
+            for (int tid = 0; tid < total_threads && write_idx < total_results; tid++) {
+                if (thread_counts[tid] > 0) {
+                    uint32_t base_idx = tid * MAX_RESULTS_PER_THREAD;
+                    uint32_t count = sycl::min(thread_counts[tid], total_results - write_idx);
+
+                    for (uint32_t i = 0; i < count && write_idx < result_capacity; i++) {
+                        results[write_idx++] = temp_results[base_idx + i];
+                    }
+                }
+            }
+
+            // Update final count atomically
+            *result_count = write_idx;
+        });
+    });
+
+    // Wait for compaction to complete
+    compact_event.wait();
+
+    // Free temporary buffers
+    free(temp_results, q);
+    free(thread_counts, q);
+
+    return compact_event;
 }
 
 // CPU-side byte swap function for initialization
