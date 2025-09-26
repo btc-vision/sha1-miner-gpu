@@ -641,33 +641,15 @@ extern "C" void update_complete_job_sycl(const uint32_t *base_msg_words, const u
 
     try {
         printf("SYCL: *** COMPLETE JOB UPDATE START *** - Version %llu\n", (unsigned long long)job_version);
-
-        // 1. Update base message
-        printf("SYCL: Updating base message to device memory...\n");
         g_sycl_queue->memcpy(d_base_message_sycl, base_msg_words, 8 * sizeof(uint32_t)).wait();
-        printf("SYCL: Base message updated successfully\n");
 
-        // 2. Update pre-swapped base message
-        printf("SYCL: Updating pre-swapped base message...\n");
         uint32_t pre_swapped[8];
         for (int j = 0; j < 8; j++) {
             pre_swapped[j] = bswap32_cpu(base_msg_words[j]);
         }
+
         g_sycl_queue->memcpy(d_pre_swapped_base_sycl, pre_swapped, 8 * sizeof(uint32_t)).wait();
-        printf("SYCL: Pre-swapped base message updated successfully\n");
-
-        // 3. Update target hash
-        printf("SYCL: Updating target hash to device memory...\n");
         g_sycl_queue->memcpy(d_target_hash_sycl, target_hash, 5 * sizeof(uint32_t)).wait();
-        printf("SYCL: Target hash updated successfully\n");
-
-        printf("SYCL: *** COMPLETE JOB UPDATE DETAILS ***\n");
-        printf("SYCL: Updated complete job - Base: %08x %08x %08x %08x...\n",
-               base_msg_words[0], base_msg_words[1], base_msg_words[2], base_msg_words[3]);
-        printf("SYCL: Updated complete job - Target: %08x %08x %08x %08x %08x\n",
-               target_hash[0], target_hash[1], target_hash[2], target_hash[3], target_hash[4]);
-        printf("SYCL: Job version updated to: %llu\n", (unsigned long long)job_version);
-        printf("SYCL: *** COMPLETE JOB UPDATE COMPLETE ***\n");
 
     } catch (const sycl::exception& e) {
         printf("SYCL exception in update_complete_job_sycl: %s\n", e.what());

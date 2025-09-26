@@ -918,25 +918,26 @@ void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t non
     // Use a static atomic with proper initialization
     static std::atomic<uint64_t> last_updated_job_version{UINT64_MAX};
     // Load the current value for comparison
-    //uint64_t last_version    = last_updated_job_version.load();
+    uint64_t last_version    = last_updated_job_version.load();
     uint64_t current_version = current_job_version_.load();
 
-    // if (current_version != last_version) {
-    uint32_t base_msg_words[8];
-    memcpy(base_msg_words, job.base_message, 32);
+    if (current_version != last_version) {
+        uint32_t base_msg_words[8];
+        memcpy(base_msg_words, job.base_message, 32);
 
 #ifdef USE_SYCL
-    update_complete_job_sycl(base_msg_words, job.target_hash, current_version);
+        update_complete_job_sycl(base_msg_words, job.target_hash, current_version);
 #elif USE_HIP
-    update_base_message_hip(base_msg_words);
+        update_base_message_hip(base_msg_words);
 #else
-    update_base_message_cuda(base_msg_words);
+        update_base_message_cuda(base_msg_words);
 #endif
 
-    // Store the new version
-    last_updated_job_version.store(current_version);
-    // LOG_TRACE("MINING", "Updated constant memory with complete job parameters for job version ", current_version);
-    //}
+        // Store the new version
+        last_updated_job_version.store(current_version);
+        // LOG_TRACE("MINING", "Updated constant memory with complete job parameters for job version ",
+        // current_version);
+    }
 
     // Configure kernel
     KernelConfig config{};
@@ -1040,7 +1041,6 @@ void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version)
     current_job_version_ = job_version;
     LOG_INFO("MINING", "Updating job from version ", old_version, " to ", job_version);
 
-    // CRITICAL FIX: Update Intel GPU ALL global constant memory parameters
 #ifdef USE_SYCL
     LOG_INFO("MINING", "Updating Intel SYCL complete job globally - ALL PARAMETERS");
 
