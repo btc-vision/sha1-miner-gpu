@@ -27,6 +27,9 @@
 #ifdef USE_HIP
     #define NONCES_PER_THREAD         8192
     #define DEFAULT_THREADS_PER_BLOCK 256
+    #elseifdef USE_SYCL
+    #define NONCES_PER_THREAD         8192
+    #define DEFAULT_THREADS_PER_BLOCK 256
 #else
     #define NONCES_PER_THREAD         16384  // 32768 16384 131072
     #define DEFAULT_THREADS_PER_BLOCK 256

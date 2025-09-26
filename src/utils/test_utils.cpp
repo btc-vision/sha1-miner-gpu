@@ -96,7 +96,7 @@ void run_benchmark(const int gpu_id)
     }
 
     // Test different difficulty levels
-    const std::vector<uint32_t> difficulties = {60};
+    const std::vector<uint32_t> difficulties = {32};
     std::vector<double> results;
 
     for (const uint32_t diff : difficulties) {

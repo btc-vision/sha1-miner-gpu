@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -24,7 +25,7 @@
 #define MAX_CANDIDATES_PER_BATCH 1024
 
 #ifdef USE_SYCL
-    #define NONCES_PER_THREAD         16384  // Optimized for Intel GPU
+    #define NONCES_PER_THREAD         4096
     #define DEFAULT_THREADS_PER_BLOCK 256
 #else
     #define NONCES_PER_THREAD         16384
@@ -77,31 +78,21 @@ struct ResultPool
 class GPUMiner
 {
 public:
-    virtual ~GPUMiner() = default;
-    virtual bool initialize() = 0;
-    virtual void cleanup() = 0;
-    virtual void setBaseMessage(const uint32_t *base_msg_words) = 0;
-    virtual void launchKernel(
-        const DeviceMiningJob &device_job,
-        uint32_t difficulty,
-        uint64_t nonce_offset,
-        const ResultPool &pool,
-        const KernelConfig &config,
-        uint64_t job_version) = 0;
-    virtual std::string getPlatformName() const = 0;
+    virtual ~GPUMiner()                                                                                 = default;
+    virtual bool initialize()                                                                           = 0;
+    virtual void cleanup()                                                                              = 0;
+    virtual void setBaseMessage(const uint32_t *base_msg_words)                                         = 0;
+    virtual void launchKernel(const DeviceMiningJob &device_job, uint32_t difficulty, uint64_t nonce_offset,
+                              const ResultPool &pool, const KernelConfig &config, uint64_t job_version) = 0;
+    virtual std::string getPlatformName() const                                                         = 0;
 };
 
 // Function declarations
 void update_base_message_sycl(const uint32_t *base_msg_words);
 bool initialize_sycl_runtime();
-extern "C" void launch_mining_kernel_intel(
-    const DeviceMiningJob &device_job,
-    uint32_t difficulty,
-    uint64_t nonce_offset,
-    const ResultPool &pool,
-    const KernelConfig &config,
-    uint64_t job_version
-);
+extern "C" void launch_mining_kernel_intel(const DeviceMiningJob &device_job, uint32_t difficulty,
+                                           uint64_t nonce_offset, const ResultPool &pool, const KernelConfig &config,
+                                           uint64_t job_version);
 void cleanup_sycl_runtime();
 
 // Utility functions

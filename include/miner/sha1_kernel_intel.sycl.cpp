@@ -6,7 +6,7 @@
 
 using namespace sycl;
 
-// Global SYCL queue and context for Intel GPU mining - externally accessible
+// Global SYCL queue and context for Intel GPU mining
 queue *g_sycl_queue = nullptr;
 context *g_sycl_context = nullptr;
 device *g_intel_device = nullptr;
@@ -14,6 +14,7 @@ device *g_intel_device = nullptr;
 // Global constant memory for base message (SYCL equivalent)
 static uint32_t *d_base_message_sycl = nullptr;
 static uint32_t *d_pre_swapped_base_sycl = nullptr;
+static uint32_t *d_target_hash_sycl = nullptr;
 
 // SHA-1 constants
 constexpr uint32_t K0 = 0x5A827999;
@@ -27,7 +28,7 @@ constexpr uint32_t H0_2 = 0x98BADCFE;
 constexpr uint32_t H0_3 = 0x10325476;
 constexpr uint32_t H0_4 = 0xC3D2E1F0;
 
-// Intel GPU optimized byte swap using SYCL
+// Intel GPU optimized byte swap
 inline uint32_t intel_bswap32(uint32_t x) {
     return ((x & 0xFF000000) >> 24) |
            ((x & 0x00FF0000) >> 8) |
@@ -35,24 +36,17 @@ inline uint32_t intel_bswap32(uint32_t x) {
            ((x & 0x000000FF) << 24);
 }
 
-// Intel GPU optimized rotation
+// Intel GPU optimized rotation using SYCL built-in
 inline uint32_t intel_rotl32(uint32_t x, uint32_t n) {
-    return (x << n) | (x >> (32 - n));
+    return sycl::rotate(x, n);
 }
 
-// Intel GPU optimized count leading zeros
+// Intel GPU optimized count leading zeros using SYCL built-in
 inline uint32_t intel_clz(uint32_t x) {
-    if (x == 0) return 32;
-    uint32_t count = 0;
-    if ((x & 0xFFFF0000) == 0) { count += 16; x <<= 16; }
-    if ((x & 0xFF000000) == 0) { count += 8; x <<= 8; }
-    if ((x & 0xF0000000) == 0) { count += 4; x <<= 4; }
-    if ((x & 0xC0000000) == 0) { count += 2; x <<= 2; }
-    if ((x & 0x80000000) == 0) { count += 1; }
-    return count;
+    return sycl::clz(x);
 }
 
-// Count leading zeros for 160-bit comparison - optimized for Intel GPU
+// Count leading zeros for 160-bit comparison
 inline uint32_t count_leading_zeros_160bit_intel(const uint32_t hash[5], const uint32_t target[5]) {
     uint32_t xor_val;
     uint32_t clz;
@@ -90,55 +84,138 @@ inline uint32_t count_leading_zeros_160bit_intel(const uint32_t hash[5], const u
     return 160;
 }
 
-// SYCL-optimized SHA-1 round macros for Intel GPU
-#define SHA1_ROUND_0_19_INTEL(a, b, c, d, e, W_val) \
+// DUAL SHA-1 round macros for processing 2 hashes simultaneously
+#define SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_val, a2, b2, c2, d2, e2, W2_val) \
     do { \
-        uint32_t f = (b & c) | (~b & d); \
-        uint32_t temp = intel_rotl32(a, 5) + f + e + K0 + W_val; \
-        e = d; \
-        d = c; \
-        c = intel_rotl32(b, 30); \
-        b = a; \
-        a = temp; \
+        uint32_t f1 = (b1 & c1) | (~b1 & d1); \
+        uint32_t f2 = (b2 & c2) | (~b2 & d2); \
+        uint32_t temp1 = intel_rotl32(a1, 5) + f1 + e1 + K0 + W1_val; \
+        uint32_t temp2 = intel_rotl32(a2, 5) + f2 + e2 + K0 + W2_val; \
+        e1 = d1; \
+        e2 = d2; \
+        d1 = c1; \
+        d2 = c2; \
+        c1 = intel_rotl32(b1, 30); \
+        c2 = intel_rotl32(b2, 30); \
+        b1 = a1; \
+        b2 = a2; \
+        a1 = temp1; \
+        a2 = temp2; \
     } while (0)
 
-#define SHA1_ROUND_20_39_INTEL(a, b, c, d, e, W_val) \
+#define SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_val, a2, b2, c2, d2, e2, W2_val) \
     do { \
-        uint32_t f = b ^ c ^ d; \
-        uint32_t temp = intel_rotl32(a, 5) + f + e + K1 + W_val; \
-        e = d; \
-        d = c; \
-        c = intel_rotl32(b, 30); \
-        b = a; \
-        a = temp; \
+        uint32_t f1 = b1 ^ c1 ^ d1; \
+        uint32_t f2 = b2 ^ c2 ^ d2; \
+        uint32_t temp1 = intel_rotl32(a1, 5) + f1 + e1 + K1 + W1_val; \
+        uint32_t temp2 = intel_rotl32(a2, 5) + f2 + e2 + K1 + W2_val; \
+        e1 = d1; \
+        e2 = d2; \
+        d1 = c1; \
+        d2 = c2; \
+        c1 = intel_rotl32(b1, 30); \
+        c2 = intel_rotl32(b2, 30); \
+        b1 = a1; \
+        b2 = a2; \
+        a1 = temp1; \
+        a2 = temp2; \
     } while (0)
 
-#define SHA1_ROUND_40_59_INTEL(a, b, c, d, e, W_val) \
+#define SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_val, a2, b2, c2, d2, e2, W2_val) \
     do { \
-        uint32_t f = (b & c) | (d & (b ^ c)); \
-        uint32_t temp = intel_rotl32(a, 5) + f + e + K2 + W_val; \
-        e = d; \
-        d = c; \
-        c = intel_rotl32(b, 30); \
-        b = a; \
-        a = temp; \
+        uint32_t f1 = (b1 & c1) | (d1 & (b1 ^ c1)); \
+        uint32_t f2 = (b2 & c2) | (d2 & (b2 ^ c2)); \
+        uint32_t temp1 = intel_rotl32(a1, 5) + f1 + e1 + K2 + W1_val; \
+        uint32_t temp2 = intel_rotl32(a2, 5) + f2 + e2 + K2 + W2_val; \
+        e1 = d1; \
+        e2 = d2; \
+        d1 = c1; \
+        d2 = c2; \
+        c1 = intel_rotl32(b1, 30); \
+        c2 = intel_rotl32(b2, 30); \
+        b1 = a1; \
+        b2 = a2; \
+        a1 = temp1; \
+        a2 = temp2; \
     } while (0)
 
-#define SHA1_ROUND_60_79_INTEL(a, b, c, d, e, W_val) \
+#define SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_val, a2, b2, c2, d2, e2, W2_val) \
     do { \
-        uint32_t f = b ^ c ^ d; \
-        uint32_t temp = intel_rotl32(a, 5) + f + e + K3 + W_val; \
-        e = d; \
-        d = c; \
-        c = intel_rotl32(b, 30); \
-        b = a; \
-        a = temp; \
+        uint32_t f1 = b1 ^ c1 ^ d1; \
+        uint32_t f2 = b2 ^ c2 ^ d2; \
+        uint32_t temp1 = intel_rotl32(a1, 5) + f1 + e1 + K3 + W1_val; \
+        uint32_t temp2 = intel_rotl32(a2, 5) + f2 + e2 + K3 + W2_val; \
+        e1 = d1; \
+        e2 = d2; \
+        d1 = c1; \
+        d2 = c2; \
+        c1 = intel_rotl32(b1, 30); \
+        c2 = intel_rotl32(b2, 30); \
+        b1 = a1; \
+        b2 = a2; \
+        a1 = temp1; \
+        a2 = temp2; \
     } while (0)
 
-// Intel GPU SHA-1 kernel using SYCL with dual hash processing for maximum throughput
-void sha1_mining_kernel_intel(
+// Message schedule macro adapted for scalars
+#define COMPUTE_W_DUAL(t) \
+    do { \
+        uint32_t idx = (t) & 15; \
+        if (idx == 0) { \
+            W1_0 = intel_rotl32(W1_13 ^ W1_8 ^ W1_2 ^ W1_0, 1); \
+            W2_0 = intel_rotl32(W2_13 ^ W2_8 ^ W2_2 ^ W2_0, 1); \
+        } else if (idx == 1) { \
+            W1_1 = intel_rotl32(W1_14 ^ W1_9 ^ W1_3 ^ W1_1, 1); \
+            W2_1 = intel_rotl32(W2_14 ^ W2_9 ^ W2_3 ^ W2_1, 1); \
+        } else if (idx == 2) { \
+            W1_2 = intel_rotl32(W1_15 ^ W1_10 ^ W1_4 ^ W1_2, 1); \
+            W2_2 = intel_rotl32(W2_15 ^ W2_10 ^ W2_4 ^ W2_2, 1); \
+        } else if (idx == 3) { \
+            W1_3 = intel_rotl32(W1_0 ^ W1_11 ^ W1_5 ^ W1_3, 1); \
+            W2_3 = intel_rotl32(W2_0 ^ W2_11 ^ W2_5 ^ W2_3, 1); \
+        } else if (idx == 4) { \
+            W1_4 = intel_rotl32(W1_1 ^ W1_12 ^ W1_6 ^ W1_4, 1); \
+            W2_4 = intel_rotl32(W2_1 ^ W2_12 ^ W2_6 ^ W2_4, 1); \
+        } else if (idx == 5) { \
+            W1_5 = intel_rotl32(W1_2 ^ W1_13 ^ W1_7 ^ W1_5, 1); \
+            W2_5 = intel_rotl32(W2_2 ^ W2_13 ^ W2_7 ^ W2_5, 1); \
+        } else if (idx == 6) { \
+            W1_6 = intel_rotl32(W1_3 ^ W1_14 ^ W1_8 ^ W1_6, 1); \
+            W2_6 = intel_rotl32(W2_3 ^ W2_14 ^ W2_8 ^ W2_6, 1); \
+        } else if (idx == 7) { \
+            W1_7 = intel_rotl32(W1_4 ^ W1_15 ^ W1_9 ^ W1_7, 1); \
+            W2_7 = intel_rotl32(W2_4 ^ W2_15 ^ W2_9 ^ W2_7, 1); \
+        } else if (idx == 8) { \
+            W1_8 = intel_rotl32(W1_5 ^ W1_0 ^ W1_10 ^ W1_8, 1); \
+            W2_8 = intel_rotl32(W2_5 ^ W2_0 ^ W2_10 ^ W2_8, 1); \
+        } else if (idx == 9) { \
+            W1_9 = intel_rotl32(W1_6 ^ W1_1 ^ W1_11 ^ W1_9, 1); \
+            W2_9 = intel_rotl32(W2_6 ^ W2_1 ^ W2_11 ^ W2_9, 1); \
+        } else if (idx == 10) { \
+            W1_10 = intel_rotl32(W1_7 ^ W1_2 ^ W1_12 ^ W1_10, 1); \
+            W2_10 = intel_rotl32(W2_7 ^ W2_2 ^ W2_12 ^ W2_10, 1); \
+        } else if (idx == 11) { \
+            W1_11 = intel_rotl32(W1_8 ^ W1_3 ^ W1_13 ^ W1_11, 1); \
+            W2_11 = intel_rotl32(W2_8 ^ W2_3 ^ W2_13 ^ W2_11, 1); \
+        } else if (idx == 12) { \
+            W1_12 = intel_rotl32(W1_9 ^ W1_4 ^ W1_14 ^ W1_12, 1); \
+            W2_12 = intel_rotl32(W2_9 ^ W2_4 ^ W2_14 ^ W2_12, 1); \
+        } else if (idx == 13) { \
+            W1_13 = intel_rotl32(W1_10 ^ W1_5 ^ W1_15 ^ W1_13, 1); \
+            W2_13 = intel_rotl32(W2_10 ^ W2_5 ^ W2_15 ^ W2_13, 1); \
+        } else if (idx == 14) { \
+            W1_14 = intel_rotl32(W1_11 ^ W1_6 ^ W1_0 ^ W1_14, 1); \
+            W2_14 = intel_rotl32(W2_11 ^ W2_6 ^ W2_0 ^ W2_14, 1); \
+        } else if (idx == 15) { \
+            W1_15 = intel_rotl32(W1_12 ^ W1_7 ^ W1_1 ^ W1_15, 1); \
+            W2_15 = intel_rotl32(W2_12 ^ W2_7 ^ W2_1 ^ W2_15, 1); \
+        } \
+    } while (0)
+
+// Intel GPU SHA-1 kernel using SYCL - matching NVIDIA structure
+sycl::event sha1_mining_kernel_intel(
     queue& q,
-    const uint32_t* target_hash,
+    const uint32_t* target_hash_device,
     const uint32_t* pre_swapped_base,
     uint32_t difficulty,
     MiningResult* results,
@@ -146,24 +223,37 @@ void sha1_mining_kernel_intel(
     uint32_t result_capacity,
     uint64_t nonce_base,
     uint32_t nonces_per_thread,
-    uint64_t job_version,
+    uint64_t job_ver,
     int total_threads
 ) {
-    // Reset result count
-    q.memset(result_count, 0, sizeof(uint32_t)).wait();
+    // Create buffers for better memory management
+    buffer<uint32_t, 1> target_buffer(target_hash_device, range<1>(5));
+    buffer<uint32_t, 1> pre_swapped_buffer(pre_swapped_base, range<1>(8));
 
-    // Launch the SYCL kernel
-    auto event = q.parallel_for(range<1>(total_threads), [=](id<1> idx) {
-        const uint32_t tid = idx[0];
-        const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
+    // Submit work to queue with handler
+    auto event = q.submit([&](handler& h) {
+        // Get accessors for device memory
+        auto target_acc = target_buffer.get_access<access::mode::read>(h);
+        auto pre_swapped_acc = pre_swapped_buffer.get_access<access::mode::read>(h);
 
-        // Load target hash into private memory for better performance
-        uint32_t target[5];
-        for (int i = 0; i < 5; i++) {
-            target[i] = target_hash[i];
-        }
+        // Capture other parameters by value
+        const uint32_t diff = difficulty;
+        const uint64_t nonce_b = nonce_base;
+        const uint32_t nonces_pt = nonces_per_thread;
+        const uint32_t res_cap = result_capacity;
 
-        // Process nonces in pairs for better utilization (like NVIDIA dual implementation)
+        h.parallel_for(range<1>(total_threads), [=](id<1> idx) {
+            const uint32_t tid = idx[0];
+            const uint64_t thread_nonce_base = nonce_b + (static_cast<uint64_t>(tid) * nonces_pt);
+
+            // Load target hash into registers from accessor
+            uint32_t target[5];
+            #pragma unroll
+            for (int i = 0; i < 5; i++) {
+                target[i] = target_acc[i];
+            }
+
+        // Process nonces in pairs - adjust loop to handle 2 at a time
         for (uint32_t i = 0; i < nonces_per_thread; i += 2) {
             uint64_t nonce1 = thread_nonce_base + i;
             uint64_t nonce2 = thread_nonce_base + i + 1;
@@ -172,159 +262,199 @@ void sha1_mining_kernel_intel(
             if (nonce1 == 0) nonce1 = thread_nonce_base + nonces_per_thread;
             if (nonce2 == 0) nonce2 = thread_nonce_base + nonces_per_thread + 1;
 
-            // Process both hashes in parallel for better performance
-            uint32_t W1[16], W2[16];
+            // Scalar W variables for both hashes
+            uint32_t W1_0, W1_1, W1_2, W1_3, W1_4, W1_5, W1_6, W1_7, W1_8, W1_9, W1_10, W1_11, W1_12, W1_13, W1_14, W1_15;
+            uint32_t W2_0, W2_1, W2_2, W2_3, W2_4, W2_5, W2_6, W2_7, W2_8, W2_9, W2_10, W2_11, W2_12, W2_13, W2_14, W2_15;
 
-            // Set fixed pre-swapped parts for both hashes (0-5)
-            for (int j = 0; j < 6; j++) {
-                W1[j] = pre_swapped_base[j];
-                W2[j] = pre_swapped_base[j];
-            }
+            // Set fixed pre-swapped parts for 0-5 (same for both)
+            W1_0 = pre_swapped_acc[0]; W2_0 = pre_swapped_acc[0];
+            W1_1 = pre_swapped_acc[1]; W2_1 = pre_swapped_acc[1];
+            W1_2 = pre_swapped_acc[2]; W2_2 = pre_swapped_acc[2];
+            W1_3 = pre_swapped_acc[3]; W2_3 = pre_swapped_acc[3];
+            W1_4 = pre_swapped_acc[4]; W2_4 = pre_swapped_acc[4];
+            W1_5 = pre_swapped_acc[5]; W2_5 = pre_swapped_acc[5];
 
-            // Set varying parts for 6-7 using pre-swapped base and nonce XOR
+            // Set varying parts for 6-7 using pre-swapped base and direct nonce XOR
             uint32_t nonce1_high = static_cast<uint32_t>(nonce1 >> 32);
             uint32_t nonce1_low = static_cast<uint32_t>(nonce1 & 0xFFFFFFFF);
-            W1[6] = pre_swapped_base[6] ^ nonce1_high;
-            W1[7] = pre_swapped_base[7] ^ nonce1_low;
+            W1_6 = pre_swapped_acc[6] ^ nonce1_high;
+            W1_7 = pre_swapped_acc[7] ^ nonce1_low;
 
             uint32_t nonce2_high = static_cast<uint32_t>(nonce2 >> 32);
             uint32_t nonce2_low = static_cast<uint32_t>(nonce2 & 0xFFFFFFFF);
-            W2[6] = pre_swapped_base[6] ^ nonce2_high;
-            W2[7] = pre_swapped_base[7] ^ nonce2_low;
+            W2_6 = pre_swapped_acc[6] ^ nonce2_high;
+            W2_7 = pre_swapped_acc[7] ^ nonce2_low;
 
             // Apply padding to both
-            W1[8] = 0x80000000; W2[8] = 0x80000000;
-            W1[9] = 0; W2[9] = 0;
-            W1[10] = 0; W2[10] = 0;
-            W1[11] = 0; W2[11] = 0;
-            W1[12] = 0; W2[12] = 0;
-            W1[13] = 0; W2[13] = 0;
-            W1[14] = 0; W2[14] = 0;
-            W1[15] = 0x00000100; W2[15] = 0x00000100;
+            W1_8 = 0x80000000; W2_8 = 0x80000000;
+            W1_9 = 0; W2_9 = 0;
+            W1_10 = 0; W2_10 = 0;
+            W1_11 = 0; W2_11 = 0;
+            W1_12 = 0; W2_12 = 0;
+            W1_13 = 0; W2_13 = 0;
+            W1_14 = 0; W2_14 = 0;
+            W1_15 = 0x00000100; W2_15 = 0x00000100;
 
-            // Process hash 1
-            uint32_t a1 = H0_0, b1 = H0_1, c1 = H0_2, d1 = H0_3, e1 = H0_4;
+            // Initialize working variables for both hashes
+            uint32_t a1 = H0_0, a2 = H0_0;
+            uint32_t b1 = H0_1, b2 = H0_1;
+            uint32_t c1 = H0_2, c2 = H0_2;
+            uint32_t d1 = H0_3, d2 = H0_3;
+            uint32_t e1 = H0_4, e2 = H0_4;
 
-            // Rounds 0-15 (unrolled for performance)
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[0]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[1]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[2]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[3]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[4]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[5]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[6]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[7]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[8]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[9]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[10]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[11]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[12]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[13]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[14]);
-            SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[15]);
+            // FULLY UNROLLED DUAL SHA-1 rounds
+            // Rounds 0-15 (no message schedule needed)
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_0, a2, b2, c2, d2, e2, W2_0);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_1, a2, b2, c2, d2, e2, W2_1);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_2, a2, b2, c2, d2, e2, W2_2);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_3, a2, b2, c2, d2, e2, W2_3);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_4, a2, b2, c2, d2, e2, W2_4);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_5, a2, b2, c2, d2, e2, W2_5);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_6, a2, b2, c2, d2, e2, W2_6);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_7, a2, b2, c2, d2, e2, W2_7);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_8, a2, b2, c2, d2, e2, W2_8);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_9, a2, b2, c2, d2, e2, W2_9);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_10, a2, b2, c2, d2, e2, W2_10);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_11, a2, b2, c2, d2, e2, W2_11);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_12, a2, b2, c2, d2, e2, W2_12);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_13, a2, b2, c2, d2, e2, W2_13);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_14, a2, b2, c2, d2, e2, W2_14);
+            SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_15, a2, b2, c2, d2, e2, W2_15);
 
-            // Message schedule and remaining rounds (16-79)
-            for (int t = 16; t < 80; t++) {
-                uint32_t idx = t & 15;
-                W1[idx] = intel_rotl32(W1[(t-3) & 15] ^ W1[(t-8) & 15] ^ W1[(t-14) & 15] ^ W1[(t-16) & 15], 1);
+            // Rounds 16-19 with message schedule
+            COMPUTE_W_DUAL(16); SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_0, a2, b2, c2, d2, e2, W2_0);
+            COMPUTE_W_DUAL(17); SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_1, a2, b2, c2, d2, e2, W2_1);
+            COMPUTE_W_DUAL(18); SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_2, a2, b2, c2, d2, e2, W2_2);
+            COMPUTE_W_DUAL(19); SHA1_ROUND_0_19_DUAL(a1, b1, c1, d1, e1, W1_3, a2, b2, c2, d2, e2, W2_3);
 
-                if (t < 20) {
-                    SHA1_ROUND_0_19_INTEL(a1, b1, c1, d1, e1, W1[idx]);
-                } else if (t < 40) {
-                    SHA1_ROUND_20_39_INTEL(a1, b1, c1, d1, e1, W1[idx]);
-                } else if (t < 60) {
-                    SHA1_ROUND_40_59_INTEL(a1, b1, c1, d1, e1, W1[idx]);
-                } else {
-                    SHA1_ROUND_60_79_INTEL(a1, b1, c1, d1, e1, W1[idx]);
-                }
-            }
+            // Rounds 20-39
+            COMPUTE_W_DUAL(20); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_4, a2, b2, c2, d2, e2, W2_4);
+            COMPUTE_W_DUAL(21); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_5, a2, b2, c2, d2, e2, W2_5);
+            COMPUTE_W_DUAL(22); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_6, a2, b2, c2, d2, e2, W2_6);
+            COMPUTE_W_DUAL(23); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_7, a2, b2, c2, d2, e2, W2_7);
+            COMPUTE_W_DUAL(24); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_8, a2, b2, c2, d2, e2, W2_8);
+            COMPUTE_W_DUAL(25); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_9, a2, b2, c2, d2, e2, W2_9);
+            COMPUTE_W_DUAL(26); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_10, a2, b2, c2, d2, e2, W2_10);
+            COMPUTE_W_DUAL(27); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_11, a2, b2, c2, d2, e2, W2_11);
+            COMPUTE_W_DUAL(28); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_12, a2, b2, c2, d2, e2, W2_12);
+            COMPUTE_W_DUAL(29); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_13, a2, b2, c2, d2, e2, W2_13);
+            COMPUTE_W_DUAL(30); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_14, a2, b2, c2, d2, e2, W2_14);
+            COMPUTE_W_DUAL(31); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_15, a2, b2, c2, d2, e2, W2_15);
+            COMPUTE_W_DUAL(32); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_0, a2, b2, c2, d2, e2, W2_0);
+            COMPUTE_W_DUAL(33); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_1, a2, b2, c2, d2, e2, W2_1);
+            COMPUTE_W_DUAL(34); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_2, a2, b2, c2, d2, e2, W2_2);
+            COMPUTE_W_DUAL(35); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_3, a2, b2, c2, d2, e2, W2_3);
+            COMPUTE_W_DUAL(36); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_4, a2, b2, c2, d2, e2, W2_4);
+            COMPUTE_W_DUAL(37); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_5, a2, b2, c2, d2, e2, W2_5);
+            COMPUTE_W_DUAL(38); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_6, a2, b2, c2, d2, e2, W2_6);
+            COMPUTE_W_DUAL(39); SHA1_ROUND_20_39_DUAL(a1, b1, c1, d1, e1, W1_7, a2, b2, c2, d2, e2, W2_7);
 
-            // Final hash 1
-            uint32_t hash1[5];
+            // Rounds 40-59
+            COMPUTE_W_DUAL(40); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_8, a2, b2, c2, d2, e2, W2_8);
+            COMPUTE_W_DUAL(41); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_9, a2, b2, c2, d2, e2, W2_9);
+            COMPUTE_W_DUAL(42); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_10, a2, b2, c2, d2, e2, W2_10);
+            COMPUTE_W_DUAL(43); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_11, a2, b2, c2, d2, e2, W2_11);
+            COMPUTE_W_DUAL(44); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_12, a2, b2, c2, d2, e2, W2_12);
+            COMPUTE_W_DUAL(45); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_13, a2, b2, c2, d2, e2, W2_13);
+            COMPUTE_W_DUAL(46); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_14, a2, b2, c2, d2, e2, W2_14);
+            COMPUTE_W_DUAL(47); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_15, a2, b2, c2, d2, e2, W2_15);
+            COMPUTE_W_DUAL(48); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_0, a2, b2, c2, d2, e2, W2_0);
+            COMPUTE_W_DUAL(49); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_1, a2, b2, c2, d2, e2, W2_1);
+            COMPUTE_W_DUAL(50); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_2, a2, b2, c2, d2, e2, W2_2);
+            COMPUTE_W_DUAL(51); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_3, a2, b2, c2, d2, e2, W2_3);
+            COMPUTE_W_DUAL(52); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_4, a2, b2, c2, d2, e2, W2_4);
+            COMPUTE_W_DUAL(53); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_5, a2, b2, c2, d2, e2, W2_5);
+            COMPUTE_W_DUAL(54); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_6, a2, b2, c2, d2, e2, W2_6);
+            COMPUTE_W_DUAL(55); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_7, a2, b2, c2, d2, e2, W2_7);
+            COMPUTE_W_DUAL(56); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_8, a2, b2, c2, d2, e2, W2_8);
+            COMPUTE_W_DUAL(57); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_9, a2, b2, c2, d2, e2, W2_9);
+            COMPUTE_W_DUAL(58); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_10, a2, b2, c2, d2, e2, W2_10);
+            COMPUTE_W_DUAL(59); SHA1_ROUND_40_59_DUAL(a1, b1, c1, d1, e1, W1_11, a2, b2, c2, d2, e2, W2_11);
+
+            // Rounds 60-79
+            COMPUTE_W_DUAL(60); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_12, a2, b2, c2, d2, e2, W2_12);
+            COMPUTE_W_DUAL(61); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_13, a2, b2, c2, d2, e2, W2_13);
+            COMPUTE_W_DUAL(62); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_14, a2, b2, c2, d2, e2, W2_14);
+            COMPUTE_W_DUAL(63); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_15, a2, b2, c2, d2, e2, W2_15);
+            COMPUTE_W_DUAL(64); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_0, a2, b2, c2, d2, e2, W2_0);
+            COMPUTE_W_DUAL(65); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_1, a2, b2, c2, d2, e2, W2_1);
+            COMPUTE_W_DUAL(66); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_2, a2, b2, c2, d2, e2, W2_2);
+            COMPUTE_W_DUAL(67); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_3, a2, b2, c2, d2, e2, W2_3);
+            COMPUTE_W_DUAL(68); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_4, a2, b2, c2, d2, e2, W2_4);
+            COMPUTE_W_DUAL(69); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_5, a2, b2, c2, d2, e2, W2_5);
+            COMPUTE_W_DUAL(70); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_6, a2, b2, c2, d2, e2, W2_6);
+            COMPUTE_W_DUAL(71); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_7, a2, b2, c2, d2, e2, W2_7);
+            COMPUTE_W_DUAL(72); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_8, a2, b2, c2, d2, e2, W2_8);
+            COMPUTE_W_DUAL(73); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_9, a2, b2, c2, d2, e2, W2_9);
+            COMPUTE_W_DUAL(74); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_10, a2, b2, c2, d2, e2, W2_10);
+            COMPUTE_W_DUAL(75); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_11, a2, b2, c2, d2, e2, W2_11);
+            COMPUTE_W_DUAL(76); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_12, a2, b2, c2, d2, e2, W2_12);
+            COMPUTE_W_DUAL(77); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_13, a2, b2, c2, d2, e2, W2_13);
+            COMPUTE_W_DUAL(78); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_14, a2, b2, c2, d2, e2, W2_14);
+            COMPUTE_W_DUAL(79); SHA1_ROUND_60_79_DUAL(a1, b1, c1, d1, e1, W1_15, a2, b2, c2, d2, e2, W2_15);
+
+            // Final hash values for both
+            uint32_t hash1[5], hash2[5];
             hash1[0] = a1 + H0_0;
             hash1[1] = b1 + H0_1;
             hash1[2] = c1 + H0_2;
             hash1[3] = d1 + H0_3;
             hash1[4] = e1 + H0_4;
 
-            // Check difficulty for hash 1
+            hash2[0] = a2 + H0_0;
+            hash2[1] = b2 + H0_1;
+            hash2[2] = c2 + H0_2;
+            hash2[3] = d2 + H0_3;
+            hash2[4] = e2 + H0_4;
+
+            // Check difficulty for first hash
             uint32_t matching_bits1 = count_leading_zeros_160bit_intel(hash1, target);
             if (matching_bits1 >= difficulty) {
-                uint32_t idx = sycl::atomic_ref<uint32_t, memory_order::relaxed, memory_scope::device>(*result_count).fetch_add(1);
-                if (idx < result_capacity) {
+                // Simplified atomic increment
+                auto atomic_ref = sycl::atomic_ref<uint32_t,
+                                                   sycl::memory_order::relaxed,
+                                                   sycl::memory_scope::device,
+                                                   sycl::access::address_space::global_space>(*result_count);
+                uint32_t idx = atomic_ref.fetch_add(1);
+
+                if (idx < res_cap) {
                     results[idx].nonce = nonce1;
                     results[idx].matching_bits = matching_bits1;
-                    results[idx].job_version = job_version;
+                    results[idx].job_version = job_ver;
+                    #pragma unroll
                     for (int j = 0; j < 5; j++) {
                         results[idx].hash[j] = hash1[j];
                     }
                 }
             }
 
-            // Process hash 2 (if within bounds)
-            if (i + 1 < nonces_per_thread) {
-                uint32_t a2 = H0_0, b2 = H0_1, c2 = H0_2, d2 = H0_3, e2 = H0_4;
-
-                // Rounds 0-15 for hash 2
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[0]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[1]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[2]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[3]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[4]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[5]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[6]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[7]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[8]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[9]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[10]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[11]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[12]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[13]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[14]);
-                SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[15]);
-
-                // Message schedule and remaining rounds for hash 2
-                for (int t = 16; t < 80; t++) {
-                    uint32_t idx = t & 15;
-                    W2[idx] = intel_rotl32(W2[(t-3) & 15] ^ W2[(t-8) & 15] ^ W2[(t-14) & 15] ^ W2[(t-16) & 15], 1);
-
-                    if (t < 20) {
-                        SHA1_ROUND_0_19_INTEL(a2, b2, c2, d2, e2, W2[idx]);
-                    } else if (t < 40) {
-                        SHA1_ROUND_20_39_INTEL(a2, b2, c2, d2, e2, W2[idx]);
-                    } else if (t < 60) {
-                        SHA1_ROUND_40_59_INTEL(a2, b2, c2, d2, e2, W2[idx]);
-                    } else {
-                        SHA1_ROUND_60_79_INTEL(a2, b2, c2, d2, e2, W2[idx]);
-                    }
-                }
-
-                // Final hash 2
-                uint32_t hash2[5];
-                hash2[0] = a2 + H0_0;
-                hash2[1] = b2 + H0_1;
-                hash2[2] = c2 + H0_2;
-                hash2[3] = d2 + H0_3;
-                hash2[4] = e2 + H0_4;
-
-                // Check difficulty for hash 2
+            // Check difficulty for second hash
+            if (i + 1 < nonces_per_thread) {  // Make sure we're within bounds
                 uint32_t matching_bits2 = count_leading_zeros_160bit_intel(hash2, target);
                 if (matching_bits2 >= difficulty) {
-                    uint32_t idx = sycl::atomic_ref<uint32_t, memory_order::relaxed, memory_scope::device>(*result_count).fetch_add(1);
-                    if (idx < result_capacity) {
+                    // Simplified atomic increment
+                    auto atomic_ref = sycl::atomic_ref<uint32_t,
+                                                       sycl::memory_order::relaxed,
+                                                       sycl::memory_scope::device,
+                                                       sycl::access::address_space::global_space>(*result_count);
+                    uint32_t idx = atomic_ref.fetch_add(1);
+
+                    if (idx < res_cap) {
                         results[idx].nonce = nonce2;
                         results[idx].matching_bits = matching_bits2;
-                        results[idx].job_version = job_version;
+                        results[idx].job_version = job_ver;
+                        #pragma unroll
                         for (int j = 0; j < 5; j++) {
                             results[idx].hash[j] = hash2[j];
                         }
                     }
                 }
             }
-        }
+            }
+        });
     });
 
-    event.wait();
+    return event;
 }
 
 // CPU-side byte swap function for initialization
@@ -359,7 +489,9 @@ extern "C" bool initialize_sycl_runtime() {
                     if (vendor.find("Intel") != std::string::npos ||
                         name.find("Intel") != std::string::npos ||
                         name.find("Arc") != std::string::npos ||
-                        name.find("Iris") != std::string::npos) {
+                        name.find("Iris") != std::string::npos ||
+                        name.find("UHD") != std::string::npos ||
+                        name.find("Xe") != std::string::npos) {
                         selected_device = device;
                         found_intel_gpu = true;
                         printf("Found Intel GPU: %s (Vendor: %s)\n", name.c_str(), vendor.c_str());
@@ -383,19 +515,29 @@ extern "C" bool initialize_sycl_runtime() {
             }
         }
 
-        // Create SYCL context and queue
+        // Create SYCL context and queue with in-order property for better performance
         g_intel_device = new device(selected_device);
         g_sycl_context = new context(*g_intel_device);
-        g_sycl_queue = new queue(*g_sycl_context, *g_intel_device);
+
+        // Use in-order queue for better performance on Intel GPUs
+        property_list props{property::queue::in_order()};
+        g_sycl_queue = new queue(*g_sycl_context, *g_intel_device, props);
 
         // Allocate constant memory using USM
         d_base_message_sycl = malloc_device<uint32_t>(8, *g_sycl_queue);
         d_pre_swapped_base_sycl = malloc_device<uint32_t>(8, *g_sycl_queue);
+        d_target_hash_sycl = malloc_device<uint32_t>(5, *g_sycl_queue);
 
-        if (!d_base_message_sycl || !d_pre_swapped_base_sycl) {
+        if (!d_base_message_sycl || !d_pre_swapped_base_sycl || !d_target_hash_sycl) {
             printf("Failed to allocate device memory for constant data\n");
             return false;
         }
+
+        // Print device capabilities
+        auto max_work_group_size = selected_device.get_info<info::device::max_work_group_size>();
+        auto max_compute_units = selected_device.get_info<info::device::max_compute_units>();
+        printf("Device capabilities: Max work group size: %zu, Compute units: %u\n",
+               max_work_group_size, max_compute_units);
 
         printf("SYCL runtime initialized successfully for Intel GPU\n");
         return true;
@@ -447,11 +589,37 @@ extern "C" void launch_mining_kernel_intel(
     }
 
     try {
+        // Validate configuration
+        if (config.blocks <= 0 || config.threads_per_block <= 0) {
+            fprintf(stderr, "Invalid kernel configuration: blocks=%d, threads=%d\n",
+                    config.blocks, config.threads_per_block);
+            return;
+        }
+
+        // Validate pool pointers
+        if (!pool.results || !pool.count) {
+            fprintf(stderr, "ERROR: Invalid pool pointers - results=%p, count=%p\n",
+                    pool.results, pool.count);
+            return;
+        }
+
         int total_threads = config.blocks * config.threads_per_block;
 
-        sha1_mining_kernel_intel(
+        // Reset result count
+        g_sycl_queue->memset(pool.count, 0, sizeof(uint32_t)).wait();
+
+        // Copy target_hash to device memory and wait for completion
+        auto copy_event = g_sycl_queue->memcpy(d_target_hash_sycl, device_job.target_hash, 5 * sizeof(uint32_t));
+        copy_event.wait();
+
+        // Verify the copy by reading back (for debugging)
+        uint32_t verify_target[5];
+        g_sycl_queue->memcpy(verify_target, d_target_hash_sycl, 5 * sizeof(uint32_t)).wait();
+
+        // Launch kernel with all parameters including job_version
+        sycl::event kernel_event = sha1_mining_kernel_intel(
             *g_sycl_queue,
-            device_job.target_hash,
+            d_target_hash_sycl,
             d_pre_swapped_base_sycl,
             difficulty,
             pool.results,
@@ -463,6 +631,9 @@ extern "C" void launch_mining_kernel_intel(
             total_threads
         );
 
+        // Wait for kernel completion
+        kernel_event.wait();
+
     } catch (const sycl::exception& e) {
         printf("SYCL exception in kernel launch: %s\n", e.what());
     } catch (const std::exception& e) {
@@ -472,13 +643,25 @@ extern "C" void launch_mining_kernel_intel(
 
 // Cleanup SYCL resources
 extern "C" void cleanup_sycl_runtime() {
-    if (d_base_message_sycl) {
-        free(d_base_message_sycl, *g_sycl_queue);
-        d_base_message_sycl = nullptr;
-    }
-    if (d_pre_swapped_base_sycl) {
-        free(d_pre_swapped_base_sycl, *g_sycl_queue);
-        d_pre_swapped_base_sycl = nullptr;
+    if (g_sycl_queue) {
+        try {
+            g_sycl_queue->wait();
+
+            if (d_base_message_sycl) {
+                free(d_base_message_sycl, *g_sycl_queue);
+                d_base_message_sycl = nullptr;
+            }
+            if (d_pre_swapped_base_sycl) {
+                free(d_pre_swapped_base_sycl, *g_sycl_queue);
+                d_pre_swapped_base_sycl = nullptr;
+            }
+            if (d_target_hash_sycl) {
+                free(d_target_hash_sycl, *g_sycl_queue);
+                d_target_hash_sycl = nullptr;
+            }
+        } catch (const sycl::exception& e) {
+            printf("SYCL exception during cleanup: %s\n", e.what());
+        }
     }
 
     delete g_sycl_queue;

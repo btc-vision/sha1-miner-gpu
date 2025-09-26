@@ -699,12 +699,12 @@ namespace MiningPool {
                       ", job_version=", result.job_version, " (expected=", expected_job_version, ")");
 
             // Check job version to avoid stale shares
-            if (result.job_version != expected_job_version) {
+            /*if (result.job_version != expected_job_version) {
                 version_mismatches++;
                 LOG_DEBUG("SHARE", "Result has job version ", result.job_version, " but expected ",
                           expected_job_version, " - STALE");
                 continue;
-            }
+            }*/
 
             if (result.matching_bits >= current_job_difficulty) {
                 filtered_results.push_back(result);

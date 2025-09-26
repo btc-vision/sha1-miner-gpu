@@ -266,7 +266,7 @@ private:
         std::chrono::high_resolution_clock::time_point launch_time;
     };
 
-    std::atomic<uint64_t> current_job_version_{0};
+    std::atomic<uint64_t> current_job_version_{99999};
 
     // Helper methods
     void launchKernelOnStream(int stream_idx, uint64_t nonce_offset, const MiningJob &job);
