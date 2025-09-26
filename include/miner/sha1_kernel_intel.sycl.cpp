@@ -457,6 +457,9 @@ sycl::event sha1_mining_kernel_intel(
 
     // Second phase: compact all thread results into final buffer atomically
     auto compact_event = q.submit([=](handler& h) {
+        // Create stream for logging inside the kernel
+        sycl::stream out(1024 * 1024, 256, h);  // Large buffer for detailed logging
+
         h.single_task([=]() {
             uint32_t total_results = 0;
 
@@ -465,57 +468,66 @@ sycl::event sha1_mining_kernel_intel(
                 total_results += thread_counts[i];
             }
 
-            printf("SYCL Compact: Total results found across all threads: %u\n", total_results);
+            out << "SYCL Compact: Total results found across all threads: " << total_results << sycl::endl;
 
             // Limit to result buffer capacity
             uint32_t original_total = total_results;
             total_results = sycl::min(total_results, result_capacity);
             if (original_total > result_capacity) {
-                printf("SYCL Compact: WARNING - Limiting results from %u to capacity %u\n",
-                       original_total, result_capacity);
+                out << "SYCL Compact: WARNING - Limiting results from " << original_total
+                    << " to capacity " << result_capacity << sycl::endl;
             }
 
             // Copy results to final buffer in thread order (deterministic)
             uint32_t write_idx = 0;
-            printf("SYCL Compact: Starting result compaction...\n");
+            out << "SYCL Compact: Starting result compaction..." << sycl::endl;
 
             for (int tid = 0; tid < total_threads && write_idx < total_results; tid++) {
                 if (thread_counts[tid] > 0) {
-                    printf("SYCL Compact: Thread %d has %u results\n", tid, thread_counts[tid]);
+                    out << "SYCL Compact: Thread " << tid << " has " << thread_counts[tid]
+                        << " results" << sycl::endl;
 
                     uint32_t base_idx = tid * MAX_RESULTS_PER_THREAD;
                     uint32_t count = sycl::min(thread_counts[tid], total_results - write_idx);
 
-                    printf("SYCL Compact: Copying %u results from thread %d (base_idx=%u)\n",
-                           count, tid, base_idx);
+                    out << "SYCL Compact: Copying " << count << " results from thread " << tid
+                        << " (base_idx=" << base_idx << ")" << sycl::endl;
 
                     for (uint32_t i = 0; i < count && write_idx < result_capacity; i++) {
                         results[write_idx] = temp_results[base_idx + i];
 
                         // Log each result being written
-                        printf("SYCL Compact: [Result %u] Thread %d, Local idx %u -> Global idx %u\n",
-                               write_idx, tid, i, write_idx);
-                        printf("  - Nonce: 0x%016llX\n",
-                               (unsigned long long)results[write_idx].nonce);
-                        printf("  - Hash: %08X %08X %08X %08X %08X\n",
-                               results[write_idx].hash[0], results[write_idx].hash[1],
-                               results[write_idx].hash[2], results[write_idx].hash[3],
-                               results[write_idx].hash[4]);
-                        printf("  - Matching bits: %u (difficulty: %u)\n",
-                               results[write_idx].matching_bits, difficulty);
-                        printf("  - Job version: %llu\n",
-                               (unsigned long long)results[write_idx].job_version);
+                        out << "SYCL Compact: [Result " << write_idx << "] Thread " << tid
+                            << ", Local idx " << i << " -> Global idx " << write_idx << sycl::endl;
+
+                        // Log nonce (split into high and low parts for formatting)
+                        uint32_t nonce_high = static_cast<uint32_t>(results[write_idx].nonce >> 32);
+                        uint32_t nonce_low = static_cast<uint32_t>(results[write_idx].nonce & 0xFFFFFFFF);
+                        out << "  - Nonce: 0x" << sycl::hex << nonce_high << nonce_low << sycl::dec << sycl::endl;
+
+                        // Log hash
+                        out << "  - Hash: " << sycl::hex
+                            << results[write_idx].hash[0] << " "
+                            << results[write_idx].hash[1] << " "
+                            << results[write_idx].hash[2] << " "
+                            << results[write_idx].hash[3] << " "
+                            << results[write_idx].hash[4] << sycl::dec << sycl::endl;
+
+                        out << "  - Matching bits: " << results[write_idx].matching_bits
+                            << " (difficulty: " << difficulty << ")" << sycl::endl;
+
+                        out << "  - Job version: " << results[write_idx].job_version << sycl::endl;
 
                         write_idx++;
                     }
                 }
             }
 
-            printf("SYCL Compact: Compaction complete. Total results written: %u\n", write_idx);
+            out << "SYCL Compact: Compaction complete. Total results written: " << write_idx << sycl::endl;
 
             // Update final count atomically
             *result_count = write_idx;
-            printf("SYCL Compact: Result count updated to: %u\n", write_idx);
+            out << "SYCL Compact: Result count updated to: " << write_idx << sycl::endl;
         });
     });
 
