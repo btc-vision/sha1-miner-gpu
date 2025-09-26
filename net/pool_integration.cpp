@@ -597,12 +597,12 @@ namespace MiningPool {
 
         for (const auto &result : results_to_process) {
             // Double-check job version
-            if (result.job_version != expected_job_version) {
+            /*if (result.job_version != expected_job_version) {
                 stale_shares++;
                 LOG_WARN("SHARE", "Discarding stale result from job version ", result.job_version,
                          " (current: ", expected_job_version, ")");
                 continue;
-            }
+            }*/
 
             // Use current difficulty for share validation
             if (result.matching_bits >= job_difficulty_bits) {
