@@ -48,7 +48,9 @@ struct alignas(16) MiningResult
     uint64_t nonce;
     uint32_t hash[5];
     uint32_t matching_bits;
+    uint32_t difficulty_score;
     uint64_t job_version;
+    uint32_t padding[1];
 };
 
 // Device-side mining job structure

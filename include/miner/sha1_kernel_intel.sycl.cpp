@@ -417,6 +417,7 @@ sycl::event sha1_mining_kernel_intel(
             if (matching_bits1 >= difficulty && thread_result_count < MAX_RESULTS_PER_THREAD) {
                 thread_results[thread_result_count].nonce = nonce1;
                 thread_results[thread_result_count].matching_bits = matching_bits1;
+                thread_results[thread_result_count].difficulty_score = matching_bits1;  // Set difficulty_score
                 thread_results[thread_result_count].job_version = job_ver;
                 #pragma unroll
                 for (int j = 0; j < 5; j++) {
@@ -431,6 +432,7 @@ sycl::event sha1_mining_kernel_intel(
                 if (matching_bits2 >= difficulty) {
                     thread_results[thread_result_count].nonce = nonce2;
                     thread_results[thread_result_count].matching_bits = matching_bits2;
+                    thread_results[thread_result_count].difficulty_score = matching_bits2;  // Set difficulty_score
                     thread_results[thread_result_count].job_version = job_ver;
                     #pragma unroll
                     for (int j = 0; j < 5; j++) {
