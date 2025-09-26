@@ -918,24 +918,25 @@ void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t non
     // Use a static atomic with proper initialization
     static std::atomic<uint64_t> last_updated_job_version{UINT64_MAX};
     // Load the current value for comparison
-    uint64_t last_version    = last_updated_job_version.load();
+    //uint64_t last_version    = last_updated_job_version.load();
     uint64_t current_version = current_job_version_.load();
-    if (current_version != last_version) {
-        uint32_t base_msg_words[8];
-        memcpy(base_msg_words, job.base_message, 32);
+
+    // if (current_version != last_version) {
+    uint32_t base_msg_words[8];
+    memcpy(base_msg_words, job.base_message, 32);
 
 #ifdef USE_SYCL
-        update_complete_job_sycl(base_msg_words, job.target_hash, current_version);
+    update_complete_job_sycl(base_msg_words, job.target_hash, current_version);
 #elif USE_HIP
-        update_base_message_hip(base_msg_words);
+    update_base_message_hip(base_msg_words);
 #else
-        update_base_message_cuda(base_msg_words);
+    update_base_message_cuda(base_msg_words);
 #endif
 
-        // Store the new version
-        last_updated_job_version.store(current_version);
-        LOG_TRACE("MINING", "Updated constant memory with complete job parameters for job version ", current_version);
-    }
+    // Store the new version
+    last_updated_job_version.store(current_version);
+    // LOG_TRACE("MINING", "Updated constant memory with complete job parameters for job version ", current_version);
+    //}
 
     // Configure kernel
     KernelConfig config{};
@@ -943,8 +944,6 @@ void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t non
     config.threads_per_block  = config_.threads_per_block;
     config.stream             = streams_[stream_idx];
     config.shared_memory_size = 0;
-
-    LOG_INFO("MINING", "KERNEL LAUNCH: Updating complete SYCL job for version ", current_version);
 
     // Record launch time for performance tracking
     kernel_launch_times_[stream_idx] = std::chrono::high_resolution_clock::now();
