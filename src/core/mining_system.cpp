@@ -14,7 +14,8 @@
 #ifdef USE_SYCL
 extern "C" void update_base_message_sycl(const uint32_t *base_msg_words);
 extern "C" void update_target_hash_sycl(const uint32_t *target_hash);
-extern "C" void update_complete_job_sycl(const uint32_t *base_msg_words, const uint32_t *target_hash, uint64_t job_version);
+extern "C" void update_complete_job_sycl(const uint32_t *base_msg_words, const uint32_t *target_hash,
+                                         uint64_t job_version);
 extern "C" bool initialize_sycl_runtime(void);
 extern "C" void cleanup_sycl_runtime(void);
 extern "C" bool initialize_sycl_wrappers(void);
@@ -923,9 +924,8 @@ void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t non
         uint32_t base_msg_words[8];
         memcpy(base_msg_words, job.base_message, 32);
 
-// Copy to constant memory using platform-specific wrapper
 #ifdef USE_SYCL
-        update_base_message_sycl(base_msg_words);
+        update_complete_job_sycl(base_msg_words, job.target_hash, current_version);
 #elif USE_HIP
         update_base_message_hip(base_msg_words);
 #else
@@ -934,7 +934,7 @@ void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t non
 
         // Store the new version
         last_updated_job_version.store(current_version);
-        LOG_TRACE("MINING", "Updated constant memory with new base message for job version ", current_version);
+        LOG_TRACE("MINING", "Updated constant memory with complete job parameters for job version ", current_version);
     }
 
     // Configure kernel
@@ -943,6 +943,8 @@ void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t non
     config.threads_per_block  = config_.threads_per_block;
     config.stream             = streams_[stream_idx];
     config.shared_memory_size = 0;
+
+    LOG_INFO("MINING", "KERNEL LAUNCH: Updating complete SYCL job for version ", current_version);
 
     // Record launch time for performance tracking
     kernel_launch_times_[stream_idx] = std::chrono::high_resolution_clock::now();

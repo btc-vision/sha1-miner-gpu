@@ -226,31 +226,17 @@ sycl::event sha1_mining_kernel_intel(
     uint64_t job_ver,
     int total_threads
 ) {
-    // Create buffers for better memory management
-    buffer<uint32_t, 1> target_buffer(target_hash_device, range<1>(5));
-    buffer<uint32_t, 1> pre_swapped_buffer(pre_swapped_base, range<1>(8));
-
-    // Submit work to queue with handler
-    auto event = q.submit([&](handler& h) {
-        // Get accessors for device memory
-        auto target_acc = target_buffer.get_access<access::mode::read>(h);
-        auto pre_swapped_acc = pre_swapped_buffer.get_access<access::mode::read>(h);
-
-        // Capture other parameters by value
-        const uint32_t diff = difficulty;
-        const uint64_t nonce_b = nonce_base;
-        const uint32_t nonces_pt = nonces_per_thread;
-        const uint32_t res_cap = result_capacity;
-
+    // Submit work to queue - use USM throughout, no buffers
+    auto event = q.submit([=](handler& h) {
         h.parallel_for(range<1>(total_threads), [=](id<1> idx) {
             const uint32_t tid = idx[0];
-            const uint64_t thread_nonce_base = nonce_b + (static_cast<uint64_t>(tid) * nonces_pt);
+            const uint64_t thread_nonce_base = nonce_base + (static_cast<uint64_t>(tid) * nonces_per_thread);
 
-            // Load target hash into registers from accessor
+            // Load target hash into registers from USM pointer
             uint32_t target[5];
             #pragma unroll
             for (int i = 0; i < 5; i++) {
-                target[i] = target_acc[i];
+                target[i] = target_hash_device[i];
             }
 
         // Process nonces in pairs - adjust loop to handle 2 at a time
@@ -267,23 +253,23 @@ sycl::event sha1_mining_kernel_intel(
             uint32_t W2_0, W2_1, W2_2, W2_3, W2_4, W2_5, W2_6, W2_7, W2_8, W2_9, W2_10, W2_11, W2_12, W2_13, W2_14, W2_15;
 
             // Set fixed pre-swapped parts for 0-5 (same for both)
-            W1_0 = pre_swapped_acc[0]; W2_0 = pre_swapped_acc[0];
-            W1_1 = pre_swapped_acc[1]; W2_1 = pre_swapped_acc[1];
-            W1_2 = pre_swapped_acc[2]; W2_2 = pre_swapped_acc[2];
-            W1_3 = pre_swapped_acc[3]; W2_3 = pre_swapped_acc[3];
-            W1_4 = pre_swapped_acc[4]; W2_4 = pre_swapped_acc[4];
-            W1_5 = pre_swapped_acc[5]; W2_5 = pre_swapped_acc[5];
+            W1_0 = pre_swapped_base[0]; W2_0 = pre_swapped_base[0];
+            W1_1 = pre_swapped_base[1]; W2_1 = pre_swapped_base[1];
+            W1_2 = pre_swapped_base[2]; W2_2 = pre_swapped_base[2];
+            W1_3 = pre_swapped_base[3]; W2_3 = pre_swapped_base[3];
+            W1_4 = pre_swapped_base[4]; W2_4 = pre_swapped_base[4];
+            W1_5 = pre_swapped_base[5]; W2_5 = pre_swapped_base[5];
 
             // Set varying parts for 6-7 using pre-swapped base and direct nonce XOR
             uint32_t nonce1_high = static_cast<uint32_t>(nonce1 >> 32);
             uint32_t nonce1_low = static_cast<uint32_t>(nonce1 & 0xFFFFFFFF);
-            W1_6 = pre_swapped_acc[6] ^ nonce1_high;
-            W1_7 = pre_swapped_acc[7] ^ nonce1_low;
+            W1_6 = pre_swapped_base[6] ^ nonce1_high;
+            W1_7 = pre_swapped_base[7] ^ nonce1_low;
 
             uint32_t nonce2_high = static_cast<uint32_t>(nonce2 >> 32);
             uint32_t nonce2_low = static_cast<uint32_t>(nonce2 & 0xFFFFFFFF);
-            W2_6 = pre_swapped_acc[6] ^ nonce2_high;
-            W2_7 = pre_swapped_acc[7] ^ nonce2_low;
+            W2_6 = pre_swapped_base[6] ^ nonce2_high;
+            W2_7 = pre_swapped_base[7] ^ nonce2_low;
 
             // Apply padding to both
             W1_8 = 0x80000000; W2_8 = 0x80000000;
@@ -410,14 +396,14 @@ sycl::event sha1_mining_kernel_intel(
             // Check difficulty for first hash
             uint32_t matching_bits1 = count_leading_zeros_160bit_intel(hash1, target);
             if (matching_bits1 >= difficulty) {
-                // Simplified atomic increment
+                // Use USM atomic operations
                 auto atomic_ref = sycl::atomic_ref<uint32_t,
                                                    sycl::memory_order::relaxed,
                                                    sycl::memory_scope::device,
                                                    sycl::access::address_space::global_space>(*result_count);
                 uint32_t idx = atomic_ref.fetch_add(1);
 
-                if (idx < res_cap) {
+                if (idx < result_capacity) {
                     results[idx].nonce = nonce1;
                     results[idx].matching_bits = matching_bits1;
                     results[idx].job_version = job_ver;
@@ -432,14 +418,14 @@ sycl::event sha1_mining_kernel_intel(
             if (i + 1 < nonces_per_thread) {  // Make sure we're within bounds
                 uint32_t matching_bits2 = count_leading_zeros_160bit_intel(hash2, target);
                 if (matching_bits2 >= difficulty) {
-                    // Simplified atomic increment
+                    // Use USM atomic operations
                     auto atomic_ref = sycl::atomic_ref<uint32_t,
                                                        sycl::memory_order::relaxed,
                                                        sycl::memory_scope::device,
                                                        sycl::access::address_space::global_space>(*result_count);
                     uint32_t idx = atomic_ref.fetch_add(1);
 
-                    if (idx < res_cap) {
+                    if (idx < result_capacity) {
                         results[idx].nonce = nonce2;
                         results[idx].matching_bits = matching_bits2;
                         results[idx].job_version = job_ver;
@@ -601,26 +587,34 @@ extern "C" void update_complete_job_sycl(const uint32_t *base_msg_words, const u
     }
 
     try {
-        printf("SYCL: COMPLETE JOB UPDATE - Version %llu\n", (unsigned long long)job_version);
+        printf("SYCL: *** COMPLETE JOB UPDATE START *** - Version %llu\n", (unsigned long long)job_version);
 
         // 1. Update base message
+        printf("SYCL: Updating base message to device memory...\n");
         g_sycl_queue->memcpy(d_base_message_sycl, base_msg_words, 8 * sizeof(uint32_t)).wait();
+        printf("SYCL: Base message updated successfully\n");
 
         // 2. Update pre-swapped base message
+        printf("SYCL: Updating pre-swapped base message...\n");
         uint32_t pre_swapped[8];
         for (int j = 0; j < 8; j++) {
             pre_swapped[j] = bswap32_cpu(base_msg_words[j]);
         }
         g_sycl_queue->memcpy(d_pre_swapped_base_sycl, pre_swapped, 8 * sizeof(uint32_t)).wait();
+        printf("SYCL: Pre-swapped base message updated successfully\n");
 
         // 3. Update target hash
+        printf("SYCL: Updating target hash to device memory...\n");
         g_sycl_queue->memcpy(d_target_hash_sycl, target_hash, 5 * sizeof(uint32_t)).wait();
+        printf("SYCL: Target hash updated successfully\n");
 
+        printf("SYCL: *** COMPLETE JOB UPDATE DETAILS ***\n");
         printf("SYCL: Updated complete job - Base: %08x %08x %08x %08x...\n",
                base_msg_words[0], base_msg_words[1], base_msg_words[2], base_msg_words[3]);
         printf("SYCL: Updated complete job - Target: %08x %08x %08x %08x %08x\n",
                target_hash[0], target_hash[1], target_hash[2], target_hash[3], target_hash[4]);
         printf("SYCL: Job version updated to: %llu\n", (unsigned long long)job_version);
+        printf("SYCL: *** COMPLETE JOB UPDATE COMPLETE ***\n");
 
     } catch (const sycl::exception& e) {
         printf("SYCL exception in update_complete_job_sycl: %s\n", e.what());
@@ -664,10 +658,6 @@ extern "C" void launch_mining_kernel_intel(
         // Copy target_hash to device memory and wait for completion
         auto copy_event = g_sycl_queue->memcpy(d_target_hash_sycl, device_job.target_hash, 5 * sizeof(uint32_t));
         copy_event.wait();
-
-        // Verify the copy by reading back (for debugging)
-        uint32_t verify_target[5];
-        g_sycl_queue->memcpy(verify_target, d_target_hash_sycl, 5 * sizeof(uint32_t)).wait();
 
         // Launch kernel with all parameters including job_version
         sycl::event kernel_event = sha1_mining_kernel_intel(
