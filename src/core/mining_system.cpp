@@ -13,6 +13,7 @@
 
 #ifdef USE_SYCL
 extern "C" void update_base_message_sycl(const uint32_t *base_msg_words);
+extern "C" void update_target_hash_sycl(const uint32_t *target_hash);
 extern "C" bool initialize_sycl_runtime(void);
 extern "C" void cleanup_sycl_runtime(void);
 extern "C" bool initialize_sycl_wrappers(void);
@@ -1036,6 +1037,13 @@ void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version)
     uint64_t old_version = current_job_version_.load();
     current_job_version_ = job_version;
     LOG_INFO("MINING", "Updating job from version ", old_version, " to ", job_version);
+
+    // CRITICAL FIX: Update Intel GPU global constant memory for target hash
+#ifdef USE_SYCL
+    LOG_INFO("MINING", "Updating Intel SYCL target hash globally");
+    update_target_hash_sycl(job.target_hash);
+#endif
+
     // Update the device jobs with new data
     for (int i = 0; i < config_.num_streams; i++) {
         // Copy new job data to device

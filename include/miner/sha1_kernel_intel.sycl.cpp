@@ -574,6 +574,59 @@ extern "C" void update_base_message_sycl(const uint32_t *base_msg_words) {
     }
 }
 
+// Update target hash for SYCL - CRITICAL for job updates!
+extern "C" void update_target_hash_sycl(const uint32_t *target_hash) {
+    if (!g_sycl_queue || !d_target_hash_sycl) {
+        printf("SYCL not initialized for target hash update\n");
+        return;
+    }
+
+    try {
+        // Copy target hash to global device memory
+        g_sycl_queue->memcpy(d_target_hash_sycl, target_hash, 5 * sizeof(uint32_t)).wait();
+
+        printf("SYCL: Updated target hash: %08x %08x %08x %08x %08x\n",
+               target_hash[0], target_hash[1], target_hash[2], target_hash[3], target_hash[4]);
+
+    } catch (const sycl::exception& e) {
+        printf("SYCL exception in update_target_hash_sycl: %s\n", e.what());
+    }
+}
+
+// COMPLETE Intel job update function - updates ALL job parameters!
+extern "C" void update_complete_job_sycl(const uint32_t *base_msg_words, const uint32_t *target_hash, uint64_t job_version) {
+    if (!g_sycl_queue || !d_base_message_sycl || !d_pre_swapped_base_sycl || !d_target_hash_sycl) {
+        printf("SYCL not initialized for complete job update\n");
+        return;
+    }
+
+    try {
+        printf("SYCL: COMPLETE JOB UPDATE - Version %llu\n", (unsigned long long)job_version);
+
+        // 1. Update base message
+        g_sycl_queue->memcpy(d_base_message_sycl, base_msg_words, 8 * sizeof(uint32_t)).wait();
+
+        // 2. Update pre-swapped base message
+        uint32_t pre_swapped[8];
+        for (int j = 0; j < 8; j++) {
+            pre_swapped[j] = bswap32_cpu(base_msg_words[j]);
+        }
+        g_sycl_queue->memcpy(d_pre_swapped_base_sycl, pre_swapped, 8 * sizeof(uint32_t)).wait();
+
+        // 3. Update target hash
+        g_sycl_queue->memcpy(d_target_hash_sycl, target_hash, 5 * sizeof(uint32_t)).wait();
+
+        printf("SYCL: Updated complete job - Base: %08x %08x %08x %08x...\n",
+               base_msg_words[0], base_msg_words[1], base_msg_words[2], base_msg_words[3]);
+        printf("SYCL: Updated complete job - Target: %08x %08x %08x %08x %08x\n",
+               target_hash[0], target_hash[1], target_hash[2], target_hash[3], target_hash[4]);
+        printf("SYCL: Job version updated to: %llu\n", (unsigned long long)job_version);
+
+    } catch (const sycl::exception& e) {
+        printf("SYCL exception in update_complete_job_sycl: %s\n", e.what());
+    }
+}
+
 // Launch the Intel GPU mining kernel
 extern "C" void launch_mining_kernel_intel(
     const DeviceMiningJob &device_job,
