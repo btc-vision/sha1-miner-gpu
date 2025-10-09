@@ -641,7 +641,6 @@ extern "C" void update_target_hash_sycl(const uint32_t *target_hash) {
     }
 }
 
-// COMPLETE Intel job update function - updates ALL job parameters!
 extern "C" void update_complete_job_sycl(const uint32_t *base_msg_words, const uint32_t *target_hash, uint64_t job_version) {
     if (!g_sycl_queue || !d_base_message_sycl || !d_pre_swapped_base_sycl || !d_target_hash_sycl) {
         return;
@@ -712,11 +711,11 @@ extern "C" void launch_mining_kernel_intel(
             target_hex_verify += buf;
         }
 
+        /*printf("Target pattern in kernel: %s\n", target_hex_verify.c_str());
         printf("Target pattern in kernel: %s\n", target_hex_verify.c_str());
         printf("Target pattern in kernel: %s\n", target_hex_verify.c_str());
         printf("Target pattern in kernel: %s\n", target_hex_verify.c_str());
-        printf("Target pattern in kernel: %s\n", target_hex_verify.c_str());
-        printf("Target pattern in kernel: %s\n", target_hex_verify.c_str());
+        printf("Target pattern in kernel: %s\n", target_hex_verify.c_str());*/
 
         // Launch kernel with all parameters including job_version
         sycl::event kernel_event = sha1_mining_kernel_intel(
