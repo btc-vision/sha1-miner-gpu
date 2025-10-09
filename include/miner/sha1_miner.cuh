@@ -90,7 +90,7 @@ struct KernelConfig
     uint32_t target_hash[5];   // Target hash
 };*/
 
-struct alignas(64) DeviceMiningJob
+struct DeviceMiningJob
 {
     uint32_t *target_hash;
 
@@ -101,7 +101,7 @@ struct alignas(64) DeviceMiningJob
     bool allocate()
     {
         // Free any existing allocations first
-        /*free();
+        free();
 
         // Check current device
         int current_device;
@@ -203,24 +203,24 @@ struct alignas(64) DeviceMiningJob
         fprintf(stderr, "[DeviceMiningJob] Allocation successful - Final alignment check:\n");
         fprintf(stderr, "  target_hash: %p (mod 16: %zu, mod 256: %zu)\n", target_hash,
                 (size_t)((uintptr_t)target_hash % 16), (size_t)((uintptr_t)target_hash % 256));
-*/
+
         return true;
     }
 
     void free()
     {
-        /*if (target_hash) {
+        if (target_hash) {
             gpuError_t err = gpuFree(target_hash);
             if (err != gpuSuccess) {
                 fprintf(stderr, "[DeviceMiningJob] Warning: Failed to free target_hash: %s\n", gpuGetErrorString(err));
             }
             target_hash = nullptr;
-        }*/
+        }
     }
 
     void copyFromHost(const MiningJob &job) const
     {
-        /*if (!target_hash) {
+        if (!target_hash) {
             fprintf(stderr, "[DeviceMiningJob] Error: Not allocated (target_hash=%p)\n", target_hash);
             return;
         }
@@ -228,12 +228,12 @@ struct alignas(64) DeviceMiningJob
         gpuError_t err = gpuMemcpy(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice);
         if (err != gpuSuccess) {
             fprintf(stderr, "[DeviceMiningJob] Failed to copy target_hash: %s\n", gpuGetErrorString(err));
-        }*/
+        }
     }
 
     void copyFromHostAsync(const MiningJob &job, gpuStream_t stream) const
     {
-        /*if (!target_hash) {
+        if (!target_hash) {
             fprintf(stderr, "[DeviceMiningJob] Error: Not allocated\n");
             return;
         }
@@ -242,7 +242,7 @@ struct alignas(64) DeviceMiningJob
             gpuMemcpyAsync(target_hash, job.target_hash, 5 * sizeof(uint32_t), gpuMemcpyHostToDevice, stream);
         if (err != gpuSuccess) {
             fprintf(stderr, "[DeviceMiningJob] Failed to async copy target_hash: %s\n", gpuGetErrorString(err));
-        }*/
+        }
     }
 
     void updateFromHost(const MiningJob &job) const { copyFromHost(job); }
