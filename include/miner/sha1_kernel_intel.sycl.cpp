@@ -695,12 +695,13 @@ extern "C" void launch_mining_kernel_intel(
         int total_threads = config.blocks * config.threads_per_block;
 
         // Reset result count
-        g_sycl_queue->memset(pool.count, 0, sizeof(uint32_t)).wait();
+        uint32_t host_target[5];
+        g_sycl_queue->memcpy(host_target, device_job.target_hash, 5 * sizeof(uint32_t)).wait();
 
         std::string target_hex_verify;
-        for (const unsigned int i : device_job.target_hash) {
+        for (int i = 0; i < 5; i++) {
             char buf[9];
-            snprintf(buf, sizeof(buf), "%08x", i);
+            snprintf(buf, sizeof(buf), "%08x", host_target[i]);
             target_hex_verify += buf;
         }
 

@@ -242,8 +242,6 @@ struct DeviceMiningJob
     }
 
     void updateFromHost(const MiningJob &job) const { copyFromHost(job); }
-
-    bool isAllocated() const { return target_hash != nullptr; }
 };
 
 // API functions - Host side
