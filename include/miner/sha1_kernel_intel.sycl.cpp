@@ -705,6 +705,12 @@ extern "C" void launch_mining_kernel_intel(
         }
 
         printf("Target pattern set to: %s\n", target_hex_verify.c_str());
+        printf("Target pattern set to: %s\n", target_hex_verify.c_str());
+        printf("Target pattern set to: %s\n", target_hex_verify.c_str());
+        printf("Target pattern set to: %s\n", target_hex_verify.c_str());
+        printf("Target pattern set to: %s\n", target_hex_verify.c_str());
+        printf("Target pattern set to: %s\n", target_hex_verify.c_str());
+        printf("Target pattern set to: %s\n", target_hex_verify.c_str());
 
         // Copy target_hash to device memory and wait for completion
         auto copy_event = g_sycl_queue->memcpy(d_target_hash_sycl, device_job.target_hash, 5 * sizeof(uint32_t));
