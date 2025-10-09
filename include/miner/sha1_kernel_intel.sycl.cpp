@@ -470,66 +470,32 @@ sycl::event sha1_mining_kernel_intel(
                 total_results += thread_counts[i];
             }
 
-            out << "SYCL Compact: Total results found across all threads: " << total_results << sycl::endl;
-
             // Limit to result buffer capacity
             uint32_t original_total = total_results;
             total_results = sycl::min(total_results, result_capacity);
-            if (original_total > result_capacity) {
-                out << "SYCL Compact: WARNING - Limiting results from " << original_total
-                    << " to capacity " << result_capacity << sycl::endl;
-            }
 
             // Copy results to final buffer in thread order (deterministic)
             uint32_t write_idx = 0;
-            out << "SYCL Compact: Starting result compaction..." << sycl::endl;
 
             for (int tid = 0; tid < total_threads && write_idx < total_results; tid++) {
                 if (thread_counts[tid] > 0) {
-                    out << "SYCL Compact: Thread " << tid << " has " << thread_counts[tid]
-                        << " results" << sycl::endl;
-
                     uint32_t base_idx = tid * MAX_RESULTS_PER_THREAD;
                     uint32_t count = sycl::min(thread_counts[tid], total_results - write_idx);
-
-                    out << "SYCL Compact: Copying " << count << " results from thread " << tid
-                        << " (base_idx=" << base_idx << ")" << sycl::endl;
 
                     for (uint32_t i = 0; i < count && write_idx < result_capacity; i++) {
                         results[write_idx] = temp_results[base_idx + i];
 
-                        // Log each result being written
-                        out << "SYCL Compact: [Result " << write_idx << "] Thread " << tid
-                            << ", Local idx " << i << " -> Global idx " << write_idx << sycl::endl;
-
                         // Log nonce (split into high and low parts for formatting)
                         uint32_t nonce_high = static_cast<uint32_t>(results[write_idx].nonce >> 32);
                         uint32_t nonce_low = static_cast<uint32_t>(results[write_idx].nonce & 0xFFFFFFFF);
-                        out << "  - Nonce: 0x" << sycl::hex << nonce_high << nonce_low << sycl::dec << sycl::endl;
-
-                        // Log hash
-                        out << "  - Hash: " << sycl::hex
-                            << results[write_idx].hash[0] << " "
-                            << results[write_idx].hash[1] << " "
-                            << results[write_idx].hash[2] << " "
-                            << results[write_idx].hash[3] << " "
-                            << results[write_idx].hash[4] << sycl::dec << sycl::endl;
-
-                        out << "  - Matching bits: " << results[write_idx].matching_bits
-                            << " (difficulty: " << difficulty << ")" << sycl::endl;
-
-                        out << "  - Job version: " << results[write_idx].job_version << sycl::endl;
 
                         write_idx++;
                     }
                 }
             }
 
-            out << "SYCL Compact: Compaction complete. Total results written: " << write_idx << sycl::endl;
-
             // Update final count atomically
             *result_count = write_idx;
-            out << "SYCL Compact: Result count updated to: " << write_idx << sycl::endl;
         });
     });
 
@@ -580,7 +546,6 @@ extern "C" bool initialize_sycl_runtime() {
                         name.find("Xe") != std::string::npos) {
                         selected_device = device;
                         found_intel_gpu = true;
-                        printf("Found Intel GPU: %s (Vendor: %s)\n", name.c_str(), vendor.c_str());
                         break;
                     }
                 }
@@ -589,12 +554,9 @@ extern "C" bool initialize_sycl_runtime() {
         }
 
         if (!found_intel_gpu) {
-            printf("No Intel GPU found, falling back to any available GPU\n");
             auto devices = device::get_devices(info::device_type::gpu);
             if (!devices.empty()) {
                 selected_device = devices[0];
-                auto name = selected_device.get_info<info::device::name>();
-                printf("Using GPU: %s\n", name.c_str());
             } else {
                 printf("No GPU devices found\n");
                 return false;
@@ -682,12 +644,10 @@ extern "C" void update_target_hash_sycl(const uint32_t *target_hash) {
 // COMPLETE Intel job update function - updates ALL job parameters!
 extern "C" void update_complete_job_sycl(const uint32_t *base_msg_words, const uint32_t *target_hash, uint64_t job_version) {
     if (!g_sycl_queue || !d_base_message_sycl || !d_pre_swapped_base_sycl || !d_target_hash_sycl) {
-        printf("SYCL not initialized for complete job update\n");
         return;
     }
 
     try {
-        printf("SYCL: *** COMPLETE JOB UPDATE START *** - Version %llu\n", (unsigned long long)job_version);
         g_sycl_queue->memcpy(d_base_message_sycl, base_msg_words, 8 * sizeof(uint32_t)).wait();
 
         uint32_t pre_swapped[8];

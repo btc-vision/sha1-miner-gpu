@@ -954,7 +954,6 @@ void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t non
     kernel_launch_times_[stream_idx] = std::chrono::high_resolution_clock::now();
 
     // Launch the mining kernel with current job version
-    printf("DEBUG: Launching kernel with job_version = %llu\n", (unsigned long long)current_job_version_);
     launch_mining_kernel(device_jobs_[stream_idx], job.difficulty,
                          nonce_offset,  // Use the offset directly
                          gpu_pools_[stream_idx], config, current_job_version_);
@@ -1090,9 +1089,6 @@ void MiningSystem::processResultsOptimized(int stream_idx)
 
     if (count == 0)
         return;
-
-    printf("DEBUG - Stream %d has %u results\n", stream_idx, count);
-
     // Limit to capacity
     if (count > pool.capacity) {
         LOG_WARN("MINING", "Result count (", count, ") exceeds capacity (", pool.capacity, "), capping results");
@@ -1104,19 +1100,6 @@ void MiningSystem::processResultsOptimized(int stream_idx)
 
     gpuMemcpyAsync(results, pool.results, sizeof(MiningResult) * count, gpuMemcpyDeviceToHost, streams_[stream_idx]);
     gpuStreamSynchronize(streams_[stream_idx]);
-
-    // DEBUG: Print raw memory after copy
-    if (count > 0) {
-        printf("DEBUG: Raw memory after copy (first result):\n");
-        uint8_t *raw_bytes = (uint8_t *)&results[0];
-        for (int i = 0; i < sizeof(MiningResult); i++) {
-            printf("%02x ", raw_bytes[i]);
-            if ((i + 1) % 16 == 0)
-                printf("\n");
-        }
-        printf("\nDEBUG: MiningResult size: %zu bytes\n", sizeof(MiningResult));
-        printf("DEBUG: Offset of job_version: %zu\n", offsetof(MiningResult, job_version));
-    }
 
     auto copy_time =
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - copy_start)
