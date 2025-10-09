@@ -34,11 +34,6 @@ extern void sha1_mining_kernel_intel(
     int total_threads
 );
 
-// Local state for wrapper functions
-static std::vector<void*> g_allocated_ptrs;
-
-// Macros and functions are now defined in the included kernel file
-
 // Forward declare functions from sha1_kernel_intel.sycl.cpp
 extern "C" bool initialize_sycl_runtime();
 extern "C" void cleanup_sycl_runtime();
@@ -184,7 +179,8 @@ gpuError_t gpuMemsetAsync(void* ptr, int value, size_t count, gpuStream_t stream
     }
 
     try {
-        g_sycl_queue->memset(ptr, value, count);
+        sycl::event e = g_sycl_queue->memset(ptr, value, count);
+        g_stream_events[stream] = e;  // ADD THIS LINE
         return SYCL_SUCCESS;
     } catch (const sycl::exception& e) {
         return SYCL_ERROR_INVALID_VALUE;
