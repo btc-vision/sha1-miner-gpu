@@ -1,14 +1,14 @@
 #pragma once
 #include <stdint.h>
 
-//#include <iomanip>
-//#include <sstream>
+// #include <iomanip>
+// #include <sstream>
 #include <string>
-//#include <vector>
+// #include <vector>
 
 #include "sha1_miner.cuh"
 
-//#include "gpu_platform.hpp"
+// #include "gpu_platform.hpp"
 
 // Only include OpenSSL for host code
 #if !defined(__SYCL_DEVICE_ONLY__)
