@@ -17,14 +17,8 @@
     #endif
 #endif
 
-// SHA-1 constants
-#define SHA1_BLOCK_SIZE          64
-#define SHA1_DIGEST_SIZE         20
-#define SHA1_ROUNDS              80
-#define MAX_CANDIDATES_PER_BATCH 1024
-
 #ifdef USE_SYCL
-    #define NONCES_PER_THREAD         4096
+    #define NONCES_PER_THREAD         8192
     #define DEFAULT_THREADS_PER_BLOCK 256
 #else
     #ifdef USE_HIP
