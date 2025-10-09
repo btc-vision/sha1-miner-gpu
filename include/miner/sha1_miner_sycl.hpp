@@ -18,12 +18,6 @@
     #endif
 #endif
 
-// SHA-1 constants
-#define SHA1_BLOCK_SIZE          64
-#define SHA1_DIGEST_SIZE         20
-#define SHA1_ROUNDS              80
-#define MAX_CANDIDATES_PER_BATCH 1024
-
 #ifdef USE_SYCL
     #define NONCES_PER_THREAD         4096
     #define DEFAULT_THREADS_PER_BLOCK 256
@@ -31,8 +25,6 @@
     #define NONCES_PER_THREAD         16384
     #define DEFAULT_THREADS_PER_BLOCK 256
 #endif
-
-// No CUDA __constant__ declarations for SYCL - these are handled by USM pointers
 
 struct alignas(256) MiningJob
 {
@@ -71,9 +63,10 @@ struct KernelConfig
 // Result pool structure for managing mining results
 struct ResultPool
 {
-    MiningResult *results;
-    uint32_t *count;
-    uint32_t capacity;
+    MiningResult *results;  // Array of results
+    uint32_t *count;        // Count of results found
+    uint32_t capacity;      // Maximum results
+    uint64_t *job_version;  // Current job version (device memory)
 };
 
 // Platform abstraction interface
