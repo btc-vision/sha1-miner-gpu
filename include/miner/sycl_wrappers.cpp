@@ -1,11 +1,14 @@
 #ifdef USE_SYCL
 
-// Use the full SYCL header like in main.cpp - this is proven to work
 #include <sycl/sycl.hpp>
 #include <memory>
 #include <vector>
 #include <string>
 #include <cstring>
+#include <unordered_set>
+#include <unordered_map>
+#include <mutex>
+#include <algorithm>
 #include "gpu_platform.hpp"
 #include "sha1_miner_sycl.hpp"
 
@@ -56,12 +59,13 @@ extern "C" void launch_mining_kernel_intel(
 #define SYCL_ERROR_OUT_OF_MEMORY 2
 #define SYCL_ERROR_NOT_INITIALIZED 3
 
+static std::unordered_set<void*> g_allocated_ptrs;
+static std::mutex g_alloc_mutex;  // Thread safety
+static std::unordered_map<gpuStream_t, sycl::event> g_stream_events;
+
+
 // SYCL wrapper implementations
 extern "C" {
-
-    static std::unordered_set<void*> g_allocated_ptrs;
-    static std::mutex g_alloc_mutex;  // Thread safety
-
 gpuError_t gpuMalloc(void** ptr, size_t size) {
     if (!g_sycl_queue) {
         return SYCL_ERROR_NOT_INITIALIZED;
@@ -91,9 +95,10 @@ gpuError_t gpuFree(void* ptr) {
 
     try {
         free(ptr, *g_sycl_queue);
-        auto it = std::find(g_allocated_ptrs.begin(), g_allocated_ptrs.end(), ptr);
-        if (it != g_allocated_ptrs.end()) {
-            g_allocated_ptrs.erase(it);
+
+        {
+            std::lock_guard<std::mutex> lock(g_alloc_mutex);
+            g_allocated_ptrs.erase(ptr);  // unordered_set::erase works with value
         }
         return SYCL_SUCCESS;
     } catch (const sycl::exception& e) {
@@ -114,8 +119,6 @@ gpuError_t gpuMemcpy(void* dst, const void* src, size_t count, gpuMemcpyKind kin
     }
 }
 
-static std::unordered_map<gpuStream_t, sycl::event> g_stream_events;
-
 gpuError_t gpuMemcpyAsync(void* dst, const void* src, size_t count,
                           gpuMemcpyKind kind, gpuStream_t stream) {
     if (!g_sycl_queue) {
@@ -132,10 +135,33 @@ gpuError_t gpuMemcpyAsync(void* dst, const void* src, size_t count,
 }
 
 gpuError_t gpuStreamSynchronize(gpuStream_t stream) {
+    if (!g_sycl_queue) {
+        return SYCL_ERROR_NOT_INITIALIZED;
+    }
+
+    // If stream is the global queue, just wait on it
+    if (stream == g_sycl_queue) {
+        try {
+            g_sycl_queue->wait();
+            return SYCL_SUCCESS;
+        } catch (const sycl::exception& e) {
+            return SYCL_ERROR_INVALID_VALUE;
+        }
+    }
+
+    // Otherwise, check if we have a tracked event for this stream
     auto it = g_stream_events.find(stream);
     if (it != g_stream_events.end()) {
-        it->second.wait();  // Wait only when needed
+        try {
+            it->second.wait();  // Wait on the specific event
+            g_stream_events.erase(it);  // Clean up after waiting
+            return SYCL_SUCCESS;
+        } catch (const sycl::exception& e) {
+            return SYCL_ERROR_INVALID_VALUE;
+        }
     }
+
+    // No event tracked for this stream, nothing to wait for
     return SYCL_SUCCESS;
 }
 
@@ -290,19 +316,6 @@ gpuError_t gpuStreamDestroy(gpuStream_t stream) {
     return SYCL_SUCCESS;
 }
 
-gpuError_t gpuStreamSynchronize(gpuStream_t stream) {
-    if (!g_sycl_queue) {
-        return SYCL_ERROR_NOT_INITIALIZED;
-    }
-
-    try {
-        g_sycl_queue->wait();
-        return SYCL_SUCCESS;
-    } catch (const sycl::exception& e) {
-        return SYCL_ERROR_INVALID_VALUE;
-    }
-}
-
 gpuError_t gpuStreamQuery(gpuStream_t stream) {
     // For simplicity, always return success (stream is ready)
     return SYCL_SUCCESS;
@@ -413,6 +426,9 @@ extern "C" void cleanup_sycl_wrappers() {
         }
     }
     g_allocated_ptrs.clear();
+
+    // Clear events map
+    g_stream_events.clear();
 
     // Call the actual cleanup function from the kernel file
     cleanup_sycl_runtime();
