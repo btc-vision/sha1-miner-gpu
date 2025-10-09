@@ -705,13 +705,6 @@ extern "C" void launch_mining_kernel_intel(
         uint32_t host_target[5];
         g_sycl_queue->memcpy(host_target, d_target_hash_sycl, 5 * sizeof(uint32_t)).wait();
 
-        std::string target_hex_verify;
-        for (int i = 0; i < 5; i++) {
-            char buf[9];
-            snprintf(buf, sizeof(buf), "%08x", host_target[i]);
-            target_hex_verify += buf;
-        }
-
         // Launch kernel with all parameters including job_version
         sycl::event kernel_event = sha1_mining_kernel_intel(
             *g_sycl_queue,
