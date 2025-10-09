@@ -588,9 +588,9 @@ bool MiningSystem::initialize()
 
     // First, check if any GPU is available
     int device_count = 0;
-    gpuError_t err   = gpuGetDeviceCount(&device_count);
-    if (err != gpuSuccess) {
-        std::cerr << "Failed to get GPU device count: " << gpuGetErrorString(err) << "\n";
+    gpuError_t err_gpu_init   = gpuGetDeviceCount(&device_count);
+    if (err_gpu_init != gpuSuccess) {
+        std::cerr << "Failed to get GPU device count: " << gpuGetErrorString(err_gpu_init) << "\n";
         std::cerr << "Is the GPU driver installed and running?\n";
         return false;
     }
@@ -611,7 +611,7 @@ bool MiningSystem::initialize()
     gpuGetLastError();
 
     // Set device with error checking
-    err = gpuSetDevice(config_.device_id);
+    gpuError_t err = gpuSetDevice(config_.device_id);
     if (err != gpuSuccess) {
         std::cerr << "Failed to set GPU device " << config_.device_id << ": " << gpuGetErrorString(err) << "\n";
         // Try to provide more specific error information
