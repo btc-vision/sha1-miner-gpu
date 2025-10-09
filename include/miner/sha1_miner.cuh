@@ -18,7 +18,7 @@
 #endif
 
 #ifdef USE_SYCL
-    #define NONCES_PER_THREAD         8192
+    #define NONCES_PER_THREAD         16384
     #define DEFAULT_THREADS_PER_BLOCK 256
 #else
     #ifdef USE_HIP
