@@ -1,14 +1,14 @@
 #pragma once
 #include <stdint.h>
 
-#include <iomanip>
-#include <sstream>
+//#include <iomanip>
+//#include <sstream>
 #include <string>
-#include <vector>
+//#include <vector>
 
 #include "sha1_miner.cuh"
 
-#include "gpu_platform.hpp"
+//#include "gpu_platform.hpp"
 
 // Only include OpenSSL for host code
 #if !defined(__SYCL_DEVICE_ONLY__)
@@ -18,14 +18,6 @@
     #ifndef SHA_DIGEST_LENGTH
         #define SHA_DIGEST_LENGTH 20
     #endif
-#endif
-
-#ifdef USE_SYCL
-    #define NONCES_PER_THREAD         4096
-    #define DEFAULT_THREADS_PER_BLOCK 256
-#else
-    #define NONCES_PER_THREAD         16384
-    #define DEFAULT_THREADS_PER_BLOCK 256
 #endif
 
 // Platform abstraction interface
