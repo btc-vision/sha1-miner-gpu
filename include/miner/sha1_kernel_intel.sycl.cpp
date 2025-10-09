@@ -702,8 +702,8 @@ extern "C" void launch_mining_kernel_intel(
         copy_event.wait();
 
         // Now copy back from device to verify what we actually have
-        uint32_t host_target[5];
-        g_sycl_queue->memcpy(host_target, d_target_hash_sycl, 5 * sizeof(uint32_t)).wait();
+        //uint32_t host_target[5];
+        //g_sycl_queue->memcpy(host_target, d_target_hash_sycl, 5 * sizeof(uint32_t)).wait();
 
         // Launch kernel with all parameters including job_version
         sycl::event kernel_event = sha1_mining_kernel_intel(
