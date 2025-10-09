@@ -227,7 +227,7 @@ sycl::event sha1_mining_kernel_intel(
     int total_threads
 ) {
     // Allocate temporary buffer for thread-local results to avoid race conditions
-    constexpr int MAX_RESULTS_PER_THREAD = 4;
+    constexpr int MAX_RESULTS_PER_THREAD = 16;
     MiningResult* temp_results = malloc_device<MiningResult>(total_threads * MAX_RESULTS_PER_THREAD, q);
     uint32_t* thread_counts = malloc_device<uint32_t>(total_threads, q);
 
