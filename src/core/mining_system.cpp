@@ -1118,14 +1118,11 @@ void MiningSystem::processResultsOptimized(int stream_idx)
     std::vector<MiningResult> valid_results;
     uint32_t stale_count = 0;
 
-    printf("PROCESSING RESULTS!\n");
-
     for (uint32_t i = 0; i < count; i++) {
-        printf("Length: %zu\n", sizeof(results[i].hash));
-
-        printf("[RESULT %d] nonce=0x%016llx bits=%u hash=%08x%08x%08x%08x%08x job_v=%llu\n", i,
-               (unsigned long long)results[i].nonce, results[i].matching_bits, results[i].hash[0], results[i].hash[1],
-               results[i].hash[2], results[i].hash[3], results[i].hash[4], (unsigned long long)results[i].job_version);
+        // printf("[RESULT %d] nonce=0x%016llx bits=%u hash=%08x%08x%08x%08x%08x job_v=%llu\n", i,
+        //        (unsigned long long)results[i].nonce, results[i].matching_bits, results[i].hash[0],
+        //        results[i].hash[1], results[i].hash[2], results[i].hash[3], results[i].hash[4], (unsigned long
+        //        long)results[i].job_version);
 
         if (results[i].nonce == 0)
             continue;
@@ -1148,9 +1145,9 @@ void MiningSystem::processResultsOptimized(int stream_idx)
                 std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time_);
 
             std::string hash_str = "0x";
-            for (int j = 0; j < 5; j++) {
+            for (unsigned int j : results[i].hash) {
                 char buf[9];
-                snprintf(buf, sizeof(buf), "%08x", results[i].hash[j]);
+                snprintf(buf, sizeof(buf), "%08x", j);
                 hash_str += buf;
             }
 
