@@ -842,19 +842,6 @@ namespace MiningPool {
         }
 
         LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
-        LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
-        LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
-        LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
-        LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
-        LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
-        LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
-        LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
-        LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
-        LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
-        LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
-        LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
-        LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
-        LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
 
         return mining_job;
     }

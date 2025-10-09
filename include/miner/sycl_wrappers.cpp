@@ -59,18 +59,25 @@ extern "C" void launch_mining_kernel_intel(
 // SYCL wrapper implementations
 extern "C" {
 
+    static std::unordered_set<void*> g_allocated_ptrs;
+    static std::mutex g_alloc_mutex;  // Thread safety
+
 gpuError_t gpuMalloc(void** ptr, size_t size) {
     if (!g_sycl_queue) {
         return SYCL_ERROR_NOT_INITIALIZED;
     }
 
     try {
-        void* allocated = malloc_device(size, *g_sycl_queue);
+        void* allocated = sycl::malloc_device(size, *g_sycl_queue);
         if (!allocated) {
             return SYCL_ERROR_OUT_OF_MEMORY;
         }
         *ptr = allocated;
-        g_allocated_ptrs.push_back(allocated);
+
+        {
+            std::lock_guard<std::mutex> lock(g_alloc_mutex);
+            g_allocated_ptrs.insert(allocated);
+        }
         return SYCL_SUCCESS;
     } catch (const sycl::exception& e) {
         return SYCL_ERROR_OUT_OF_MEMORY;
@@ -107,18 +114,29 @@ gpuError_t gpuMemcpy(void* dst, const void* src, size_t count, gpuMemcpyKind kin
     }
 }
 
-gpuError_t gpuMemcpyAsync(void* dst, const void* src, size_t count, gpuMemcpyKind kind, gpuStream_t stream) {
+static std::unordered_map<gpuStream_t, sycl::event> g_stream_events;
+
+gpuError_t gpuMemcpyAsync(void* dst, const void* src, size_t count,
+                          gpuMemcpyKind kind, gpuStream_t stream) {
     if (!g_sycl_queue) {
         return SYCL_ERROR_NOT_INITIALIZED;
     }
 
     try {
-        // For now, use the global queue - in a full implementation, we'd use the stream parameter
-        g_sycl_queue->memcpy(dst, src, count);
+        sycl::event e = g_sycl_queue->memcpy(dst, src, count);
+        g_stream_events[stream] = e;  // Track the event
         return SYCL_SUCCESS;
     } catch (const sycl::exception& e) {
         return SYCL_ERROR_INVALID_VALUE;
     }
+}
+
+gpuError_t gpuStreamSynchronize(gpuStream_t stream) {
+    auto it = g_stream_events.find(stream);
+    if (it != g_stream_events.end()) {
+        it->second.wait();  // Wait only when needed
+    }
+    return SYCL_SUCCESS;
 }
 
 gpuError_t gpuMemset(void* ptr, int value, size_t count) {
