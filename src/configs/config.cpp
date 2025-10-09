@@ -135,6 +135,14 @@ MiningConfig parse_args(int argc, char *argv[])
 
     config.auto_tune = vm["auto-tune"].as<bool>();
 
+    // Disable auto-tune if user specified any performance parameters
+    if (config.user_specified.num_streams ||
+        config.user_specified.threads_per_block ||
+        config.user_specified.blocks_per_stream) {
+        config.auto_tune = false;
+        LOG_INFO("MAIN", "Auto-tune disabled because user specified performance parameters");
+    }
+
     // Parse memory configuration
     if (vm.count("result-buffer") && vm["result-buffer"].as<size_t>() != 0) {
         config.result_buffer_size                = vm["result-buffer"].as<size_t>();

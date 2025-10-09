@@ -1,7 +1,15 @@
+if (NOT DEFINED CMAKE_CUDA_FLAGS)
+    set(CMAKE_CUDA_FLAGS "-D_DISABLE_MATHCALLS_LEGACY" CACHE STRING "CUDA compiler flags" FORCE)
+endif ()
+
+# Also add to the environment for the compiler detection
+set(ENV{CUDAFLAGS} "-D_DISABLE_MATHCALLS_LEGACY")
+
 cmake_minimum_required(VERSION 3.16)
 
-# Detect if we should use HIP or CUDA
+# Detect if we should use HIP, SYCL, or CUDA
 option(USE_HIP "Use HIP for AMD GPUs instead of CUDA" OFF)
+option(USE_SYCL "Use SYCL/oneAPI for Intel GPUs" OFF)
 
 # Force static builds for HIP on Windows due to hipcc limitations
 if (USE_HIP AND WIN32)
@@ -15,7 +23,10 @@ if (MSVC AND FORCE_STATIC_BUILD)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif ()
 
-if (USE_HIP)
+if (USE_SYCL)
+    project(SHA1NearCollisionMiner LANGUAGES CXX)
+    set(GPU_BACKEND "SYCL")
+elseif (USE_HIP)
     project(SHA1NearCollisionMiner LANGUAGES CXX)
     set(GPU_BACKEND "HIP")
 else ()
@@ -217,7 +228,121 @@ if (NOT nlohmann_json_FOUND)
 endif ()
 
 # GPU Backend configuration
-if (GPU_BACKEND STREQUAL "HIP")
+if (GPU_BACKEND STREQUAL "SYCL")
+    # Intel oneAPI/SYCL configuration
+    set(ONEAPI_ROOT $ENV{ONEAPI_ROOT})
+    if (NOT ONEAPI_ROOT)
+        if (WIN32)
+            # Check common installation paths on Windows
+            set(ONEAPI_SEARCH_PATHS
+                    "C:/Program Files (x86)/Intel/oneAPI"
+                    "C:/Program Files/Intel/oneAPI"
+                    "$ENV{ProgramFiles}/Intel/oneAPI"
+                    "$ENV{ProgramFiles\(x86\)}/Intel/oneAPI"
+            )
+            foreach (search_path ${ONEAPI_SEARCH_PATHS})
+                if (EXISTS "${search_path}")
+                    set(ONEAPI_ROOT "${search_path}")
+                    message(STATUS "Auto-detected oneAPI at: ${ONEAPI_ROOT}")
+                    break()
+                endif ()
+            endforeach ()
+        else ()
+            # Check common installation paths on Linux
+            set(ONEAPI_SEARCH_PATHS
+                    "/opt/intel/oneapi"
+                    "/usr/local/intel/oneapi"
+                    "$ENV{HOME}/intel/oneapi"
+            )
+            foreach (search_path ${ONEAPI_SEARCH_PATHS})
+                if (EXISTS "${search_path}")
+                    set(ONEAPI_ROOT "${search_path}")
+                    message(STATUS "Auto-detected oneAPI at: ${ONEAPI_ROOT}")
+                    break()
+                endif ()
+            endforeach ()
+        endif ()
+
+        if (NOT ONEAPI_ROOT)
+            message(FATAL_ERROR "Intel oneAPI not found. Please install Intel oneAPI Base Toolkit or set ONEAPI_ROOT environment variable")
+        endif ()
+    endif ()
+
+    # Find the DPC++ compiler
+    find_program(DPCPP_COMPILER
+            NAMES icpx dpcpp clang++
+            PATHS
+            "${ONEAPI_ROOT}/compiler/latest/bin"
+            "${ONEAPI_ROOT}/compiler/latest/linux/bin"
+            "${ONEAPI_ROOT}/compiler/latest/windows/bin"
+            "${ONEAPI_ROOT}/compiler/2024.0/bin"
+            "${ONEAPI_ROOT}/compiler/2024.0/linux/bin"
+            "${ONEAPI_ROOT}/compiler/2024.0/windows/bin"
+            NO_DEFAULT_PATH
+    )
+
+    if (NOT DPCPP_COMPILER)
+        message(FATAL_ERROR "Intel DPC++ compiler (icpx) not found. Please install Intel oneAPI DPC++ Compiler")
+    endif ()
+
+    message(STATUS "Found DPC++ compiler: ${DPCPP_COMPILER}")
+
+    # Set compiler for SYCL
+    set(CMAKE_CXX_COMPILER ${DPCPP_COMPILER})
+
+    # SYCL compilation flags - use JIT compilation for B580 compatibility
+    set(SYCL_FLAGS "-fsycl")
+
+    # Add optimizations but no specific targets (let runtime JIT compile)
+    set(SYCL_FLAGS "${SYCL_FLAGS} -O3 -ffast-math")
+
+    message(STATUS "Using JIT compilation for B580 Battlemage compatibility")
+
+    if (INTEL_GPU_TARGET MATCHES "intel_gpu_bmg_g21")
+        message(STATUS "Detected Battlemage GPU - using SPIR-V for compatibility")
+    elseif (INTEL_GPU_TARGET MATCHES "intel_gpu_acm")
+        message(STATUS "Detected Alchemist GPU - using SPIR-V for compatibility")
+    elseif (INTEL_GPU_TARGET MATCHES "intel_gpu_pvc")
+        message(STATUS "Detected Ponte Vecchio GPU - using SPIR-V for compatibility")
+    elseif (INTEL_GPU_TARGET MATCHES "intel_gpu_dg1")
+        message(STATUS "Detected DG1 GPU - using SPIR-V for compatibility")
+    else()
+        message(STATUS "Using generic SPIR-V target for Intel GPU")
+    endif()
+
+    # JIT compilation will handle device optimization automatically
+
+    # Set includes and libraries
+    set(GPU_INCLUDES
+            ${ONEAPI_ROOT}/compiler/latest/include
+            ${ONEAPI_ROOT}/compiler/latest/include/sycl
+    )
+
+    if (WIN32)
+        set(GPU_LIBRARIES
+                ${ONEAPI_ROOT}/compiler/latest/lib/sycl.lib
+                # Note: OpenCL.lib removed - SYCL handles device management
+        )
+    else ()
+        set(GPU_LIBRARIES
+                ${ONEAPI_ROOT}/compiler/latest/lib/libsycl.so
+                # Note: libOpenCL.so removed - SYCL handles device management
+        )
+    endif ()
+
+    set(GPU_DEFINES -DUSE_SYCL)
+
+    # Convert SYCL_FLAGS to separate arguments
+    separate_arguments(SYCL_FLAGS_LIST UNIX_COMMAND "${SYCL_FLAGS}")
+
+    # No separate kernel compilation - include kernel in wrapper
+
+    message(STATUS "Building with SYCL/oneAPI for Intel GPUs")
+    message(STATUS "  oneAPI root: ${ONEAPI_ROOT}")
+    message(STATUS "  Intel GPU targets: ${INTEL_GPU_TARGET}")
+    message(STATUS "  DPC++ compiler: ${DPCPP_COMPILER}")
+
+elseif (GPU_BACKEND STREQUAL "HIP")
     set(ROCM_PATH $ENV{ROCM_PATH})
     if (NOT ROCM_PATH)
         if (WIN32)
@@ -469,7 +594,6 @@ add_executable(sha1_miner
         ${SRC_DIR}/core/mining_system.cpp
         ${SRC_DIR}/core/multi_gpu_manager.cpp
         ${SRC_DIR}/core/pool_mining.cpp
-        ${SRC_DIR}/core/solo_mining.cpp
 
         # Utility components (in src/utils)
         ${SRC_DIR}/utils/platform_utils.cpp
@@ -488,6 +612,8 @@ add_executable(sha1_miner
 
         # GPU kernel launcher
         ${MINER_DIR}/kernel_launcher.cpp
+
+        # SYCL wrappers are compiled separately as object files for SYCL builds
 )
 
 set_target_properties(sha1_miner PROPERTIES
@@ -554,7 +680,31 @@ if (NOT MSVC)
     )
 endif ()
 
-if (GPU_BACKEND STREQUAL "HIP")
+if (GPU_BACKEND STREQUAL "SYCL")
+
+
+    # Add SYCL files directly to executable and use DPC++ for everything
+    message(STATUS "Adding SYCL sources directly to main executable")
+
+    # No separate compilation - add SYCL sources to main target
+    target_sources(sha1_miner PRIVATE
+        ${MINER_DIR}/sycl_wrappers.cpp
+        ${MINER_DIR}/sha1_kernel_intel.sycl.cpp
+    )
+
+    # SYCL compilation and linking flags
+    target_compile_options(sha1_miner PRIVATE ${SYCL_FLAGS_LIST})
+    target_link_options(sha1_miner PRIVATE ${SYCL_FLAGS_LIST})
+
+    target_link_libraries(sha1_miner PRIVATE
+            ${GPU_LIBRARIES}
+            ${Boost_LIBRARIES}
+            ZLIB::ZLIB
+            OpenSSL::SSL
+            OpenSSL::Crypto
+            Threads::Threads
+    )
+elseif (GPU_BACKEND STREQUAL "HIP")
     add_dependencies(sha1_miner hip_kernel_target)
     target_link_libraries(sha1_miner PRIVATE
             ${KERNEL_OBJECT}
@@ -630,6 +780,8 @@ message(STATUS "  vcpkg triplet: ${VCPKG_TARGET_TRIPLET}")
 message(STATUS "  Library linkage: ${USE_STATIC_LIBS}")
 if (GPU_BACKEND STREQUAL "CUDA")
     message(STATUS "  CUDA Compiler: ${CMAKE_CUDA_COMPILER}")
+elseif (GPU_BACKEND STREQUAL "SYCL")
+    message(STATUS "  SYCL/DPC++ Compiler: ${DPCPP_COMPILER}")
 endif ()
 message(STATUS "  Boost version: ${Boost_VERSION}")
 message(STATUS "  Boost.Beast: Available (header-only library)")

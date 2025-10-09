@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # SHA-1 OP_NET Miner - Build Script for Linux
-# Supports both NVIDIA CUDA and AMD ROCm GPUs
+# Supports NVIDIA CUDA, AMD ROCm, and Intel oneAPI/SYCL GPUs
 #
 
 set -e
@@ -79,10 +79,55 @@ detect_gpu_arch() {
     return 1
 }
 
+# Function to find Intel oneAPI installation
+find_oneapi() {
+    local oneapi_paths=(
+        "/opt/intel/oneapi"
+        "/usr/local/intel/oneapi"
+        "$HOME/intel/oneapi"
+        "$ONEAPI_ROOT"
+    )
+
+    for path in "${oneapi_paths[@]}"; do
+        if [ -d "$path" ] && [ -f "$path/setvars.sh" ]; then
+            echo "$path"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Function to detect Intel GPU
+detect_intel_gpu() {
+    # Check for Intel GPU using sycl-ls if available
+    if command -v sycl-ls &> /dev/null; then
+        if sycl-ls 2>/dev/null | grep -q "Intel.*Graphics"; then
+            return 0
+        fi
+    fi
+
+    # Check using lspci
+    if command -v lspci &> /dev/null; then
+        if lspci | grep -i "VGA.*Intel" &> /dev/null || lspci | grep -i "Display.*Intel" &> /dev/null; then
+            # Check if it's Arc/Xe GPU (not just integrated graphics)
+            if lspci | grep -i "Intel.*Arc" &> /dev/null || lspci | grep -i "Intel.*Xe" &> /dev/null || lspci | grep -i "Intel.*B[0-9][0-9]0" &> /dev/null; then
+                return 0
+            fi
+            # Could still be Iris Xe or UHD graphics
+            print_warning "Detected Intel integrated graphics - may have limited compute capabilities"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 # Default settings
 BUILD_TYPE="Release"
 GPU_TYPE=""
 HIP_ARCH=""
+INTEL_GPU_TARGET=""
 CMAKE_ARGS=""
 THREADS=$(nproc)
 CLEAN_BUILD=0
@@ -103,9 +148,15 @@ while [[ $# -gt 0 ]]; do
             GPU_TYPE="HIP"
             shift
             ;;
+        --sycl|--intel|--oneapi)
+            GPU_TYPE="SYCL"
+            shift
+            ;;
         --arch)
             if [ "$GPU_TYPE" = "HIP" ] || [ -z "$GPU_TYPE" ]; then
                 HIP_ARCH="$2"
+            elif [ "$GPU_TYPE" = "SYCL" ]; then
+                INTEL_GPU_TARGET="$2"
             else
                 CUDA_ARCH="$2"
             fi
@@ -122,13 +173,17 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo "Usage: $0 [options]"
             echo "Options:"
-            echo "  --debug           Build in debug mode"
-            echo "  --cuda            Force CUDA build (NVIDIA)"
-            echo "  --hip, --amd      Force HIP build (AMD)"
-            echo "  --arch <arch>     Specify GPU architecture"
-            echo "  --clean           Clean build directory before building"
-            echo "  --threads, -j N   Number of build threads (default: $(nproc))"
-            echo "  --help, -h        Show this help message"
+            echo "  --debug               Build in debug mode"
+            echo "  --cuda                Force CUDA build (NVIDIA)"
+            echo "  --hip, --amd          Force HIP build (AMD)"
+            echo "  --sycl, --intel       Force SYCL build (Intel)"
+            echo "  --arch <arch>         Specify GPU architecture"
+            echo "                        For Intel: pvc, dg2, acm_g10, acm_g11"
+            echo "                        For AMD: gfx906, gfx1030, gfx1100, etc."
+            echo "                        For NVIDIA: 60, 70, 80, 86, 89, 90, etc."
+            echo "  --clean               Clean build directory before building"
+            echo "  --threads, -j N       Number of build threads (default: $(nproc))"
+            echo "  --help, -h            Show this help message"
             exit 0
             ;;
         *)
@@ -162,9 +217,23 @@ if [ -z "$GPU_TYPE" ]; then
         fi
     fi
 
+    # Check for Intel GPU
     if [ -z "$GPU_TYPE" ]; then
-        print_error "No supported GPU detected. Please install CUDA (NVIDIA) or ROCm (AMD)."
-        print_info "You can force a build type with --cuda or --hip"
+        if detect_intel_gpu; then
+            # Check if oneAPI is installed
+            if find_oneapi &> /dev/null; then
+                GPU_TYPE="SYCL"
+                print_info "Detected Intel GPU with oneAPI support"
+            else
+                print_warning "Intel GPU detected but oneAPI not found"
+                print_info "Please install Intel oneAPI Base Toolkit for GPU compute support"
+            fi
+        fi
+    fi
+
+    if [ -z "$GPU_TYPE" ]; then
+        print_error "No supported GPU detected. Please install CUDA (NVIDIA), ROCm (AMD), or oneAPI (Intel)."
+        print_info "You can force a build type with --cuda, --hip, or --sycl"
         exit 1
     fi
 fi
@@ -219,6 +288,79 @@ if [ "$GPU_TYPE" = "CUDA" ]; then
             print_info "Will use default CUDA architectures"
         fi
     fi
+fi
+
+# Intel-specific setup
+if [ "$GPU_TYPE" = "SYCL" ]; then
+    # Find oneAPI installation
+    ONEAPI_PATH=$(find_oneapi)
+    if [ $? -ne 0 ] || [ -z "$ONEAPI_PATH" ]; then
+        print_error "Intel oneAPI installation not found!"
+        print_info "Please install Intel oneAPI Base Toolkit from:"
+        print_info "https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html"
+        exit 1
+    fi
+
+    print_info "Found oneAPI installation: $ONEAPI_PATH"
+
+    # Source oneAPI environment
+    print_info "Setting up oneAPI environment..."
+    source "$ONEAPI_PATH/setvars.sh" --force > /dev/null 2>&1
+
+    # Verify compiler
+    if ! command -v icpx &> /dev/null; then
+        print_error "Intel DPC++ compiler (icpx) not found after sourcing oneAPI!"
+        exit 1
+    fi
+
+    # Get compiler version
+    DPCPP_VERSION=$(icpx --version 2>&1 | head -1)
+    print_info "DPC++ compiler: $DPCPP_VERSION"
+
+    # Auto-detect Intel GPU architecture if not specified
+    if [ -z "$INTEL_GPU_TARGET" ]; then
+        print_info "Detecting Intel GPU architecture..."
+
+        # Try to detect GPU model using sycl-ls
+        if command -v sycl-ls &> /dev/null; then
+            GPU_INFO=$(sycl-ls 2>/dev/null | grep -i "Intel.*Graphics")
+
+            # Battlemage series (B580, B570, etc.)
+            if echo "$GPU_INFO" | grep -qi "Arc.*B[0-9][0-9]0"; then
+                # Battlemage uses Xe2 architecture
+                INTEL_GPU_TARGET="intel_gpu_bmg_g21"
+                print_info "Detected Intel Arc B-series (Battlemage)"
+            elif echo "$GPU_INFO" | grep -qi "Arc.*A[0-9][0-9]0"; then
+                # Alchemist series (A770, A750, A380)
+                INTEL_GPU_TARGET="intel_gpu_acm_g10,intel_gpu_acm_g11"
+                print_info "Detected Intel Arc A-series (Alchemist)"
+            elif echo "$GPU_INFO" | grep -qi "Xe.*Max"; then
+                # Xe Max (DG1)
+                INTEL_GPU_TARGET="intel_gpu_dg1"
+                print_info "Detected Intel Xe Max"
+            elif echo "$GPU_INFO" | grep -qi "Data Center GPU Max"; then
+                # Ponte Vecchio
+                INTEL_GPU_TARGET="intel_gpu_pvc"
+                print_info "Detected Intel Data Center GPU Max (Ponte Vecchio)"
+            else
+                # Use SPIR-V for compatibility when unknown
+                INTEL_GPU_TARGET="spir64_gen"
+                print_warning "Could not identify specific Intel GPU model"
+                print_info "Using SPIR-V target for compatibility"
+            fi
+        else
+            # Fallback when sycl-ls not found
+            INTEL_GPU_TARGET="spir64_gen"
+            print_warning "sycl-ls not found - using SPIR-V target"
+        fi
+
+        print_info "Intel GPU targets: $INTEL_GPU_TARGET"
+    fi
+
+    # Set environment for optimal performance
+    export SYCL_CACHE_PERSISTENT=1
+    export ZES_ENABLE_SYSMAN=1
+    export ONEAPI_DEVICE_SELECTOR=level_zero:0
 fi
 
 # AMD-specific setup
@@ -313,7 +455,11 @@ mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
 # Configure with CMake
-if [ "$GPU_TYPE" = "HIP" ]; then
+if [ "$GPU_TYPE" = "SYCL" ]; then
+    print_info "Configuring for Intel GPUs..."
+    print_info "Building for targets: $INTEL_GPU_TARGET"
+    CMAKE_ARGS="-DCMAKE_BUILD_TYPE=$BUILD_TYPE -DUSE_SYCL=ON -DINTEL_GPU_TARGET=\"$INTEL_GPU_TARGET\""
+elif [ "$GPU_TYPE" = "HIP" ]; then
     print_info "Configuring for AMD GPUs..."
     print_info "Building for architectures: $HIP_ARCH"
     CMAKE_ARGS="-DCMAKE_BUILD_TYPE=$BUILD_TYPE -DUSE_HIP=ON -DHIP_ARCH=\"$HIP_ARCH\""
@@ -355,7 +501,12 @@ print_info "Executable: $BUILD_DIR/sha1_miner"
 # Print usage instructions
 echo
 echo "To run the miner:"
-if [ "$GPU_TYPE" = "HIP" ]; then
+if [ "$GPU_TYPE" = "SYCL" ]; then
+    echo "  ./$BUILD_DIR/sha1_miner --gpu 0"
+    echo
+    echo "Note: Make sure oneAPI environment is set:"
+    echo "  source $ONEAPI_PATH/setvars.sh"
+elif [ "$GPU_TYPE" = "HIP" ]; then
     echo "  ./$BUILD_DIR/sha1_miner --gpu 0"
     echo
     echo "Note: You may need to set LD_LIBRARY_PATH:"

@@ -815,6 +815,7 @@ namespace MiningPool {
                                         (static_cast<uint32_t>(target_bytes[i * 4 + 2]) << 8) |
                                         static_cast<uint32_t>(target_bytes[i * 4 + 3]);
         }
+
         mining_job.difficulty   = job_msg.target_difficulty;
         mining_job.nonce_offset = job_msg.nonce_start;
 
@@ -840,7 +841,7 @@ namespace MiningPool {
             target_hex_verify += buf;
         }
 
-        LOG_DEBUG("POOL", "Target pattern set to: ", target_hex_verify);
+        LOG_INFO("POOL", "Target pattern set to: ", target_hex_verify);
 
         return mining_job;
     }

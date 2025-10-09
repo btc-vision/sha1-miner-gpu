@@ -1,6 +1,7 @@
 #include "mining_system.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -11,7 +12,16 @@
 #include "config.hpp"
 #include "utilities.hpp"
 
-#ifdef USE_HIP
+#ifdef USE_SYCL
+extern "C" void update_base_message_sycl(const uint32_t *base_msg_words);
+extern "C" void update_target_hash_sycl(const uint32_t *target_hash);
+extern "C" void update_complete_job_sycl(const uint32_t *base_msg_words, const uint32_t *target_hash,
+                                         uint64_t job_version);
+extern "C" bool initialize_sycl_runtime(void);
+extern "C" void cleanup_sycl_runtime(void);
+extern "C" bool initialize_sycl_wrappers(void);
+extern "C" void cleanup_sycl_wrappers(void);
+#elif USE_HIP
 extern "C" void update_base_message_hip(const uint32_t *base_msg_words);
 #else
 extern "C" void update_base_message_cuda(const uint32_t *base_msg_words);
@@ -95,6 +105,12 @@ GPUVendor MiningSystem::detectGPUVendor() const
         device_name.find("navi") != std::string::npos || device_name.find("rdna") != std::string::npos ||
         device_name.find("gfx") != std::string::npos) {
         return GPUVendor::AMD;
+    }
+    // Check for Intel GPUs
+    if (device_name.find("intel") != std::string::npos || device_name.find("arc") != std::string::npos ||
+        device_name.find("iris") != std::string::npos || device_name.find("uhd") != std::string::npos ||
+        device_name.find("xe") != std::string::npos || device_name.find("dg") != std::string::npos) {
+        return GPUVendor::INTEL;
     }
     return GPUVendor::UNKNOWN;
 }
@@ -195,7 +211,8 @@ MiningSystem::OptimalConfig MiningSystem::getAMDOptimalConfig()
 
 MiningSystem::OptimalConfig MiningSystem::getNVIDIAOptimalConfig() const
 {
-    OptimalConfig config;
+    OptimalConfig config{};
+    // NVIDIA GPU optimizations (CUDA only)
     if (device_props_.major >= 8) {
         // Ampere and newer (RTX 30xx, 40xx, A100, etc.)
         config.blocks_per_sm = 16;
@@ -232,19 +249,67 @@ MiningSystem::OptimalConfig MiningSystem::getNVIDIAOptimalConfig() const
     return config;
 }
 
+MiningSystem::OptimalConfig MiningSystem::getIntelOptimalConfig() const
+{
+    OptimalConfig config;
+
+    // Intel GPU-specific optimizations based on device name and EU count
+    auto device_name = std::string(device_props_.name);
+
+    if (device_name.find("Arc") != std::string::npos) {
+        if (device_name.find("B5") != std::string::npos || device_name.find("B6") != std::string::npos) {
+            // Battlemage (Arc B-series) - Xe2 architecture
+            config.blocks_per_sm = 4;  // Conservative for Intel architecture
+            config.threads       = 256;
+            config.streams       = 8;  // Moderate concurrent streams
+            config.buffer_size   = 512;
+        } else if (device_name.find("A7") != std::string::npos || device_name.find("A5") != std::string::npos) {
+            // Alchemist high-end (A770, A750) - Xe HPG
+            config.blocks_per_sm = 4;
+            config.threads       = 256;
+            config.streams       = 6;
+            config.buffer_size   = 384;
+        } else {
+            // Alchemist low-end (A380, A310) - Xe HPG
+            config.blocks_per_sm = 3;
+            config.threads       = 256;
+            config.streams       = 4;
+            config.buffer_size   = 256;
+        }
+    } else if (device_name.find("Data Center GPU Max") != std::string::npos ||
+               device_name.find("Ponte Vecchio") != std::string::npos) {
+        // Ponte Vecchio - Very high-end compute
+        config.blocks_per_sm = 8;
+        config.threads       = 512;
+        config.streams       = 16;
+        config.buffer_size   = 1024;
+    } else {
+        // Generic Intel GPU (Iris Xe, UHD Graphics, etc.) - conservative settings
+        config.blocks_per_sm = 2;
+        config.threads       = 128;
+        config.streams       = 2;
+        config.buffer_size   = 128;
+    }
+
+    return config;
+}
+
 MiningSystem::OptimalConfig MiningSystem::determineOptimalConfig()
 {
     // Detect GPU vendor
     gpu_vendor_ = detectGPUVendor();
     LOG_INFO("AUTOTUNE", "Detected GPU vendor: ",
-             gpu_vendor_ == GPUVendor::NVIDIA ? "NVIDIA"
-             : gpu_vendor_ == GPUVendor::AMD  ? "AMD"
-                                              : "Unknown");
+             gpu_vendor_ == GPUVendor::NVIDIA  ? "NVIDIA"
+             : gpu_vendor_ == GPUVendor::AMD   ? "AMD"
+             : gpu_vendor_ == GPUVendor::INTEL ? "INTEL"
+                                               : "Unknown");
     OptimalConfig config{};
     if (gpu_vendor_ == GPUVendor::AMD) {
         config = getAMDOptimalConfig();
     } else if (gpu_vendor_ == GPUVendor::NVIDIA) {
         config = getNVIDIAOptimalConfig();
+    } else if (gpu_vendor_ == GPUVendor::INTEL) {
+        config = getIntelOptimalConfig();
     } else {
         // Unknown vendor - use conservative defaults
         config.blocks_per_sm = 2;
@@ -331,6 +396,14 @@ void MiningSystem::validateConfiguration()
         if (config_.blocks_per_stream > max_blocks) {
             config_.blocks_per_stream = max_blocks;
         }
+    } else if (gpu_vendor_ == GPUVendor::INTEL) {
+        // Intel GPU-specific limits - more conservative than NVIDIA
+        int max_blocks = 1024;
+        if (config_.blocks_per_stream > max_blocks) {
+            LOG_WARN("AUTOTUNE", "Capping blocks per stream from ", config_.blocks_per_stream, " to ", max_blocks,
+                     " for Intel GPU");
+            config_.blocks_per_stream = max_blocks;
+        }
     }
     // Ensure minimum configuration
     if (config_.num_streams < 1)
@@ -414,6 +487,23 @@ void MiningSystem::logFinalConfiguration(const UserSpecifiedFlags &user_flags)
 #ifdef USE_HIP
         LOG_INFO("AUTOTUNE", "Architecture: ", AMDGPUDetector::getArchitectureName(detected_arch_));
 #endif
+    } else if (gpu_vendor_ == GPUVendor::INTEL) {
+        LOG_INFO("AUTOTUNE", "Blocks per EU group: ", (config_.blocks_per_stream / device_props_.multiProcessorCount));
+        // Detect Intel architecture
+        std::string device_name = device_props_.name;
+        if (device_name.find("Arc") != std::string::npos) {
+            if (device_name.find("B5") != std::string::npos || device_name.find("B6") != std::string::npos) {
+                LOG_INFO("AUTOTUNE", "Architecture: Xe2 (Battlemage)");
+            } else {
+                LOG_INFO("AUTOTUNE", "Architecture: Xe HPG (Alchemist)");
+            }
+        } else if (device_name.find("Data Center GPU Max") != std::string::npos) {
+            LOG_INFO("AUTOTUNE", "Architecture: Xe HPC (Ponte Vecchio)");
+        } else if (device_name.find("Iris") != std::string::npos || device_name.find("UHD") != std::string::npos) {
+            LOG_INFO("AUTOTUNE", "Architecture: Xe LP (Integrated)");
+        } else {
+            LOG_INFO("AUTOTUNE", "Architecture: Intel GPU");
+        }
     }
     LOG_INFO("AUTOTUNE", "-------------------------------------");
     LOG_INFO("AUTOTUNE", "Performance Settings:");
@@ -480,11 +570,27 @@ bool MiningSystem::initialize()
 {
     std::lock_guard lock(system_mutex_);
 
+#ifdef USE_SYCL
+    // Initialize SYCL runtime and wrappers
+    if (!initialize_sycl_wrappers()) {
+        std::cerr << "Failed to initialize SYCL wrappers\n";
+        return false;
+    }
+
+    if (!initialize_sycl_runtime()) {
+        std::cerr << "Failed to initialize SYCL runtime\n";
+        cleanup_sycl_wrappers();
+        return false;
+    }
+
+    std::cout << "SYCL runtime initialized for Intel GPU mining\n";
+#else
+
     // First, check if any GPU is available
-    int device_count = 0;
-    gpuError_t err   = gpuGetDeviceCount(&device_count);
-    if (err != gpuSuccess) {
-        std::cerr << "Failed to get GPU device count: " << gpuGetErrorString(err) << "\n";
+    int device_count        = 0;
+    gpuError_t err_gpu_init = gpuGetDeviceCount(&device_count);
+    if (err_gpu_init != gpuSuccess) {
+        std::cerr << "Failed to get GPU device count: " << gpuGetErrorString(err_gpu_init) << "\n";
         std::cerr << "Is the GPU driver installed and running?\n";
         return false;
     }
@@ -504,28 +610,31 @@ bool MiningSystem::initialize()
     gpuGetLastError();
 
     // Set device with error checking
-    err = gpuSetDevice(config_.device_id);
-    if (err != gpuSuccess) {
-        std::cerr << "Failed to set GPU device " << config_.device_id << ": " << gpuGetErrorString(err) << "\n";
+    err_gpu_init = gpuSetDevice(config_.device_id);
+    if (err_gpu_init != gpuSuccess) {
+        std::cerr << "Failed to set GPU device " << config_.device_id << ": " << gpuGetErrorString(err_gpu_init)
+                  << "\n";
         // Try to provide more specific error information
-#ifdef USE_HIP
+    #ifdef USE_HIP
         if (err == hipErrorInvalidDevice) {
             std::cerr << "Device " << config_.device_id << " is not a valid HIP device\n";
         } else if (err == hipErrorNoDevice) {
             std::cerr << "No HIP devices available\n";
         }
-#else
-        if (err == cudaErrorInvalidDevice) {
+    #else
+        if (err_gpu_init == cudaErrorInvalidDevice) {
             std::cerr << "Device " << config_.device_id << " is not a valid CUDA device\n";
-        } else if (err == cudaErrorNoDevice) {
+        } else if (err_gpu_init == cudaErrorNoDevice) {
             std::cerr << "No CUDA devices available\n";
         }
-#endif
+    #endif
         return false;
     }
 
+#endif
+
     // Verify we can communicate with the device
-    err = gpuDeviceSynchronize();
+    gpuError_t err = gpuDeviceSynchronize();
     if (err != gpuSuccess) {
         std::cerr << "Failed to synchronize with device: " << gpuGetErrorString(err) << "\n";
         std::cerr << "The GPU may be in a bad state or the driver may need to be restarted\n";
@@ -567,17 +676,32 @@ bool MiningSystem::initialize()
 #endif
 
     // Check compute capability
+#ifdef USE_SYCL
+    // Intel GPUs don't use compute capability, so skip this check
+#else
     if (device_props_.major < 3) {
         std::cerr << "GPU compute capability " << device_props_.major << "." << device_props_.minor
                   << " is too old. Minimum required: 3.0\n";
         return false;
     }
+#endif
 
     // Print device info
     std::cout << "SHA-1 OP_NET Miner (" << getGPUPlatformName() << ")\n";
     std::cout << "=====================================\n";
     std::cout << "Device: " << device_props_.name << "\n";
+#ifdef USE_SYCL
+    std::cout << "Intel GPU Architecture: "
+              << (std::string(device_props_.name).find("Arc") != std::string::npos
+                      ? (std::string(device_props_.name).find("B5") != std::string::npos ||
+                                 std::string(device_props_.name).find("B6") != std::string::npos
+                             ? "Xe2 (Battlemage)"
+                             : "Xe HPG (Alchemist)")
+                      : "Intel Graphics")
+              << "\n";
+#else
     std::cout << "Compute Capability: " << device_props_.major << "." << device_props_.minor << "\n";
+#endif
     std::cout << "SMs/CUs: " << device_props_.multiProcessorCount << "\n";
     std::cout << "Warp/Wavefront Size: " << device_props_.warpSize << "\n";
     std::cout << "Max Threads per Block: " << device_props_.maxThreadsPerBlock << "\n";
@@ -595,7 +719,28 @@ bool MiningSystem::initialize()
     }
     std::cout << "\n";
 
-    autoTuneParameters();
+    // Only auto-tune if enabled and no user config or auto_tune is true
+    bool should_auto_tune = true;
+    if (user_config_) {
+        const auto *mining_config = static_cast<const MiningConfig *>(user_config_);
+        should_auto_tune          = mining_config->auto_tune;
+    }
+
+    if (should_auto_tune) {
+        autoTuneParameters();
+    } else {
+        LOG_INFO("MAIN", "Skipping auto-tune - using user-specified parameters");
+        // Still need to detect and log user-specified values even without auto-tune
+        UserSpecifiedFlags user_flags = detectUserSpecifiedValues();
+
+        // Even when auto-tune is disabled, we need to set the buffer size if it's 0
+        if (config_.result_buffer_size == 0) {
+            OptimalConfig optimal      = determineOptimalConfig();
+            config_.result_buffer_size = optimal.buffer_size;
+        }
+
+        logFinalConfiguration(user_flags);
+    }
 
     // Validate thread configuration
     if (config_.threads_per_block % device_props_.warpSize != 0 ||
@@ -613,7 +758,9 @@ bool MiningSystem::initialize()
     }
 
     // Set up L2 cache persistence for newer architectures
-#ifdef USE_HIP
+#ifdef USE_SYCL
+    // Intel GPUs handle cache management automatically
+#elif defined(USE_HIP)
     // AMD doesn't have the same L2 persistence API
 #else
     if (device_props_.major >= 8) {
@@ -777,12 +924,14 @@ void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t non
     // Load the current value for comparison
     uint64_t last_version    = last_updated_job_version.load();
     uint64_t current_version = current_job_version_.load();
+
     if (current_version != last_version) {
         uint32_t base_msg_words[8];
         memcpy(base_msg_words, job.base_message, 32);
 
-// Copy to constant memory using platform-specific wrapper
-#ifdef USE_HIP
+#ifdef USE_SYCL
+        update_complete_job_sycl(base_msg_words, job.target_hash, current_version);
+#elif USE_HIP
         update_base_message_hip(base_msg_words);
 #else
         update_base_message_cuda(base_msg_words);
@@ -790,7 +939,8 @@ void MiningSystem::launchKernelOnStream(const int stream_idx, const uint64_t non
 
         // Store the new version
         last_updated_job_version.store(current_version);
-        LOG_TRACE("MINING", "Updated constant memory with new base message for job version ", current_version);
+        // LOG_TRACE("MINING", "Updated constant memory with complete job parameters for job version ",
+        // current_version);
     }
 
     // Configure kernel
@@ -894,6 +1044,18 @@ void MiningSystem::updateJobLive(const MiningJob &job, uint64_t job_version)
     uint64_t old_version = current_job_version_.load();
     current_job_version_ = job_version;
     LOG_INFO("MINING", "Updating job from version ", old_version, " to ", job_version);
+
+#ifdef USE_SYCL
+    LOG_INFO("MINING", "Updating Intel SYCL complete job globally - ALL PARAMETERS");
+
+    // Convert base message to uint32_t array for Intel
+    uint32_t base_msg_words[8];
+    memcpy(base_msg_words, job.base_message, 32);
+
+    // Call the complete job update function
+    update_complete_job_sycl(base_msg_words, job.target_hash, job_version);
+#endif
+
     // Update the device jobs with new data
     for (int i = 0; i < config_.num_streams; i++) {
         // Copy new job data to device
@@ -927,7 +1089,6 @@ void MiningSystem::processResultsOptimized(int stream_idx)
 
     if (count == 0)
         return;
-
     // Limit to capacity
     if (count > pool.capacity) {
         LOG_WARN("MINING", "Result count (", count, ") exceeds capacity (", pool.capacity, "), capping results");
@@ -958,16 +1119,21 @@ void MiningSystem::processResultsOptimized(int stream_idx)
     uint32_t stale_count = 0;
 
     for (uint32_t i = 0; i < count; i++) {
+        // printf("[RESULT %d] nonce=0x%016llx bits=%u hash=%08x%08x%08x%08x%08x job_v=%llu\n", i,
+        //        (unsigned long long)results[i].nonce, results[i].matching_bits, results[i].hash[0],
+        //        results[i].hash[1], results[i].hash[2], results[i].hash[3], results[i].hash[4], (unsigned long
+        //        long)results[i].job_version);
+
         if (results[i].nonce == 0)
             continue;
 
         // Check if result is from current job version
-        if (results[i].job_version != current_job_version_) {
-            // Skip stale results from old job versions
-            stale_count++;
-            LOG_TRACE("MINING", "Skipping stale result from job version ", results[i].job_version);
-            continue;
-        }
+        /* if (results[i].job_version != current_job_version_) {
+             // Skip stale results from old job versions
+             stale_count++;
+             LOG_TRACE("MINING", "Skipping stale result from job version ", results[i].job_version);
+             continue;
+         }*/
 
         // Store all valid results from current job
         valid_results.push_back(results[i]);
@@ -979,9 +1145,9 @@ void MiningSystem::processResultsOptimized(int stream_idx)
                 std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time_);
 
             std::string hash_str = "0x";
-            for (int j = 0; j < 5; j++) {
+            for (unsigned int j : results[i].hash) {
                 char buf[9];
-                snprintf(buf, sizeof(buf), "%08x", results[i].hash[j]);
+                snprintf(buf, sizeof(buf), "%08x", j);
                 hash_str += buf;
             }
 
@@ -1173,7 +1339,7 @@ bool MiningSystem::initializeMemoryPools()
         size_t result_size  = sizeof(MiningResult) * pool.capacity;
         size_t aligned_size = ((result_size + alignment - 1) / alignment) * alignment;
 
-        gpuError_t err = gpuMalloc(&pool.results, aligned_size);
+        gpuError_t err = gpuMalloc(reinterpret_cast<void **>(&pool.results), aligned_size);
         if (err != gpuSuccess) {
             std::cerr << "Failed to allocate GPU results buffer for stream " << i << ": " << gpuGetErrorString(err)
                       << "\n";
@@ -1188,7 +1354,7 @@ bool MiningSystem::initializeMemoryPools()
         }
 
         // Allocate count with alignment
-        err = gpuMalloc(&pool.count, sizeof(uint32_t));
+        err = gpuMalloc(reinterpret_cast<void **>(&pool.count), sizeof(uint32_t));
         if (err != gpuSuccess) {
             std::cerr << "Failed to allocate count buffer: " << gpuGetErrorString(err) << "\n";
             return false;
@@ -1207,7 +1373,7 @@ bool MiningSystem::initializeMemoryPools()
         }
 
         // Allocate job_version
-        err = gpuMalloc(&pool.job_version, sizeof(uint64_t));
+        err = gpuMalloc(reinterpret_cast<void **>(&pool.job_version), sizeof(uint64_t));
         if (err != gpuSuccess) {
             std::cerr << "Failed to allocate job version: " << gpuGetErrorString(err) << "\n";
             return false;
@@ -1221,7 +1387,8 @@ bool MiningSystem::initializeMemoryPools()
 
         // Allocate pinned host memory
         if (config_.use_pinned_memory) {
-            err = gpuHostAlloc(&pinned_results_[i], result_size, gpuHostAllocMapped | gpuHostAllocWriteCombined);
+            err = gpuHostAlloc(reinterpret_cast<void **>(&pinned_results_[i]), result_size,
+                               gpuHostAllocMapped | gpuHostAllocWriteCombined);
             if (err != gpuSuccess) {
                 std::cerr << "Warning: Failed to allocate pinned memory, using regular memory\n";
                 pinned_results_[i]        = new MiningResult[pool.capacity];
@@ -1321,6 +1488,12 @@ void MiningSystem::cleanup()
             }
         }
     }
+
+#ifdef USE_SYCL
+    // Cleanup SYCL resources
+    cleanup_sycl_runtime();
+    cleanup_sycl_wrappers();
+#endif
 }
 
 void MiningSystem::performanceMonitor() const

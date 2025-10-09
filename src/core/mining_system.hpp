@@ -60,7 +60,7 @@ private:
 /**
  * GPU vendor enumeration
  */
-enum class GPUVendor { NVIDIA, AMD, UNKNOWN };
+enum class GPUVendor { NVIDIA, AMD, INTEL, UNKNOWN };
 
 /**
  * Enhanced mining system with proper resource management
@@ -240,6 +240,7 @@ private:
     OptimalConfig determineOptimalConfig();
     OptimalConfig getAMDOptimalConfig();
     OptimalConfig getNVIDIAOptimalConfig() const;
+    OptimalConfig getIntelOptimalConfig() const;
 
     void applyUserSpecifiedValues(const UserSpecifiedFlags &user_flags, const OptimalConfig &optimal);
     void validateConfiguration();
@@ -265,7 +266,7 @@ private:
         std::chrono::high_resolution_clock::time_point launch_time;
     };
 
-    std::atomic<uint64_t> current_job_version_{0};
+    std::atomic<uint64_t> current_job_version_{99999};
 
     // Helper methods
     void launchKernelOnStream(int stream_idx, uint64_t nonce_offset, const MiningJob &job);

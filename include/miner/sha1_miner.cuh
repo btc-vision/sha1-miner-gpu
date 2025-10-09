@@ -1,6 +1,5 @@
 #pragma once
-#include <stdint.h>
-
+#include <cstdint>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -18,22 +17,26 @@
     #endif
 #endif
 
-// SHA-1 constants
-#define SHA1_BLOCK_SIZE          64
-#define SHA1_DIGEST_SIZE         20
-#define SHA1_ROUNDS              80
-#define MAX_CANDIDATES_PER_BATCH 1024
-
-#ifdef USE_HIP
-    #define NONCES_PER_THREAD         8192
+#ifdef USE_SYCL
+    #define NONCES_PER_THREAD         16384
     #define DEFAULT_THREADS_PER_BLOCK 256
 #else
-    #define NONCES_PER_THREAD         16384  // 32768 16384 131072
-    #define DEFAULT_THREADS_PER_BLOCK 256
+    #ifdef USE_HIP
+        #define NONCES_PER_THREAD         8192
+        #define DEFAULT_THREADS_PER_BLOCK 256
+        #elseifdef USE_SYCL
+        #define NONCES_PER_THREAD         8192
+        #define DEFAULT_THREADS_PER_BLOCK 256
+    #else
+        #define NONCES_PER_THREAD         16384  // 32768 16384 131072
+        #define DEFAULT_THREADS_PER_BLOCK 256
+    #endif
 #endif
 
+#if defined(USE_CUDA) || defined(USE_HIP)
 extern __constant__ uint32_t d_base_message[8];
 extern __constant__ uint32_t d_pre_swapped_base[8];
+#endif
 
 struct alignas(256) MiningJob
 {
@@ -81,8 +84,11 @@ struct KernelConfig
     gpuStream_t stream;
 };
 
-// Device memory holder for mining job
-// Update in sha1_miner.cuh - replace the DeviceMiningJob struct with improved version
+/*struct alignas(64) DeviceMiningJob
+{
+    uint32_t base_message[8];  // Base message words
+    uint32_t target_hash[5];   // Target hash
+};*/
 
 struct DeviceMiningJob
 {
@@ -141,7 +147,7 @@ struct DeviceMiningJob
             } else if (err == hipErrorNoDevice) {
                 fprintf(stderr, "[DeviceMiningJob] No GPU device available\n");
             }
-#else
+#elif defined(USE_CUDA)
             if (err == cudaErrorMemoryAllocation) {
                 fprintf(stderr, "[DeviceMiningJob] Out of GPU memory\n");
             } else if (err == cudaErrorInvalidValue) {
@@ -151,6 +157,9 @@ struct DeviceMiningJob
             } else if (err == cudaErrorNoDevice) {
                 fprintf(stderr, "[DeviceMiningJob] No CUDA device available\n");
             }
+#elif defined(USE_SYCL)
+            // SYCL error handling - generic message for now
+            fprintf(stderr, "[DeviceMiningJob] SYCL allocation error\n");
 #endif
             return false;
         }
@@ -237,8 +246,6 @@ struct DeviceMiningJob
     }
 
     void updateFromHost(const MiningJob &job) const { copyFromHost(job); }
-
-    bool isAllocated() const { return target_hash != nullptr; }
 };
 
 // API functions - Host side

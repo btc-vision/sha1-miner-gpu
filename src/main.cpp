@@ -6,9 +6,14 @@
 #include "../logging/logger.hpp"
 #include "configs/config.hpp"
 #include "core/pool_mining.hpp"
-#include "core/solo_mining.hpp"
 #include "utils/platform_utils.hpp"
 #include "utils/test_utils.hpp"
+
+#ifdef USE_SYCL
+    #include <sycl/sycl.hpp>
+
+extern "C" bool initialize_sycl_wrappers(void);
+#endif
 
 void show_help_menu(const char *program_name)
 {
@@ -126,18 +131,36 @@ int main(const int argc, char *argv[])
     }
     LOG_INFO("MAIN", Color::GREEN, "SHA-1 implementation verified.", Color::RESET);
 
-    // Check GPU availability
+    // Check GPU availability directly
+#ifdef USE_SYCL
+    int device_count = 0;
+    try {
+        auto devices = sycl::device::get_devices(sycl::info::device_type::gpu);
+        device_count = static_cast<int>(devices.size());
+    } catch (const std::exception &e) {
+        std::cout << "DEBUG: Exception in direct call: " << e.what() << std::endl;
+        LOG_ERROR("MAIN", "SYCL device enumeration failed: %s", e.what());
+        device_count = 0;
+    }
+
+    if (device_count == 0) {
+        LOG_ERROR("MAIN", "No Intel/SYCL devices found!");
+        return 1;
+    }
+#else
+    // Check GPU availability using wrapper
     int device_count;
     gpuGetDeviceCount(&device_count);
 
     if (device_count == 0) {
-#ifdef USE_HIP
+    #ifdef USE_HIP
         LOG_ERROR("MAIN", "No AMD/HIP devices found!");
-#else
+    #else
         LOG_ERROR("MAIN", "No CUDA devices found!");
-#endif
+    #endif
         return 1;
     }
+#endif
 
     // Determine which GPUs to use
     const std::vector<int> gpu_ids_to_use = determine_gpu_ids(config, device_count);
@@ -163,5 +186,4 @@ int main(const int argc, char *argv[])
 
     // Default to solo mining
     return 0;
-    // return run_solo_mining(config, gpu_ids_to_use);
 }

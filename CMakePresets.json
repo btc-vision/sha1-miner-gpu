@@ -170,6 +170,44 @@
         "ROCM_PATH": "/opt/rocm",
         "HIP_PATH": "/opt/rocm/hip"
       }
+    },
+    {
+      "name": "linux-intel-release",
+      "displayName": "Linux Release (Intel OneAPI SYCL/DPC++ + Boost.Beast)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/intel-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "/opt/intel/oneapi/compiler/latest/bin/icx",
+        "CMAKE_CXX_COMPILER": "/opt/intel/oneapi/compiler/latest/bin/icpx",
+        "CMAKE_CXX_STANDARD": "20",
+        "USE_INTEL": "ON",
+        "INTEL_TARGET_ARCH": "intel64",
+        "INTEL_SYCL_FLAGS": "-fsycl -fsycl-targets=spir64,spir64_gen"
+      },
+      "environment": {
+        "ONEAPI_ROOT": "/opt/intel/oneapi",
+        "SYCL_DEVICE_FILTER": "level_zero:gpu"
+      }
+    },
+    {
+      "name": "linux-intel-debug",
+      "displayName": "Linux Debug (Intel OneAPI SYCL/DPC++ + Boost.Beast)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/intel-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "/opt/intel/oneapi/compiler/latest/bin/icx",
+        "CMAKE_CXX_COMPILER": "/opt/intel/oneapi/compiler/latest/bin/icpx",
+        "CMAKE_CXX_STANDARD": "20",
+        "USE_INTEL": "ON",
+        "INTEL_TARGET_ARCH": "intel64",
+        "INTEL_SYCL_FLAGS": "-fsycl -fsycl-targets=spir64,spir64_gen -g -O0"
+      },
+      "environment": {
+        "ONEAPI_ROOT": "/opt/intel/oneapi",
+        "SYCL_DEVICE_FILTER": "level_zero:gpu"
+      }
     }
   ],
   "buildPresets": [
@@ -240,6 +278,24 @@
       "targets": [
         "sha1_miner"
       ]
+    },
+    {
+      "name": "linux-intel-release",
+      "displayName": "Linux Intel OneAPI Release Build",
+      "configurePreset": "linux-intel-release",
+      "jobs": 12,
+      "targets": [
+        "sha1_miner"
+      ]
+    },
+    {
+      "name": "linux-intel-debug",
+      "displayName": "Linux Intel OneAPI Debug Build",
+      "configurePreset": "linux-intel-debug",
+      "jobs": 12,
+      "targets": [
+        "sha1_miner"
+      ]
     }
   ],
   "testPresets": [
@@ -255,6 +311,14 @@
       "name": "test-linux-release",
       "displayName": "Test Linux Release",
       "configurePreset": "linux-gcc-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-intel-release",
+      "displayName": "Test Intel OneAPI Release",
+      "configurePreset": "linux-intel-release",
       "output": {
         "outputOnFailure": true
       }
