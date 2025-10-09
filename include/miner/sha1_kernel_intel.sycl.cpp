@@ -697,6 +697,15 @@ extern "C" void launch_mining_kernel_intel(
         // Reset result count
         g_sycl_queue->memset(pool.count, 0, sizeof(uint32_t)).wait();
 
+        std::string target_hex_verify;
+        for (const unsigned int i : device_job.target_hash) {
+            char buf[9];
+            snprintf(buf, sizeof(buf), "%08x", i);
+            target_hex_verify += buf;
+        }
+
+        printf("Target pattern set to: %s\n", target_hex_verify.c_str());
+
         // Copy target_hash to device memory and wait for completion
         auto copy_event = g_sycl_queue->memcpy(d_target_hash_sycl, device_job.target_hash, 5 * sizeof(uint32_t));
         copy_event.wait();
