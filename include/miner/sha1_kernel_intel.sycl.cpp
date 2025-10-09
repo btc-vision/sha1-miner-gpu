@@ -712,12 +712,6 @@ extern "C" void launch_mining_kernel_intel(
             target_hex_verify += buf;
         }
 
-        printf("Target pattern in kernel: %s\n", target_hex_verify.c_str());
-        printf("Target pattern in kernel: %s\n", target_hex_verify.c_str());
-        printf("Target pattern in kernel: %s\n", target_hex_verify.c_str());
-        printf("Target pattern in kernel: %s\n", target_hex_verify.c_str());
-        printf("Target pattern in kernel: %s\n", target_hex_verify.c_str());
-
         // Launch kernel with all parameters including job_version
         sycl::event kernel_event = sha1_mining_kernel_intel(
             *g_sycl_queue,
