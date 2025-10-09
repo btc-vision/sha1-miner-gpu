@@ -46,10 +46,10 @@ struct alignas(16) MiningResult
 };
 
 // Device-side mining job structure
-struct alignas(64) DeviceMiningJob
+struct alignas(32) DeviceMiningJob
 {
-    uint32_t base_message[8];  // Base message words
-    uint32_t target_hash[5];   // Target hash
+    // uint32_t base_message[8];  // Base message words
+    uint32_t *target_hash;  // Target hash
 };
 
 // Configuration structure for kernel execution

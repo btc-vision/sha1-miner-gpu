@@ -695,11 +695,11 @@ extern "C" void launch_mining_kernel_intel(
         int total_threads = config.blocks * config.threads_per_block;
 
         // Reset result count
-        g_sycl_queue->memset(pool.count, 0, sizeof(uint32_t)).wait();
+        /*g_sycl_queue->memset(pool.count, 0, sizeof(uint32_t)).wait();
 
         // Copy target_hash to device memory (device-to-device copy)
         auto copy_event = g_sycl_queue->memcpy(d_target_hash_sycl, device_job.target_hash, 5 * sizeof(uint32_t));
-        copy_event.wait();
+        copy_event.wait();*/
 
         // Now copy back from device to verify what we actually have
         uint32_t host_target[5];
