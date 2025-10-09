@@ -135,17 +135,8 @@ int main(const int argc, char *argv[])
 #ifdef USE_SYCL
     int device_count = 0;
     try {
-        std::cout << "DEBUG: Testing direct SYCL enumeration in main.cpp..." << std::endl;
         auto devices = sycl::device::get_devices(sycl::info::device_type::gpu);
-        std::cout << "DEBUG: Direct call found " << devices.size() << " devices" << std::endl;
         device_count = static_cast<int>(devices.size());
-        if (device_count > 0) {
-            LOG_INFO("MAIN", "Found %d Intel/SYCL GPU device(s)", device_count);
-            for (size_t i = 0; i < devices.size(); ++i) {
-                auto name = devices[i].get_info<sycl::info::device::name>();
-                LOG_INFO("MAIN", "  GPU %zu: %s", i, name.c_str());
-            }
-        }
     } catch (const std::exception &e) {
         std::cout << "DEBUG: Exception in direct call: " << e.what() << std::endl;
         LOG_ERROR("MAIN", "SYCL device enumeration failed: %s", e.what());

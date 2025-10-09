@@ -1,10 +1,10 @@
 #include "mining_system.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
-#include <cstddef>
 
 #include "sha1_miner.cuh"
 
@@ -584,7 +584,7 @@ bool MiningSystem::initialize()
     }
 
     std::cout << "SYCL runtime initialized for Intel GPU mining\n";
-#endif
+#else
 
     // First, check if any GPU is available
     int device_count = 0;
@@ -605,6 +605,7 @@ bool MiningSystem::initialize()
                   << "\n";
         return false;
     }
+#endif
 
     // Reset any previous errors
     gpuGetLastError();
@@ -1105,10 +1106,11 @@ void MiningSystem::processResultsOptimized(int stream_idx)
     // DEBUG: Print raw memory after copy
     if (count > 0) {
         printf("DEBUG: Raw memory after copy (first result):\n");
-        uint8_t* raw_bytes = (uint8_t*)&results[0];
+        uint8_t *raw_bytes = (uint8_t *)&results[0];
         for (int i = 0; i < sizeof(MiningResult); i++) {
             printf("%02x ", raw_bytes[i]);
-            if ((i + 1) % 16 == 0) printf("\n");
+            if ((i + 1) % 16 == 0)
+                printf("\n");
         }
         printf("\nDEBUG: MiningResult size: %zu bytes\n", sizeof(MiningResult));
         printf("DEBUG: Offset of job_version: %zu\n", offsetof(MiningResult, job_version));

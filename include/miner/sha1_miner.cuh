@@ -86,9 +86,6 @@ struct KernelConfig
     gpuStream_t stream;
 };
 
-// Device memory holder for mining job
-// Update in sha1_miner.cuh - replace the DeviceMiningJob struct with improved version
-
 struct DeviceMiningJob
 {
     uint32_t *target_hash;
