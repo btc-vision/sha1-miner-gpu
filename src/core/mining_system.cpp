@@ -587,8 +587,8 @@ bool MiningSystem::initialize()
 #else
 
     // First, check if any GPU is available
-    int device_count = 0;
-    gpuError_t err_gpu_init   = gpuGetDeviceCount(&device_count);
+    int device_count        = 0;
+    gpuError_t err_gpu_init = gpuGetDeviceCount(&device_count);
     if (err_gpu_init != gpuSuccess) {
         std::cerr << "Failed to get GPU device count: " << gpuGetErrorString(err_gpu_init) << "\n";
         std::cerr << "Is the GPU driver installed and running?\n";
@@ -605,7 +605,6 @@ bool MiningSystem::initialize()
                   << "\n";
         return false;
     }
-#endif
 
     // Reset any previous errors
     gpuGetLastError();
@@ -615,21 +614,23 @@ bool MiningSystem::initialize()
     if (err != gpuSuccess) {
         std::cerr << "Failed to set GPU device " << config_.device_id << ": " << gpuGetErrorString(err) << "\n";
         // Try to provide more specific error information
-#ifdef USE_HIP
+    #ifdef USE_HIP
         if (err == hipErrorInvalidDevice) {
             std::cerr << "Device " << config_.device_id << " is not a valid HIP device\n";
         } else if (err == hipErrorNoDevice) {
             std::cerr << "No HIP devices available\n";
         }
-#else
+    #else
         if (err == cudaErrorInvalidDevice) {
             std::cerr << "Device " << config_.device_id << " is not a valid CUDA device\n";
         } else if (err == cudaErrorNoDevice) {
             std::cerr << "No CUDA devices available\n";
         }
-#endif
+    #endif
         return false;
     }
+
+#endif
 
     // Verify we can communicate with the device
     err = gpuDeviceSynchronize();
