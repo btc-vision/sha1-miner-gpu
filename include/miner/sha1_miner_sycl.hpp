@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "sha1_miner.cuh"
+
 #include "gpu_platform.hpp"
 
 // Only include OpenSSL for host code
@@ -25,49 +27,6 @@
     #define NONCES_PER_THREAD         16384
     #define DEFAULT_THREADS_PER_BLOCK 256
 #endif
-
-struct alignas(256) MiningJob
-{
-    uint8_t base_message[32];  // Base message to modify
-    uint32_t target_hash[5];   // Target hash we're trying to match
-    uint32_t difficulty;       // Number of bits that must match
-    uint64_t nonce_offset;     // Starting nonce for this job
-};
-
-// Result structure for found candidates
-struct alignas(16) MiningResult
-{
-    uint64_t nonce;
-    uint32_t hash[5];
-    uint32_t matching_bits;
-    uint32_t difficulty_score;
-    uint64_t job_version;
-    uint32_t padding[1];
-};
-
-// Device-side mining job structure
-struct alignas(64) DeviceMiningJob
-{
-    uint32_t base_message[8];  // Base message words
-    uint32_t target_hash[5];   // Target hash
-};
-
-// Configuration structure for kernel execution
-struct KernelConfig
-{
-    int blocks;
-    int threads_per_block;
-    int shared_memory_size;
-};
-
-// Result pool structure for managing mining results
-struct ResultPool
-{
-    MiningResult *results;  // Array of results
-    uint32_t *count;        // Count of results found
-    uint32_t capacity;      // Maximum results
-    uint64_t *job_version;  // Current job version (device memory)
-};
 
 // Platform abstraction interface
 class GPUMiner
