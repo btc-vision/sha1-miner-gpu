@@ -29,10 +29,13 @@ set "WARNING=[WARNING]"
 
 REM Default installation directory
 if "%~1"=="" (
-    set "INSTALL_DIR=%CD%"
+    set "INSTALL_DIR=%~dp0"
 ) else (
     set "INSTALL_DIR=%~1"
 )
+
+REM Ensure we're in the correct directory immediately
+cd /d "%INSTALL_DIR%"
 
 REM Header
 cls
