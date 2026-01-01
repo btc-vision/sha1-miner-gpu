@@ -37,8 +37,12 @@ void print_gpu_info(const std::vector<int> &gpu_ids_to_use)
     LOG_INFO("MAIN", "\nGPU Information:");
     LOG_INFO("MAIN", "=====================================");
     for (int id : gpu_ids_to_use) {
-        gpuDeviceProp props;
-        gpuGetDeviceProperties(&props, id);
+        gpuDeviceProp props{};  // Zero-initialize
+        gpuError_t err = gpuGetDeviceProperties(&props, id);
+        if (err != gpuSuccess) {
+            LOG_ERROR("MAIN", "  GPU ", id, ": Failed to get properties: ", gpuGetErrorString(err));
+            continue;
+        }
         LOG_INFO("MAIN", "  GPU ", id, ": ", Color::BRIGHT_CYAN, props.name, Color::RESET);
         LOG_INFO("MAIN", "    Compute capability: ", props.major, ".", props.minor);
         LOG_INFO("MAIN", "    Memory: ", std::fixed, std::setprecision(2),
