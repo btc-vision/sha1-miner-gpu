@@ -20,17 +20,12 @@
 #ifdef USE_SYCL
     #define NONCES_PER_THREAD         16384
     #define DEFAULT_THREADS_PER_BLOCK 256
+#elif defined(USE_HIP)
+    #define NONCES_PER_THREAD         8192
+    #define DEFAULT_THREADS_PER_BLOCK 256
 #else
-    #ifdef USE_HIP
-        #define NONCES_PER_THREAD         8192
-        #define DEFAULT_THREADS_PER_BLOCK 256
-        #elseifdef USE_SYCL
-        #define NONCES_PER_THREAD         8192
-        #define DEFAULT_THREADS_PER_BLOCK 256
-    #else
-        #define NONCES_PER_THREAD         16384  // 32768 16384 131072
-        #define DEFAULT_THREADS_PER_BLOCK 256
-    #endif
+    #define NONCES_PER_THREAD         16384
+    #define DEFAULT_THREADS_PER_BLOCK 256
 #endif
 
 #if defined(USE_CUDA) || defined(USE_HIP)

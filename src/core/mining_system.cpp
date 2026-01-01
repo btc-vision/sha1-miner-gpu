@@ -616,7 +616,7 @@ bool MiningSystem::initialize()
                   << "\n";
         // Try to provide more specific error information
     #ifdef USE_HIP
-        if (err == hipErrorInvalidDevice) {
+        if (err_gpu_init == hipErrorInvalidDevice) {
             std::cerr << "Device " << config_.device_id << " is not a valid HIP device\n";
         } else if (err == hipErrorNoDevice) {
             std::cerr << "No HIP devices available\n";
