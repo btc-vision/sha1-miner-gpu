@@ -28,14 +28,31 @@ extern "C" void update_base_message_cuda(const uint32_t *base_msg_words)
     for (int j = 0; j < 8; j++) {
         pre_swapped[j] = bswap32_cpu(base_msg_words[j]);
     }
-    cudaError_t err = cudaMemcpyToSymbol(d_pre_swapped_base, pre_swapped, sizeof(pre_swapped));
+
+    // Use cudaGetSymbolAddress instead of cudaMemcpyToSymbol
+    void *d_pre_swapped_ptr = nullptr;
+    void *d_base_ptr = nullptr;
+
+    cudaError_t err = cudaGetSymbolAddress(&d_pre_swapped_ptr, d_pre_swapped_base);
     if (err != cudaSuccess) {
-        fprintf(stderr, "Failed to copy pre-swapped base message to constant memory: %s\n", cudaGetErrorString(err));
+        fprintf(stderr, "Failed to get d_pre_swapped_base address: %s\n", cudaGetErrorString(err));
+        return;
     }
 
-    err = cudaMemcpyToSymbol(d_base_message, base_msg_words, 32);
+    err = cudaGetSymbolAddress(&d_base_ptr, d_base_message);
     if (err != cudaSuccess) {
-        fprintf(stderr, "Failed to copy base message to constant memory: %s\n", cudaGetErrorString(err));
+        fprintf(stderr, "Failed to get d_base_message address: %s\n", cudaGetErrorString(err));
+        return;
+    }
+
+    err = cudaMemcpy(d_pre_swapped_ptr, pre_swapped, sizeof(pre_swapped), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "Failed to copy pre-swapped base message: %s\n", cudaGetErrorString(err));
+    }
+
+    err = cudaMemcpy(d_base_ptr, base_msg_words, 32, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "Failed to copy base message: %s\n", cudaGetErrorString(err));
     }
 }
 
