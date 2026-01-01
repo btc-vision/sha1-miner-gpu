@@ -512,7 +512,7 @@ else ()
             set(CMAKE_CUDA_ARCHITECTURES "52;60;61;70;75;80;86")
         elseif (CUDAToolkit_VERSION VERSION_LESS "12.0")
             set(CMAKE_CUDA_ARCHITECTURES "52;60;61;70;75;80;86;89;90")
-        else ()
+        elseif (CUDAToolkit_VERSION VERSION_LESS "13.0")
             # CUDA 12.0+ dropped support for sm_50 and sm_52
             set(CMAKE_CUDA_ARCHITECTURES "60;61;70;75;80;86;89;90")
 
@@ -523,6 +523,9 @@ else ()
             if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
                 list(APPEND CMAKE_CUDA_ARCHITECTURES "120")
             endif ()
+        else ()
+            # CUDA 13.0+ dropped support for sm_60, sm_61, sm_70
+            set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90;90a;120")
         endif ()
 
         message(STATUS "Auto-selected CUDA architectures based on CUDA ${CUDAToolkit_VERSION}: ${CMAKE_CUDA_ARCHITECTURES}")
